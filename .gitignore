@@ -1,0 +1,37 @@
+# IDE and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.pyright/
+**/coverage.xml
+**/.coverage
+**/htmlcov/
+
+# Node.js
+**/node_modules/
+**/dist/
+**/coverage/
+**/playwright-report/
+**/test-results/
+
+# Local service data and generated clients
+.local/
+infra/compose/data/
+frontend/src/api/generated/*
+!frontend/src/api/generated/.gitkeep

@@ -1,0 +1,27 @@
+default_install_hook_types: [pre-commit, pre-push]
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff
+        entry: uv run --project backend ruff check --fix
+        language: system
+        files: ^backend/.*\.py$
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --project backend ruff format
+        language: system
+        files: ^backend/.*\.py$
+      - id: prettier
+        name: prettier
+        entry: node frontend/node_modules/prettier/bin/prettier.cjs --write
+        language: system
+        files: ^frontend/.*\.(css|json|ts|vue)$
+        pass_filenames: true

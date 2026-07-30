@@ -1,0 +1,41 @@
+{
+  "total": 1,
+  "offset": 0,
+  "data": [
+    {
+      "paperId": "semantic-paper-123",
+      "title": "A semantic scholar record for academic writing",
+      "abstract": "A structured abstract returned by Semantic Scholar.",
+      "authors": [
+        {
+          "authorId": "author-123",
+          "name": "Ada Lovelace"
+        }
+      ],
+      "year": 2022,
+      "publicationDate": "2022-06-15",
+      "externalIds": {
+        "DOI": "10.1000/semantic.example"
+      },
+      "venue": "Semantic Research Journal",
+      "journal": {
+        "name": "Semantic Research Journal",
+        "volume": "8",
+        "issue": "2",
+        "pages": "33-49"
+      },
+      "publicationVenue": {
+        "name": "Semantic Research Journal"
+      },
+      "citationCount": 18,
+      "openAccessPdf": {
+        "url": "https://repository.example.org/semantic-paper.pdf",
+        "status": "GREEN"
+      },
+      "url": "https://www.semanticscholar.org/paper/semantic-paper-123",
+      "publicationTypes": [
+        "JournalArticle"
+      ]
+    }
+  ]
+}

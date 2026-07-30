@@ -1,0 +1,62 @@
+{
+  "meta": {
+    "next_cursor": null
+  },
+  "results": [
+    {
+      "id": "https://openalex.org/W1234567890",
+      "display_name": "Large language models for academic writing support",
+      "doi": "https://doi.org/10.1000/example.1",
+      "publication_year": 2024,
+      "publication_date": "2024-05-01",
+      "type": "article",
+      "authorships": [
+        {
+          "author": {
+            "id": "https://openalex.org/A111",
+            "display_name": "Ada Lovelace"
+          }
+        },
+        {
+          "author": {
+            "id": "https://openalex.org/A222",
+            "display_name": "Alan Turing"
+          }
+        }
+      ],
+      "abstract_inverted_index": {
+        "support": [3],
+        "Large": [0],
+        "academic": [4],
+        "language": [1],
+        "models": [2],
+        "writing": [5]
+      },
+      "cited_by_count": 12,
+      "biblio": {
+        "volume": "12",
+        "issue": "3",
+        "first_page": "101",
+        "last_page": "115"
+      },
+      "primary_location": {
+        "landing_page_url": "https://publisher.example.org/article/1",
+        "source": {
+          "display_name": "Journal of Academic AI"
+        }
+      },
+      "open_access": {
+        "is_oa": true,
+        "oa_url": "https://repository.example.org/article/1"
+      },
+      "best_oa_location": {
+        "pdf_url": "https://repository.example.org/article/1.pdf"
+      }
+    },
+    {
+      "id": "https://openalex.org/W0000000000",
+      "display_name": "   ",
+      "publication_year": 2024
+    }
+  ]
+}

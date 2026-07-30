@@ -1,0 +1,44 @@
+etcd:
+  endpoints: etcd:2379
+  rootPath: academic-search-dev
+
+minio:
+  address: minio:9000
+  accessKeyID: minioadmin
+  secretAccessKey: minioadmin
+  useSSL: false
+  bucketName: milvus-data
+  rootPath: files
+
+localStorage:
+  path: /var/lib/milvus/data/
+
+# The image's full default configuration assigns distinct ports to each
+# in-process standalone component. Keep those defaults when using this compact
+# storage override file.
+rootCoord:
+  port: 53100
+
+proxy:
+  port: 19530
+
+queryCoord:
+  port: 19531
+
+queryNode:
+  port: 21123
+
+indexNode:
+  port: 21121
+
+dataCoord:
+  port: 13333
+
+dataNode:
+  port: 21124
+
+mq:
+  type: rocksmq
+
+rocksmq:
+  path: /var/lib/milvus/rdb_data

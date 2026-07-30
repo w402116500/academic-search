@@ -1,0 +1,24 @@
+{
+  "id": "https://doi.org/10.1000/crossref.example",
+  "type": "article-journal",
+  "title": "Evidence for AI-supported academic writing",
+  "author": [
+    {
+      "given": "Ada",
+      "family": "Lovelace"
+    }
+  ],
+  "issued": {
+    "date-parts": [
+      [2024, 5, 1]
+    ]
+  },
+  "container-title": "Journal of Research Methods",
+  "volume": "12",
+  "issue": "3",
+  "page": "101-115",
+  "article-number": "e102274",
+  "publisher": "Academic Press",
+  "DOI": "10.1000/crossref.example",
+  "URL": "https://doi.org/10.1000/crossref.example"
+}

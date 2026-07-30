@@ -1,0 +1,42 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message": {
+    "items": [
+      {
+        "DOI": "10.1000/crossref.example",
+        "title": [
+          "Evidence for AI-supported academic writing"
+        ],
+        "author": [
+          {
+            "given": "Ada",
+            "family": "Lovelace",
+            "ORCID": "https://orcid.org/0000-0001-2345-6789"
+          }
+        ],
+        "abstract": "<jats:p>Evidence <b>from</b> a controlled study.</jats:p>",
+        "published-online": {
+          "date-parts": [[2024, 5, 1]]
+        },
+        "container-title": [
+          "Journal of Research Methods"
+        ],
+        "type": "journal-article",
+        "volume": "12",
+        "issue": "3",
+        "page": "101-115",
+        "article-number": "e102274",
+        "publisher": "Academic Press",
+        "is-referenced-by-count": 42,
+        "URL": "https://doi.org/10.1000/crossref.example",
+        "link": [
+          {
+            "URL": "https://publisher.example.org/article.pdf",
+            "content-type": "application/pdf"
+          }
+        ]
+      }
+    ]
+  }
+}
