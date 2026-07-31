@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Academic Search - 文献筛选</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app app-shell">
+      <aside class="global-rail" aria-label="工作区导航">
+        <a class="brand" href="01-research-entry.html"><span class="brand-mark">AS</span><span>Academic Search</span></a>
+        <span class="rail-section-label">工作区</span>
+        <nav class="workspace-nav">
+          <a class="workspace-nav-item active" href="03-literature-results.html"><i data-lucide="book-open-check"></i><span><span class="workspace-nav-title">睡眠与心理健康</span><span class="workspace-nav-meta">候选文献核验中</span></span><span class="workspace-nav-state">当前</span></a>
+          <a class="workspace-nav-item" href="04-research-workspace.html"><i data-lucide="trees"></i><span><span class="workspace-nav-title">绿地可达性与心理健康</span><span class="workspace-nav-meta">证据研究可用</span></span></a>
+          <a class="workspace-nav-item" href="02-intent-confirm.html"><i data-lucide="file-pen-line"></i><span><span class="workspace-nav-title">社区协同设计与信任</span><span class="workspace-nav-meta">等待确认研究计划</span></span></a>
+        </nav>
+        <a class="button rail-create" href="01-research-entry.html"><i data-lucide="plus"></i><span>新建工作区</span></a>
+        <div class="rail-footer"><span class="mono">当前任务</span><p>候选文献完成集合确认后，证据研究阶段才会解锁。</p><button class="rail-toggle" data-rail-toggle data-rail-state="expanded" type="button" aria-expanded="true" aria-label="收起左侧栏" title="收起左侧栏"><span class="rail-toggle-icon rail-toggle-collapse"><i data-lucide="panel-left-close"></i></span><span class="rail-toggle-icon rail-toggle-expand"><i data-lucide="panel-left-open"></i></span><span class="sr-only">切换左侧栏</span></button></div>
+      </aside>
+
+      <div class="content-shell">
+        <header class="app-header"><a class="workspace-switcher" href="01-research-entry.html"><i data-lucide="chevron-left"></i><span>睡眠与心理健康</span></a><div class="header-actions"><button class="button" data-show-processing type="button"><i data-lucide="activity"></i>查看处理记录</button><button class="icon-button" data-tooltip="账户设置" type="button" aria-label="账户设置"><i data-lucide="circle-user-round"></i></button></div></header>
+        <main class="stage-page">
+          <nav class="stage-rail" aria-label="研究阶段">
+            <a class="stage-link complete" href="02-intent-confirm.html"><span class="stage-glyph"><i data-lucide="check"></i></span><span class="stage-copy"><span class="stage-name">任务解析</span><span class="stage-detail">已确认</span></span></a>
+            <span class="stage-connector complete"></span>
+            <div class="stage-node current"><span class="stage-glyph"><i data-lucide="list-filter"></i></span><span class="stage-copy"><span class="stage-name">文献筛选</span><span class="stage-detail">当前可操作</span></span></div>
+            <span class="stage-connector"></span>
+            <div class="stage-node locked" aria-disabled="true"><span class="stage-glyph"><i data-lucide="notebook-tabs"></i></span><span class="stage-copy"><span class="stage-name">证据研究</span><span class="stage-detail">集合完成后</span></span></div>
+          </nav>
+
+          <div class="stage-heading"><span class="eyebrow">当前动作</span><h1>把候选记录收敛成可研究的文献集合。</h1><p>系统正在完成多源结果规整、重复合并、题录核验和全文获取。你可以审核记录，也可以继续等待后台处理。</p><div class="workspace-subline"><i data-lucide="folder-kanban"></i><span>睡眠质量与大学生心理健康的关系</span></div></div>
+
+          <div class="discovery-layout">
+            <main class="discovery-main">
+              <div class="processing-ledger" aria-label="文献处理状态">
+                <div class="process-item"><strong>多源检索</strong><span>4 个来源已返回</span></div>
+                <div class="process-item"><strong>记录规整</strong><span>42 条合并为 26 条</span></div>
+                <div class="process-item current"><strong>题录与全文</strong><span>8 条可直接入集合</span></div>
+                <div class="process-item"><strong>向量索引</strong><span>完成集合后开始</span></div>
+              </div>
+              <div class="processing-detail" data-processing-detail><div><strong>OpenAlex</strong><br />12 条元数据完成核验</div><div><strong>Crossref</strong><br />9 条 DOI 记录已合并</div><div><strong>Semantic Scholar</strong><br />8 条关联结果已规整</div><div><strong>arXiv</strong><br />全文链接正在复核</div></div>
+
+              <div class="discovery-toolbar"><div><span class="eyebrow">候选文献</span><h2>26 篇待审核记录</h2><p class="prototype-data-note">以下题录为原型演示数据，用于说明审核流程。</p></div><div class="header-actions"><button class="button" data-show-processing type="button"><i data-lucide="sliders-horizontal"></i><span>处理明细</span></button><button class="button primary" data-collection-confirm type="button"><i data-lucide="layers-2"></i><span>确认 8 篇入集合</span></button></div></div>
+              <div class="filter-row" aria-label="候选文献筛选"><button class="filter-button active" data-filter="all" type="button">全部 26</button><button class="filter-button" data-filter="verified" type="button">全文可用 8</button><button class="filter-button" data-filter="open" type="button">开放获取 15</button><button class="filter-button" data-filter="empirical" type="button">实证研究 17</button></div>
+
+              <div class="papers-table-wrap"><table class="papers-table"><colgroup><col style="width: 34%" /><col style="width: 18%" /><col style="width: 14%" /><col style="width: 8%" /><col style="width: 16%" /><col style="width: 10%" /></colgroup><thead><tr><th>论文题名</th><th>作者与年份</th><th>来源</th><th>匹配</th><th>入库条件</th><th aria-label="操作"></th></tr></thead><tbody>
+                <tr class="selected" data-paper="1" data-paper-title="Sleep quality and depressive symptoms among university students: A longitudinal study" data-paper-meta="Chen Y, Wu M · 2024 · Journal of American College Health" data-paper-source="OpenAlex + Crossref" data-paper-state="题录已核验，全文可用"><td><div class="paper-name">Sleep quality and depressive symptoms among university students: A longitudinal study</div><div class="paper-meta">纵向实证研究 · 英文</div></td><td>Chen Y, Wu M<br /><span class="paper-meta">2024</span></td><td class="paper-source"><strong>Journal of American College Health</strong>OpenAlex</td><td><span class="relevance">96</span></td><td><span class="record-state ready"><i data-lucide="badge-check"></i>可入集合</span></td><td><div class="row-actions"><button class="icon-button" data-copy="Chen Y, Wu M. Sleep quality and depressive symptoms among university students: A longitudinal study[J]. Journal of American College Health, 2024." data-tooltip="复制题录" type="button" aria-label="复制题录"><i data-lucide="copy"></i></button><button class="icon-button" data-tooltip="查看记录" type="button" aria-label="查看记录"><i data-lucide="panel-right-open"></i></button></div></td></tr>
+                <tr data-paper="2" data-paper-title="Sleep duration, sleep quality, and anxiety symptoms in college students" data-paper-meta="Liu J, Park S · 2023 · Sleep Health" data-paper-source="Semantic Scholar" data-paper-state="题录已核验，全文正在处理"><td><div class="paper-name">Sleep duration, sleep quality, and anxiety symptoms in college students</div><div class="paper-meta">横断面关联研究 · 英文</div></td><td>Liu J, Park S<br /><span class="paper-meta">2023</span></td><td class="paper-source"><strong>Sleep Health</strong>Semantic Scholar</td><td><span class="relevance">91</span></td><td><span class="record-state waiting"><i data-lucide="file-cog"></i>全文处理中</span></td><td><div class="row-actions"><button class="icon-button" data-copy="Liu J, Park S. Sleep duration, sleep quality, and anxiety symptoms in college students[J]. Sleep Health, 2023." data-tooltip="复制题录" type="button" aria-label="复制题录"><i data-lucide="copy"></i></button><button class="icon-button" data-tooltip="查看记录" type="button" aria-label="查看记录"><i data-lucide="panel-right-open"></i></button></div></td></tr>
+                <tr data-paper="3" data-paper-title="Social media use, sleep disturbance, and psychological distress among undergraduates" data-paper-meta="Zhang L et al. · 2022 · BMC Public Health" data-paper-source="OpenAlex" data-paper-state="题录已核验，暂未找到可处理全文"><td><div class="paper-name">Social media use, sleep disturbance, and psychological distress among undergraduates</div><div class="paper-meta">生活方式因素 · 英文</div></td><td>Zhang L et al.<br /><span class="paper-meta">2022</span></td><td class="paper-source"><strong>BMC Public Health</strong>OpenAlex</td><td><span class="relevance neutral">83</span></td><td><span class="record-state waiting"><i data-lucide="file-x-2"></i>待补全文</span></td><td><div class="row-actions"><button class="icon-button" data-copy="Zhang L, et al. Social media use, sleep disturbance, and psychological distress among undergraduates[J]. BMC Public Health, 2022." data-tooltip="复制题录" type="button" aria-label="复制题录"><i data-lucide="copy"></i></button><button class="icon-button" data-tooltip="查看记录" type="button" aria-label="查看记录"><i data-lucide="panel-right-open"></i></button></div></td></tr>
+                <tr data-paper="4" data-paper-title="睡眠质量与大学生抑郁、焦虑症状的关联" data-paper-meta="李晨, 王悦 · 2024 · 中国学校卫生" data-paper-source="Crossref" data-paper-state="题录仍在补全，暂不能入集合"><td><div class="paper-name">睡眠质量与大学生抑郁、焦虑症状的关联</div><div class="paper-meta">心理健康流行病学 · 中文</div></td><td>李晨, 王悦<br /><span class="paper-meta">2024</span></td><td class="paper-source"><strong>中国学校卫生</strong>Crossref</td><td><span class="relevance neutral">79</span></td><td><span class="record-state waiting"><i data-lucide="circle-dashed"></i>题录补全中</span></td><td><div class="row-actions"><button class="icon-button" disabled data-tooltip="题录未完成" type="button" aria-label="题录未完成"><i data-lucide="copy"></i></button><button class="icon-button" data-tooltip="查看记录" type="button" aria-label="查看记录"><i data-lucide="panel-right-open"></i></button></div></td></tr>
+              </tbody></table></div>
+            </main>
+
+            <aside class="selection-inspector" aria-label="候选文献检查器"><div class="inspector-head"><strong>候选文献检查器</strong><button class="icon-button" data-tooltip="固定检查器" type="button" aria-label="固定检查器"><i data-lucide="pin"></i></button></div><div class="inspector-body"><span class="eyebrow">当前选择</span><h2 class="inspector-title" data-inspector-title>Sleep quality and depressive symptoms among university students: A longitudinal study</h2><p class="inspector-meta" data-inspector-meta>Chen Y, Wu M · 2024 · Journal of American College Health<br />来源：OpenAlex + Crossref</p><section class="inspector-section"><h3>为什么在这里</h3><p data-inspector-state>题录已核验，全文可用。它直接考察睡眠质量与抑郁症状的关联，可作为当前研究集合的核心证据。</p></section><section class="inspector-section"><h3>处理记录</h3><div class="provenance-list"><div><span>身份确认</span><strong>DOI 已匹配</strong></div><div><span>全文获取</span><strong>PDF 可处理</strong></div><div><span>内容解析</span><strong>48 个片段</strong></div><div><span>向量索引</span><strong>确认集合后开始</strong></div></div></section><div class="collection-callout"><strong>研究集合 8 / 8</strong><p>当前已有 8 篇文献满足 DOI、全文和解析条件。确认后进入证据研究。</p><button class="button primary" data-collection-confirm type="button">确认并构建集合<i data-lucide="arrow-right"></i></button></div></div></aside>
+          </div>
+
+          <section class="collection-confirm-panel" data-collection-confirm-panel role="dialog" aria-modal="true" aria-labelledby="collection-confirm-title" hidden>
+            <div class="collection-confirm-surface">
+              <span class="eyebrow">确认研究集合</span>
+              <h2 id="collection-confirm-title">构建这 8 篇文献的可问答集合？</h2>
+              <p>系统将依次解析全文、切分可引用片段并写入当前工作区的向量索引。集合构建完成前，研究对话不会使用这些文献。</p>
+              <dl class="collection-confirm-summary"><div><dt>纳入数量</dt><dd>8 篇全文</dd></div><div><dt>固定条件</dt><dd>DOI、题录、全文均已核验</dd></div></dl>
+              <div class="collection-confirm-actions"><button class="button" data-collection-confirm-cancel type="button">返回审核</button><button class="button primary" data-collection-confirm-submit type="button">确认并开始构建<i data-lucide="arrow-right"></i></button></div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <div class="toast" role="status" aria-live="polite"></div>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>lucide.createIcons();</script>
+    <script src="prototype.js"></script>
+  </body>
+</html>

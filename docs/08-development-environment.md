@@ -1,6 +1,6 @@
 # academic-search 开发环境
 
-状态：已配置。此环境用于本地开发和面试演示；已包含最小 FastAPI 启动壳和 RAG 入库 Worker，尚未包含业务 API、检索与 Agent。
+状态：已配置。此环境用于本地开发和面试演示；已包含认证、工作区、研究计划 API，以及意图分析和 RAG 入库 Worker。多源检索与研究 Agent 尚未实现。
 
 ## 1. 运行模型
 
@@ -46,15 +46,25 @@ uv run pre-commit install
 uv run --directory backend uvicorn app.main:app --reload
 ```
 
-访问 `http://127.0.0.1:8000/docs` 可查看 OpenAPI 文档；`GET /healthz` 仅用于确认 API 进程存活，不检查外部服务。
-
-另开一个终端启动 RAG 文献入库 Worker：
+首次使用账号和研究工作区 API 前，还需要在项目根目录 `.env` 设置
+`AUTH_JWT_SECRET_KEY`。它必须至少包含 32 个随机字符，可用下列命令生成：
 
 ```powershell
+uv run --directory backend python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+访问 `http://127.0.0.1:8000/docs` 可查看 OpenAPI 文档；`GET /healthz` 仅用于确认 API 进程存活，不检查外部服务。
+
+另开两个终端分别启动研究意图分析和 RAG 文献入库 Worker：
+
+```powershell
+uv run --directory backend arq app.workers.workflow.WorkerSettings
 uv run --directory backend arq app.workers.ingestion.WorkerSettings
 ```
 
-Worker 会从 `REDIS_URL` 连接 arq 队列，并在首次实际任务中访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。启动 Worker 不会自动读取或向量化任何文献；自动投递入口将在后续 API 实现。
+两个 Worker 都会从 `REDIS_URL` 连接 arq 队列。意图分析 Worker 在用户调用 `POST /api/v1/collections/research` 后访问 OpenAI 兼容 Chat 模型，返回经过 Pydantic 校验的 2-3 个研究方向和方向对应检索表达式；它不会自动开始文献检索。入库 Worker 在后续全文准入任务投递后，访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。
+
+意图分析模型使用 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_CHAT_MODEL` 和可选的 `WORKFLOW_INTENT_TIMEOUT_SECONDS`。模型输出不符合计划结构时，工作区会进入 `failed`，用户可修改原始要求并调用重新生成接口；系统不会把自由文本直接作为检索词执行。
 
 本地 Docker Redis 仅映射 IPv4 时，推荐使用 `REDIS_URL=redis://127.0.0.1:6379/0`。Worker 会兼容旧的 `localhost` 配置并自动转为该 IPv4 地址；远程 Redis 地址保持原样。
 

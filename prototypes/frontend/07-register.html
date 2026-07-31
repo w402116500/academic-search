@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Academic Search - 注册</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app auth-app">
+      <header class="auth-header">
+        <a class="brand" href="01-research-entry.html" aria-label="Academic Search 首页"><span class="brand-mark">AS</span><span>Academic Search</span></a>
+        <a href="06-login.html">登录</a>
+      </header>
+
+      <main class="auth-main">
+        <section class="auth-surface" aria-labelledby="register-title">
+          <span class="eyebrow">创建账号</span>
+          <h1 id="register-title">开始建立你的研究空间。</h1>
+          <p>创建账号后，研究任务、文献集合和证据记录都会保留在你的工作区中。</p>
+          <form class="auth-form" data-register-form>
+            <div class="auth-field"><label for="register-name">昵称</label><input id="register-name" name="name" type="text" autocomplete="nickname" required maxlength="30" placeholder="例如：林岚" /></div>
+            <div class="auth-field"><label for="register-email">邮箱</label><input id="register-email" name="email" type="email" autocomplete="email" required placeholder="name@example.com" /></div>
+            <div class="auth-field"><label for="register-password">密码</label><input id="register-password" name="password" type="password" autocomplete="new-password" required minlength="8" placeholder="至少 8 个字符" /></div>
+            <div class="auth-field"><label for="register-password-confirm">确认密码</label><input id="register-password-confirm" name="password-confirm" type="password" autocomplete="new-password" required minlength="8" placeholder="再次输入密码" /></div>
+            <p class="auth-error" data-auth-error role="alert" hidden></p>
+            <button class="button primary" type="submit">创建账号<i data-lucide="arrow-right"></i></button>
+          </form>
+          <p class="auth-switch">已有账号？<a href="06-login.html">前往登录</a></p>
+        </section>
+      </main>
+    </div>
+    <div class="toast" role="status" aria-live="polite"></div>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>lucide.createIcons();</script>
+    <script src="prototype.js"></script>
+  </body>
+</html>

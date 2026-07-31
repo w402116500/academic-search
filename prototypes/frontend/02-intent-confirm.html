@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Academic Search - 任务解析</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app app-shell">
+      <aside class="global-rail" aria-label="工作区导航">
+        <a class="brand" href="01-research-entry.html"><span class="brand-mark">AS</span><span>Academic Search</span></a>
+        <span class="rail-section-label">工作区</span>
+        <nav class="workspace-nav">
+          <a class="workspace-nav-item" href="03-literature-results.html"><i data-lucide="book-open-check"></i><span><span class="workspace-nav-title">AI 反馈与学术写作</span><span class="workspace-nav-meta">候选文献核验中</span></span></a>
+          <a class="workspace-nav-item" href="04-research-workspace.html"><i data-lucide="trees"></i><span><span class="workspace-nav-title">绿地可达性与心理健康</span><span class="workspace-nav-meta">证据研究可用</span></span></a>
+          <a class="workspace-nav-item active" href="02-intent-confirm.html"><i data-lucide="file-pen-line"></i><span><span class="workspace-nav-title">社区协同设计与信任</span><span class="workspace-nav-meta">等待确认研究计划</span></span><span class="workspace-nav-state">当前</span></a>
+        </nav>
+        <a class="button rail-create" href="01-research-entry.html"><i data-lucide="plus"></i><span>新建工作区</span></a>
+        <div class="rail-footer"><span class="mono">当前任务</span><p>确认解析后，系统才会为这个工作区创建检索与文献处理任务。</p><button class="rail-toggle" data-rail-toggle data-rail-state="expanded" type="button" aria-expanded="true" aria-label="收起左侧栏" title="收起左侧栏"><span class="rail-toggle-icon rail-toggle-collapse"><i data-lucide="panel-left-close"></i></span><span class="rail-toggle-icon rail-toggle-expand"><i data-lucide="panel-left-open"></i></span><span class="sr-only">切换左侧栏</span></button></div>
+      </aside>
+
+      <div class="content-shell">
+        <header class="app-header"><a class="workspace-switcher" href="01-research-entry.html"><i data-lucide="chevron-left"></i><span>社区协同设计与信任</span></a><div class="header-actions"><button class="button" type="button"><i data-lucide="rotate-ccw"></i>修改问题</button><button class="icon-button" data-tooltip="账户设置" type="button" aria-label="账户设置"><i data-lucide="circle-user-round"></i></button></div></header>
+        <main class="stage-page">
+          <nav class="stage-rail" aria-label="研究阶段">
+            <div class="stage-node current"><span class="stage-glyph"><i data-lucide="scan-search"></i></span><span class="stage-copy"><span class="stage-name">任务解析</span><span class="stage-detail">等待确认</span></span></div>
+            <span class="stage-connector"></span>
+            <div class="stage-node locked" aria-disabled="true"><span class="stage-glyph"><i data-lucide="list-filter"></i></span><span class="stage-copy"><span class="stage-name">文献筛选</span><span class="stage-detail">确认后开始</span></span></div>
+            <span class="stage-connector"></span>
+            <div class="stage-node locked" aria-disabled="true"><span class="stage-glyph"><i data-lucide="notebook-tabs"></i></span><span class="stage-copy"><span class="stage-name">证据研究</span><span class="stage-detail">研究集合就绪后</span></span></div>
+          </nav>
+
+          <div class="stage-heading"><span class="eyebrow">当前动作</span><h1>确认这个工作区的研究边界。</h1><p>字段会成为检索词、文献准入规则和全文处理范围。点击字段右上角的编辑按钮可在原型中查看可修改状态。</p><div class="workspace-subline"><i data-lucide="folder-kanban"></i><span>社区协同设计如何影响公共项目的信任</span></div></div>
+
+          <div class="intent-layout">
+            <section class="analysis-surface">
+              <div class="question-anchor"><span class="mono">研究问题</span><p>社区协同设计如何影响公共项目的信任？不同参与深度和反馈机制是否带来不同结果？</p></div>
+              <div class="field-grid">
+                <div class="field-cell"><span class="field-name">研究对象</span><div class="field-value">公共项目参与者</div><div class="field-note">社区居民与利益相关者</div><button class="field-edit" data-edit-spec type="button" aria-label="编辑研究对象"><i data-lucide="pencil"></i></button></div>
+                <div class="field-cell"><span class="field-name">核心因素</span><div class="field-value">协同设计参与</div><div class="field-note">共创、反馈与决策参与</div><button class="field-edit" data-edit-spec type="button" aria-label="编辑核心因素"><i data-lucide="pencil"></i></button></div>
+                <div class="field-cell"><span class="field-name">结果变量</span><div class="field-value">公共项目信任</div><div class="field-note">信任、接受度与持续参与</div><button class="field-edit" data-edit-spec type="button" aria-label="编辑结果变量"><i data-lucide="pencil"></i></button></div>
+                <div class="field-cell"><span class="field-name">比较关系</span><div class="field-value">参与深度与反馈机制</div><div class="field-note">咨询、共创、共同决策</div><button class="field-edit" data-edit-spec type="button" aria-label="编辑比较关系"><i data-lucide="pencil"></i></button></div>
+                <div class="field-cell"><span class="field-name">文献准入</span><div class="field-value">DOI 与可处理全文</div><div class="field-note">优先实证研究和案例研究</div><button class="field-edit" data-edit-spec type="button" aria-label="编辑文献准入"><i data-lucide="pencil"></i></button></div>
+                <div class="field-cell"><span class="field-name">检索范围</span><div class="field-value">中文与英文</div><div class="field-note">2018 年至今</div><button class="field-edit" data-edit-spec type="button" aria-label="编辑检索范围"><i data-lucide="pencil"></i></button></div>
+              </div>
+              <div class="intent-footer"><p>确认后，系统会为当前工作区启动多源检索，并在候选文献可审核时自动推进到下一阶段。</p><button class="button primary" data-stage-advance="03-literature-results.html?workspace=community" type="button">确认并启动检索<i data-lucide="arrow-right"></i></button></div>
+            </section>
+
+            <aside class="plan-panel"><span class="eyebrow">准备创建的任务</span><h2>检索计划预览</h2><p>这不是独立的“搜索页面”。它是当前工作区进入文献筛选阶段所需的后台任务。</p><div class="plan-list"><div class="plan-item"><i data-lucide="search"></i><span><strong>检索词组</strong>协同设计、公共参与、项目信任</span></div><div class="plan-item"><i data-lucide="database"></i><span><strong>文献源</strong>OpenAlex、Crossref、Semantic Scholar、arXiv</span></div><div class="plan-item"><i data-lucide="file-check-2"></i><span><strong>准入处理</strong>去重、题录核验、全文获取与可索引性检查</span></div></div><button class="button" data-show-toast="确认后将进入文献筛选阶段" type="button">查看处理说明</button></aside>
+          </div>
+        </main>
+      </div>
+    </div>
+    <div class="toast" role="status" aria-live="polite"></div>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>lucide.createIcons();</script>
+    <script src="prototype.js"></script>
+  </body>
+</html>

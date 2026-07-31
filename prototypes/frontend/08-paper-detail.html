@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Academic Search - 论文详情</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app paper-detail-app">
+      <header class="paper-detail-header">
+        <a class="brand" href="01-research-entry.html"><span class="brand-mark">AS</span><span>Academic Search</span></a>
+        <nav class="paper-detail-nav" aria-label="主导航">
+          <a class="is-current" href="03-literature-results.html">文献筛选</a>
+          <a href="04-research-workspace.html">证据研究</a>
+        </nav>
+        <div class="paper-detail-actions" data-auth-area></div>
+      </header>
+
+      <main class="paper-detail-page">
+        <nav class="detail-breadcrumb" aria-label="面包屑">
+          <span class="detail-breadcrumb-workspace"><i data-lucide="folder-kanban"></i><span data-context-workspace-name>睡眠与心理健康</span></span>
+          <i data-lucide="chevron-right"></i>
+          <a href="03-literature-results.html">文献筛选</a>
+          <i data-lucide="chevron-right"></i>
+          <span aria-current="page">论文详情</span>
+        </nav>
+
+        <section class="paper-identity" aria-labelledby="paper-title">
+          <span class="eyebrow">候选文献 · 题录已核验</span>
+          <h1 id="paper-title" data-context-paper-title>Sleep quality and depressive symptoms among university students: A longitudinal study</h1>
+          <p class="paper-byline" data-context-paper-byline>Chen Y, Wu M <span aria-hidden="true">·</span> 2024 <span aria-hidden="true">·</span> <em>Journal of American College Health</em></p>
+          <div class="paper-identifiers"><span>DOI <a data-context-paper-doi href="https://doi.org/10.0000/academic-search.prototype" target="_blank" rel="noreferrer">10.0000/academic-search.prototype</a></span><span>OpenAlex + Crossref 已交叉核验</span></div>
+          <div class="paper-statuses" aria-label="处理状态"><span class="detail-status verified"><i data-lucide="badge-check"></i>题录已核验</span><span class="detail-status ready"><i data-lucide="file-check-2"></i>全文可处理</span><span class="detail-status muted"><i data-lucide="layers-2"></i>待加入研究集合</span></div>
+        </section>
+
+        <section class="machine-summary" aria-labelledby="machine-summary-title">
+          <div class="machine-summary-head"><span class="summary-icon"><i data-lucide="sparkles"></i></span><div><span class="eyebrow">基于已解析全文</span><h2 id="machine-summary-title">系统摘要</h2></div><span class="summary-model">原型演示</span></div>
+          <p data-context-paper-summary>这项纵向研究追踪大学生的睡眠质量与抑郁症状变化。结果提示，较差的基线睡眠质量与后续更高的抑郁症状相关；该发现适合支持二者的时间关联，但不能单独证明因果关系。</p>
+        </section>
+
+        <div class="detail-command-row">
+          <button class="button primary" data-show-toast="原始出版页面将在正式数据接入后打开" type="button"><i data-lucide="external-link"></i>以原始页面打开</button>
+          <button class="button" data-show-toast="PDF 已通过全文处理校验" type="button"><i data-lucide="file-text"></i>查看 PDF</button>
+          <div class="citation-control">
+            <button class="button" data-citation-control type="button" aria-expanded="false" aria-controls="citation-format-panel"><i data-lucide="quote"></i><span>引用</span><i data-lucide="chevron-down"></i></button>
+            <section class="citation-format-panel" id="citation-format-panel" data-citation-panel hidden aria-label="引用格式选择">
+              <header><div><span class="eyebrow">格式中立题录已核验</span><h2>选择引用格式</h2></div><span class="citation-ready"><i data-lucide="badge-check"></i>可导出</span></header>
+              <div class="citation-format-list" role="tablist" aria-label="引用格式">
+                <button class="citation-format-option is-active" data-citation-format="gbt" type="button" role="tab" aria-selected="true">GB/T 7714-2015</button>
+                <button class="citation-format-option" data-citation-format="apa" type="button" role="tab" aria-selected="false">APA 7</button>
+                <button class="citation-format-option" data-citation-format="mla" type="button" role="tab" aria-selected="false">MLA 9</button>
+                <button class="citation-format-option" data-citation-format="chicago" type="button" role="tab" aria-selected="false">Chicago</button>
+                <button class="citation-format-option" data-citation-format="bibtex" type="button" role="tab" aria-selected="false">BibTeX</button>
+              </div>
+              <pre class="citation-preview" data-citation-preview>Chen Y, Wu M. Sleep quality and depressive symptoms among university students: A longitudinal study[J]. Journal of American College Health, 2024. DOI: 10.0000/academic-search.prototype.</pre>
+              <footer><span class="prototype-data-note">原型演示引用；正式版由 CSL 引擎与 BibTeX 序列化器生成。</span><button class="button primary" data-citation-copy type="button"><i data-lucide="copy"></i><span data-citation-copy-label>复制 GB/T 7714-2015</span></button></footer>
+            </section>
+          </div>
+          <button class="button" data-toggle-collection data-paper-id="10.0000/academic-search.prototype" type="button"><i data-lucide="plus"></i><span data-toggle-collection-label>加入研究集合</span></button>
+        </div>
+
+        <div class="paper-detail-grid">
+          <article class="paper-reading" aria-label="论文内容">
+            <div class="detail-tabs" role="tablist" aria-label="论文信息">
+              <button class="detail-tab is-active" data-paper-tab="overview" type="button" role="tab" aria-selected="true">概览</button>
+              <button class="detail-tab" data-paper-tab="abstract" type="button" role="tab" aria-selected="false">摘要</button>
+              <button class="detail-tab" data-paper-tab="references" type="button" role="tab" aria-selected="false">参考文献</button>
+              <button class="detail-tab" data-paper-tab="processing" type="button" role="tab" aria-selected="false">处理记录</button>
+            </div>
+
+            <section class="detail-tab-panel is-active" data-paper-panel="overview" role="tabpanel">
+              <div class="detail-section-heading"><span class="section-index">01</span><h2>研究概览</h2></div>
+              <dl class="study-facts">
+                <div><dt>研究设计</dt><dd data-context-paper-design>纵向观察研究</dd></div>
+                <div><dt>研究对象</dt><dd data-context-paper-subject>大学在校生</dd></div>
+                <div><dt>相关主题</dt><dd data-context-paper-topics>睡眠质量、抑郁症状</dd></div>
+                <div><dt>当前匹配度</dt><dd><strong>96</strong> / 100</dd></div>
+              </dl>
+              <div class="research-fit"><span class="eyebrow">与当前问题的关系</span><p data-context-paper-fit>论文直接对应“睡眠质量与大学生心理健康的关系”，且已具备 DOI、可核验引用信息与可处理全文，符合进入研究集合的固定准入规则。</p></div>
+              <div class="evidence-quote"><i data-lucide="quote"></i><p data-context-paper-evidence>基线睡眠质量较低的参与者，在后续随访中表现出更高的抑郁症状风险。</p><footer data-context-paper-evidence-location>结果段落 · 第 6 页 · 解析片段 18</footer></div>
+            </section>
+
+            <section class="detail-tab-panel" data-paper-panel="abstract" role="tabpanel" hidden>
+              <div class="detail-section-heading"><span class="section-index">02</span><h2>摘要</h2></div>
+              <p class="detail-prose" data-context-paper-abstract>Sleep disturbance is common among university students and may be associated with later depressive symptoms. This longitudinal study examined whether baseline sleep quality predicted depressive symptom change during follow-up.</p>
+              <p class="detail-prose">The parsed full text is available for research retrieval. The original abstract above is shown here as prototype content rather than a live source record.</p>
+              <p class="prototype-data-note">本页内容均为原型演示数据，不代表真实论文的原始摘要或研究结果。</p>
+            </section>
+
+            <section class="detail-tab-panel" data-paper-panel="references" role="tabpanel" hidden>
+              <div class="detail-section-heading"><span class="section-index">03</span><h2>参考文献</h2></div>
+              <p class="detail-prose">参考文献会在全文解析完成后写入这里；它们不会直接成为当前工作区的证据，除非各自通过题录与全文准入核验。</p>
+              <div class="empty-detail-state"><i data-lucide="library-big"></i><strong>参考文献索引正在构建</strong><span>可先从原始出版页面获取完整条目。</span></div>
+            </section>
+
+            <section class="detail-tab-panel" data-paper-panel="processing" role="tabpanel" hidden>
+              <div class="detail-section-heading"><span class="section-index">04</span><h2>处理记录</h2></div>
+              <ol class="detail-processing-log">
+                <li><span>09:14</span><div><strong>题录规整完成</strong><p>已合并 OpenAlex 与 Crossref 返回的同一 DOI 记录。</p></div><i data-lucide="check"></i></li>
+                <li><span>09:15</span><div><strong>全文获取完成</strong><p>PDF 已保存并通过文件类型与可读性校验。</p></div><i data-lucide="check"></i></li>
+                <li><span>09:16</span><div><strong>内容解析完成</strong><p>识别出 48 个可引用的文本片段。</p></div><i data-lucide="check"></i></li>
+                <li><span>等待确认</span><div><strong>向量索引尚未开始</strong><p>确认加入研究集合后，才会写入当前工作区的向量索引。</p></div><i data-lucide="clock-3"></i></li>
+              </ol>
+            </section>
+          </article>
+
+          <aside class="paper-sidecar" aria-label="论文研究状态">
+            <section>
+              <span class="eyebrow">全文处理</span>
+              <h2>可以作为证据吗？</h2>
+              <p>可以。题录、全文和文本解析均已通过，确认后可参与后续 RAG 检索与引用追溯。</p>
+            </section>
+            <dl class="sidecar-stats">
+              <div><dt>全文格式</dt><dd>PDF</dd></div>
+              <div><dt>解析片段</dt><dd>48</dd></div>
+              <div><dt>引用信息</dt><dd>完整</dd></div>
+              <div><dt>向量状态</dt><dd>等待集合确认</dd></div>
+            </dl>
+            <button class="paper-question-trigger" data-show-toast="请先确认研究集合，再在证据研究阶段向全文提问" type="button"><i data-lucide="message-square-text"></i><span>在本文内提问</span><i data-lucide="arrow-up-right"></i></button>
+          </aside>
+        </div>
+      </main>
+    </div>
+    <div class="toast" role="status" aria-live="polite"></div>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>lucide.createIcons();</script>
+    <script src="prototype.js"></script>
+  </body>
+</html>

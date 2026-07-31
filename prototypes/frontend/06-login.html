@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Academic Search - 登录</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app auth-app">
+      <header class="auth-header">
+        <a class="brand" href="01-research-entry.html" aria-label="Academic Search 首页"><span class="brand-mark">AS</span><span>Academic Search</span></a>
+        <a href="07-register.html">注册</a>
+      </header>
+
+      <main class="auth-main">
+        <section class="auth-surface" aria-labelledby="login-title">
+          <span class="eyebrow">账号登录</span>
+          <h1 id="login-title">回到你的研究工作区。</h1>
+          <p>登录后可继续已有研究，或创建新的文献研究任务。</p>
+          <form class="auth-form" data-login-form>
+            <div class="auth-field"><label for="login-email">邮箱</label><input id="login-email" name="email" type="email" autocomplete="email" required placeholder="name@example.com" /></div>
+            <div class="auth-field"><label for="login-password">密码</label><input id="login-password" name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="输入密码" /></div>
+            <p class="auth-error" data-auth-error role="alert" hidden></p>
+            <button class="button primary" type="submit">登录并继续<i data-lucide="arrow-right"></i></button>
+          </form>
+          <p class="auth-switch">还没有账号？<a href="07-register.html">创建账号</a></p>
+        </section>
+      </main>
+    </div>
+    <div class="toast" role="status" aria-live="polite"></div>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>lucide.createIcons();</script>
+    <script src="prototype.js"></script>
+  </body>
+</html>

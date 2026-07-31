@@ -7,6 +7,8 @@ from sqlalchemy.orm import configure_mappers
 EXPECTED_TABLES = {
     "users",
     "research_collections",
+    "research_plans",
+    "search_runs",
     "papers",
     "collection_papers",
     "documents",
@@ -100,3 +102,26 @@ def test_all_documented_tables_and_columns_have_chinese_comments() -> None:
     for table in Base.metadata.tables.values():
         assert table.comment
         assert all(column.comment for column in table.columns)
+
+
+def test_workflow_models_preserve_long_term_state_but_not_search_candidates() -> None:
+    """计划和检索状态需要恢复，未准入候选仍只属于 Redis 短期会话。"""
+    collections = Base.metadata.tables["research_collections"]
+    plans = Base.metadata.tables["research_plans"]
+    search_runs = Base.metadata.tables["search_runs"]
+    active_run_index = next(
+        index for index in search_runs.indexes if index.name == "uq_search_runs_active_plan"
+    )
+
+    assert "workflow_stage" in collections.c
+    assert {"collection_id", "revision", "raw_request", "direction_options", "query_plan"} <= set(
+        plans.c.keys()
+    )
+    assert {"redis_session_key", "provider_summary", "candidate_counts"} <= set(
+        search_runs.c.keys()
+    )
+    assert "search_candidates" not in Base.metadata.tables
+    assert active_run_index.unique
+    assert "status IN ('queued', 'running')" in str(
+        active_run_index.dialect_options["postgresql"]["where"]
+    )

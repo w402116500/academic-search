@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Academic Search - 研究对话</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="chat-app-shell" data-chat-app-shell>
+      <aside class="chat-session-sidebar" aria-label="当前工作区的研究对话">
+        <div class="chat-sidebar-brand-row">
+          <a class="brand" href="01-research-entry.html" aria-label="返回研究入口"><span class="brand-mark">AS</span><span>Academic Search</span></a>
+        </div>
+
+        <div class="chat-workspace-menu-wrap">
+          <button class="chat-workspace-switch" data-workspace-switcher type="button" aria-haspopup="menu" aria-expanded="false" title="切换工作区">
+            <span class="chat-workspace-icon"><i data-lucide="folder-kanban"></i></span>
+            <span class="chat-workspace-copy"><span>当前工作区</span><strong>绿地可达性与心理健康</strong><small>8 篇全文可问答</small></span>
+            <i class="chat-workspace-chevron" data-lucide="chevrons-up-down"></i>
+          </button>
+          <div data-workspace-menu-slot></div>
+        </div>
+
+        <div class="chat-sidebar-body">
+          <button class="chat-new-session" data-chat-new-session type="button"><i data-lucide="square-pen"></i><span>新建研究对话</span></button>
+
+          <a class="chat-collection-shortcut" href="04-research-workspace.html">
+            <span class="chat-collection-icon"><i data-lucide="library-big"></i></span>
+            <span class="chat-collection-copy"><strong>研究集合</strong><small>查看全文、索引与范围</small></span>
+            <i data-lucide="chevron-right"></i>
+          </a>
+
+          <nav class="chat-session-list" aria-label="当前工作区的会话记录">
+            <span class="chat-session-group-label">今天</span>
+            <button class="chat-session-item active" data-chat-session-preview="当前示例展示的是这段对话的证据与引用。" type="button" aria-current="page">
+              <i data-lucide="messages-square"></i>
+              <span class="chat-session-copy"><strong>步行活动与心理健康的可能路径</strong><small>刚刚</small></span>
+            </button>
+            <button class="chat-session-item" data-chat-session-preview="原型暂未加载另一段会话内容。" type="button">
+              <i data-lucide="message-square-text"></i>
+              <span class="chat-session-copy"><strong>绿地暴露的测量方式</strong><small>今天 10:42</small></span>
+            </button>
+            <button class="chat-session-item" data-chat-session-preview="原型暂未加载另一段会话内容。" type="button">
+              <i data-lucide="message-square-text"></i>
+              <span class="chat-session-copy"><strong>横断面研究的局限</strong><small>今天 09:18</small></span>
+            </button>
+            <span class="chat-session-group-label">更早</span>
+            <button class="chat-session-item" data-chat-session-preview="原型暂未加载另一段会话内容。" type="button">
+              <i data-lucide="message-square-text"></i>
+              <span class="chat-session-copy"><strong>研究集合的纳入范围</strong><small>昨天</small></span>
+            </button>
+          </nav>
+        </div>
+
+        <div class="chat-sidebar-footer">
+          <button class="chat-sidebar-toggle" data-chat-sidebar-toggle data-chat-sidebar-state="expanded" type="button" aria-expanded="true" aria-label="收起研究会话侧栏" title="收起研究会话侧栏">
+            <span class="chat-sidebar-toggle-icon chat-sidebar-toggle-collapse"><i data-lucide="panel-left-close"></i></span>
+            <span class="chat-sidebar-toggle-icon chat-sidebar-toggle-expand"><i data-lucide="panel-left-open"></i></span>
+            <span class="sr-only">切换研究会话侧栏</span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="chat-content-main">
+        <header class="research-chat-top chat-content-header">
+          <div class="research-chat-identity">
+            <a class="chat-current-workspace" href="04-research-workspace.html"><i data-lucide="trees"></i><span>绿地可达性与心理健康</span></a>
+            <h1>步行活动与心理健康的可能路径</h1>
+            <p><span class="chat-scope-state"><i data-lucide="circle-check"></i>当前集合 · 8 篇全文可问答</span><span>仅检索已核验并完成索引的正文</span></p>
+          </div>
+          <div class="research-chat-actions">
+            <button class="chat-mobile-session-trigger" data-chat-session-preview="会话列表在桌面侧栏中展示，正式版会在此打开移动端会话抽屉。" type="button" aria-label="打开研究会话"><i data-lucide="messages-square"></i><span>会话</span></button>
+            <a class="button" href="04-research-workspace.html"><i data-lucide="files"></i><span>集合概览</span></a>
+            <a class="button chat-literature-link" href="03-literature-results.html"><i data-lucide="list-filter"></i><span>查看文献</span></a>
+            <button class="icon-button" data-tooltip="账户设置" data-show-toast="账户设置将在正式前端中接入" type="button" aria-label="账户设置"><i data-lucide="circle-user-round"></i></button>
+          </div>
+        </header>
+
+        <section class="research-chat-page" aria-label="研究对话">
+          <div class="research-chat-frame">
+
+            <div class="chat-scroll-region" aria-live="polite">
+              <div class="chat-thread" data-research-chat-thread>
+                <article class="chat-message assistant-message chat-welcome-message">
+                  <div class="message-avatar" aria-hidden="true"><i data-lucide="sparkles"></i></div>
+                  <div class="message-content">
+                    <div class="message-meta"><strong>研究助理</strong><span>已连接当前研究集合</span></div>
+                    <p>我会只在当前集合的 8 篇已索引全文中检索。每个结论都会附带可展开的原文证据；若集合不足以支持回答，我会直接说明。</p>
+                  </div>
+                </article>
+
+                <article class="chat-message user-message">
+                  <div class="message-content">
+                    <div class="message-meta"><strong>你</strong><span>研究问题</span></div>
+                    <p>绿地可达性与老年人的心理健康之间，步行活动是否可能是中介路径？现有研究有哪些限制？</p>
+                  </div>
+                </article>
+
+                <article class="chat-message assistant-message" aria-labelledby="answer-title">
+                  <div class="message-avatar" aria-hidden="true"><i data-lucide="sparkles"></i></div>
+                  <div class="message-content">
+                    <div class="message-meta"><strong>研究助理</strong><span class="message-verified"><i data-lucide="shield-check"></i>3 条引用已核验</span></div>
+                    <h2 id="answer-title">步行是一个有证据支持的可能机制，但还不能被视为已证实的因果中介。</h2>
+                    <div class="message-prose">
+                      <p>当前集合中的观察研究显示，邻里绿地可达性较高通常与更频繁的步行及更好的心理健康指标相关。部分研究将步行纳入路径分析，提示它可能解释绿地环境与主观健康之间的一部分关联。<button class="citation-number" data-chat-evidence-target="evidence-1" type="button" aria-label="查看引用 1">1</button><button class="citation-number" data-chat-evidence-target="evidence-2" type="button" aria-label="查看引用 2">2</button></p>
+                      <p>不过，现有证据主要来自横断面或观察性设计，居住选择、社区社会经济条件和自我报告偏差都可能同时影响绿地使用、步行和心理健康。因此，更合适的表述是“步行可能是解释该关联的机制之一”，不足以单独证明因果中介关系。<button class="citation-number" data-chat-evidence-target="evidence-3" type="button" aria-label="查看引用 3">3</button></p>
+                    </div>
+                    <p class="message-boundary"><i data-lucide="info"></i>当前集合以城市社区中的老年人研究为主；对长期干预、不同地区和中国老年群体的可推广性仍需进一步核验。</p>
+
+                    <details class="chat-message-details" data-chat-evidence-details>
+                      <summary><span><i data-lucide="book-marked"></i>引用来源</span><small>3 个证据片段</small><i data-lucide="chevron-down"></i></summary>
+                      <ol class="evidence-list">
+                        <li id="evidence-1">
+                          <span class="evidence-index">1</span>
+                          <div>
+                            <div class="evidence-source-line"><strong>绿地可达性与老年步行</strong><a href="08-paper-detail.html" title="查看论文详情">Brown J, et al. · 2022 <i data-lucide="arrow-up-right"></i></a></div>
+                            <p>“Higher neighborhood greenery was associated with more frequent walking among older adults, particularly where paths were perceived as safe.”</p>
+                            <span class="evidence-location">Landscape and Urban Planning · 第 7 页 · 结果段落</span>
+                          </div>
+                        </li>
+                        <li id="evidence-2">
+                          <span class="evidence-index">2</span>
+                          <div>
+                            <div class="evidence-source-line"><strong>步行作为可能机制</strong><a href="08-paper-detail.html" title="查看论文详情">Liu Y, et al. · 2023 <i data-lucide="arrow-up-right"></i></a></div>
+                            <p>“Walking frequency partly explained the association between neighborhood greenery and psychological wellbeing among community-dwelling older adults.”</p>
+                            <span class="evidence-location">Journal of Aging and Physical Activity · 第 9 页 · 路径分析结果</span>
+                          </div>
+                        </li>
+                        <li id="evidence-3">
+                          <span class="evidence-index">3</span>
+                          <div>
+                            <div class="evidence-source-line"><strong>环境研究的混杂限制</strong><a href="08-paper-detail.html" title="查看论文详情">Klein M, Roberts A · 2021 <i data-lucide="arrow-up-right"></i></a></div>
+                            <p>“Accessible green space was associated with improved self-rated health after accounting for neighborhood socioeconomic conditions.”</p>
+                            <span class="evidence-location">Health &amp; Place · 第 5 页 · 调整模型</span>
+                          </div>
+                        </li>
+                      </ol>
+                    </details>
+
+                    <details class="chat-message-details chat-trace-details">
+                      <summary><span><i data-lucide="activity"></i>检索过程</span><small>仅展示可验证执行状态</small><i data-lucide="chevron-down"></i></summary>
+                      <div class="trace-list" aria-label="本次证据处理记录">
+                        <div class="trace-row"><i data-lucide="search"></i><span><strong>Hybrid 检索</strong>在当前集合中命中 38 个 L3 片段</span></div>
+                        <div class="trace-row"><i data-lucide="git-merge"></i><span><strong>父块合并</strong>整理为 12 个可阅读上下文单元</span></div>
+                        <div class="trace-row"><i data-lucide="list-filter"></i><span><strong>精排与核验</strong>保留 3 条能直接支持结论的原文证据</span></div>
+                      </div>
+                    </details>
+                  </div>
+                </article>
+              </div>
+            </div>
+
+            <div class="research-chat-composer-wrap">
+              <form class="research-chat-composer" data-research-chat-form>
+                <label class="sr-only" for="research-chat-input">继续研究当前集合</label>
+                <div class="composer-row">
+                  <textarea id="research-chat-input" data-research-chat-input rows="1" placeholder="在当前集合中继续提问..." aria-describedby="research-chat-hint"></textarea>
+                  <button class="composer-send" type="submit" aria-label="发送研究问题" title="发送研究问题"><i data-lucide="arrow-up"></i></button>
+                </div>
+                <div class="composer-footer" id="research-chat-hint"><span data-research-chat-status>回答将附带原文定位；证据不足时会明确说明。</span><span><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div>
+              </form>
+            </div>
+          </div>
+        </section>
+        </main>
+      </div>
+    </div>
+    <div class="toast" role="status" aria-live="polite"></div>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>lucide.createIcons();</script>
+    <script src="prototype.js"></script>
+  </body>
+</html>

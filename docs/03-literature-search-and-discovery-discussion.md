@@ -1,6 +1,6 @@
 # academic-search 文献检索与发现讨论稿
 
-状态：讨论中；多源候选获取、题录规整、开放获取直链 PDF 的受控下载暂存与研究集合准入服务已实现；异步 Worker 与 API 尚未实现。
+状态：讨论中；多源候选获取、题录规整、开放获取直链 PDF 的受控下载暂存、研究集合准入服务与 RAG 入库 Worker 已实现；检索任务 API、自动投递、SSE 进度推送与 Agent 尚未实现。
 定位：定义用户从描述研究想法，到获得一组可信、可排序的候选文献的完整流程。
 关联：产品总方向见 [`01-product-direction-discussion.md`](01-product-direction-discussion.md)；结果呈现见 [`04-literature-results-and-citation-discussion.md`](04-literature-results-and-citation-discussion.md)。
 
@@ -114,7 +114,7 @@ MVP 接入以下来源：
 
 当前已实现 `app/modules/fulltext` 的下载与暂存边界：它只接收已规整的内部候选对象，拒绝未完成 DOI 题录核验、非开放获取或没有直接 PDF URL 的候选；对每一跳重定向重新执行 HTTPS、端口和公网地址校验，并流式验证 PDF 后上传至 `staging/fulltext/`。
 
-当前已实现 `app/modules/collections/ResearchCollectionAdmissionService`：它复核候选、`ready` 题录与暂存 PDF 属于同一 DOI，校验当前用户对活动研究集合的所有权，处理同一 DOI 的幂等重复加入，并将对象转正。在一个 PostgreSQL 事务中创建或复用 `papers`，再创建 `collection_papers`、`documents` 与状态为 `queued`、阶段为 `parse` 的 `ingestion_runs`；数据库或对象操作失败时会清理正式键和暂存键。该服务尚未接入 HTTP API、Redis/arq 投递或 PDF 解析，因此成功结果表示“文献已进入研究集合并等待入库”，不表示已经能够被 RAG 检索。
+当前已实现 `app/modules/collections/ResearchCollectionAdmissionService`：它复核候选、`ready` 题录与暂存 PDF 属于同一 DOI，校验当前用户对活动研究集合的所有权，处理同一 DOI 的幂等重复加入，并将对象转正。在一个 PostgreSQL 事务中创建或复用 `papers`，再创建 `collection_papers`、`documents` 与状态为 `queued`、阶段为 `parse` 的 `ingestion_runs`；数据库或对象操作失败时会清理正式键和暂存键。`app.workers.ingestion` 已实现消费该运行并完成 PDF 解析、切块、embedding 与 Milvus 写入；准入服务仍未接入 HTTP API，也没有从准入结果自动投递 Redis/arq。成功结果表示“文献已进入研究集合并等待入库”，只有 Worker 完成索引后才表示能够被 RAG 检索。
 
 全文下载默认直连且不读取进程级 `HTTP_PROXY` / `HTTPS_PROXY`。某个开放获取来源在当前网络环境无法直连时，可显式设置 `FULLTEXT_NETWORK_MODE=proxy`，它只复用已校验的 `LITERATURE_PROXY_URL`，不会改变 MinIO、数据库或其他服务的网络路由。
 

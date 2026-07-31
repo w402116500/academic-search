@@ -12,6 +12,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routers.router import router as api_router
 from app.core.env import load_env
 
 # 在读取任何环境变量前加载项目根目录的 .env，命令行环境变量仍具有更高优先级。
@@ -41,6 +42,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 业务接口统一通过 /api/v1 暴露，避免后续调整响应格式时破坏已有前端调用。
+app.include_router(api_router)
 
 
 @app.get(

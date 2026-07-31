@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Academic Search - 研究集合</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app app-shell">
+      <aside class="global-rail" aria-label="工作区导航">
+        <a class="brand" href="01-research-entry.html"><span class="brand-mark">AS</span><span>Academic Search</span></a>
+        <span class="rail-section-label">工作区</span>
+        <nav class="workspace-nav">
+          <a class="workspace-nav-item" href="03-literature-results.html"><i data-lucide="book-open-check"></i><span><span class="workspace-nav-title">睡眠与心理健康</span><span class="workspace-nav-meta">候选文献核验中</span></span></a>
+          <a class="workspace-nav-item active" href="04-research-workspace.html"><i data-lucide="trees"></i><span><span class="workspace-nav-title">绿地可达性与心理健康</span><span class="workspace-nav-meta">研究集合已准备</span></span><span class="workspace-nav-state">当前</span></a>
+          <a class="workspace-nav-item" href="02-intent-confirm.html"><i data-lucide="file-pen-line"></i><span><span class="workspace-nav-title">社区协同设计与信任</span><span class="workspace-nav-meta">等待确认研究计划</span></span></a>
+        </nav>
+        <a class="button rail-create" href="01-research-entry.html"><i data-lucide="plus"></i><span>新建工作区</span></a>
+        <div class="rail-footer"><span class="mono">当前集合</span><p>问答只使用已进入当前集合、并完成索引的全文。</p><button class="rail-toggle" data-rail-toggle data-rail-state="expanded" type="button" aria-expanded="true" aria-label="收起左侧栏" title="收起左侧栏"><span class="rail-toggle-icon rail-toggle-collapse"><i data-lucide="panel-left-close"></i></span><span class="rail-toggle-icon rail-toggle-expand"><i data-lucide="panel-left-open"></i></span><span class="sr-only">切换左侧栏</span></button></div>
+      </aside>
+
+      <div class="content-shell">
+        <header class="app-header"><a class="workspace-switcher" href="01-research-entry.html"><i data-lucide="chevron-left"></i><span>绿地可达性与心理健康</span></a><div class="header-actions"><a class="button primary" data-collection-entry href="09-research-chat.html"><i data-lucide="message-square-text"></i>进入研究对话</a><a class="button" href="03-literature-results.html"><i data-lucide="list-filter"></i>查看文献</a><button class="icon-button" data-tooltip="账户设置" type="button" aria-label="账户设置"><i data-lucide="circle-user-round"></i></button></div></header>
+        <main class="stage-page">
+          <nav class="stage-rail" aria-label="研究阶段">
+            <a class="stage-link complete" href="02-intent-confirm.html"><span class="stage-glyph"><i data-lucide="check"></i></span><span class="stage-copy"><span class="stage-name">任务解析</span><span class="stage-detail">已确认</span></span></a>
+            <span class="stage-connector complete"></span>
+            <a class="stage-link complete" href="03-literature-results.html"><span class="stage-glyph"><i data-lucide="check"></i></span><span class="stage-copy"><span class="stage-name">文献筛选</span><span class="stage-detail">8 篇已入集合</span></span></a>
+            <span class="stage-connector complete"></span>
+            <div class="stage-node current"><span class="stage-glyph"><i data-lucide="notebook-tabs"></i></span><span class="stage-copy"><span class="stage-name">证据研究</span><span class="stage-detail">集合概览</span></span></div>
+          </nav>
+
+          <div class="stage-heading"><span class="eyebrow">证据研究 · 集合概览</span><h1 data-collection-heading>研究集合已经准备好。</h1><p data-collection-description>先确认哪些全文可以作为证据，再进入独立的研究对话。对话中的回答只会从这 8 篇已完成索引的文献中检索。</p><div class="workspace-subline"><i data-lucide="folder-kanban"></i><span>绿地可达性、步行与老年心理健康</span></div></div>
+
+          <section class="collection-build-status" data-collection-build-status role="status" aria-live="polite" hidden>
+            <span class="entry-icon"><i data-lucide="layers-2"></i></span>
+            <div><strong data-collection-build-title>正在构建研究集合</strong><p data-collection-build-message>正在读取已确认文献的处理状态。</p></div>
+          </section>
+
+          <div class="collection-overview-layout">
+            <section class="collection-main" aria-labelledby="collection-documents-title">
+              <div class="collection-toolbar"><div><span class="eyebrow">当前集合</span><h2 id="collection-documents-title" data-collection-document-title>8 篇文献可用于问答</h2></div><span class="collection-ready" data-collection-ready><i data-lucide="shield-check"></i>索引状态正常</span></div>
+              <div class="collection-summary-strip"><div><strong data-collection-ready-count>8</strong><span data-collection-ready-label>已完成索引</span></div><div><strong>384</strong><span>可检索片段</span></div><div><strong>0</strong><span>处理失败</span></div><div><strong>2024</strong><span>最近更新</span></div></div>
+              <div class="collection-document-list">
+                <a class="collection-document current" href="08-paper-detail.html"><span class="document-icon"><i data-lucide="file-check-2"></i></span><span><strong>Sleep quality and depressive symptoms among university students: A longitudinal study</strong><small>Chen Y, Wu M · 2024 · Journal of American College Health</small></span><span class="document-state">48 片段</span><i data-lucide="chevron-right"></i></a>
+                <a class="collection-document" href="08-paper-detail.html"><span class="document-icon"><i data-lucide="file-check-2"></i></span><span><strong>Green space accessibility and psychological wellbeing in older adults</strong><small>Brown J, et al. · 2022 · Landscape and Urban Planning</small></span><span class="document-state">56 片段</span><i data-lucide="chevron-right"></i></a>
+                <a class="collection-document" href="08-paper-detail.html"><span class="document-icon"><i data-lucide="file-check-2"></i></span><span><strong>Walking, neighborhood greenery, and self-rated health</strong><small>Klein M, Roberts A · 2021 · Health &amp; Place</small></span><span class="document-state">41 片段</span><i data-lucide="chevron-right"></i></a>
+                <div class="collection-document more"><span class="document-icon"><i data-lucide="layers-2"></i></span><span><strong>还有 5 篇已完成索引的文献</strong><small>可在研究对话中按当前集合统一检索</small></span><span class="document-state">已就绪</span></div>
+              </div>
+            </section>
+
+            <aside class="collection-entry-panel" aria-label="研究对话入口"><span class="eyebrow">下一步</span><span class="entry-icon"><i data-lucide="message-square-quote"></i></span><h2>进入研究对话</h2><p data-collection-entry-description>提出一个关于方法、结果、限制或文献差异的问题。每个回答都会保留对应论文和原文定位。</p><div class="entry-scope"><span>回答范围</span><strong data-collection-entry-scope>当前集合 · 8 篇全文</strong></div><a class="button primary" data-collection-entry href="09-research-chat.html">开始提问<i data-lucide="arrow-right"></i></a><a class="entry-secondary" href="03-literature-results.html"><i data-lucide="list-filter"></i>返回文献筛选</a></aside>
+          </div>
+        </main>
+      </div>
+    </div>
+    <div class="toast" role="status" aria-live="polite"></div>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>lucide.createIcons();</script>
+    <script src="prototype.js"></script>
+  </body>
+</html>

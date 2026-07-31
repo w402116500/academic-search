@@ -35,3 +35,8 @@ Thumbs.db
 infra/compose/data/
 frontend/src/api/generated/*
 !frontend/src/api/generated/.gitkeep
+/.playwright-cli/
+
+# Local prototype verification artifacts and personal Codex skill metadata
+/output/
+/skills-lock.json

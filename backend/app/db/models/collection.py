@@ -6,18 +6,20 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.modules.workflow.state import WorkspaceWorkflowStage, get_workflow_stage_presentation
 
 if TYPE_CHECKING:
     from app.db.models.document import Document
     from app.db.models.paper import Paper
     from app.db.models.research import Conversation, ResearchRun
     from app.db.models.user import User
+    from app.db.models.workflow import ResearchPlan, SearchRun
 
 
 class ResearchCollection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -30,6 +32,18 @@ class ResearchCollection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "research_collections"
     __table_args__ = (
         CheckConstraint("status IN ('active', 'archived', 'deleted')", name="status"),
+        CheckConstraint(
+            "workflow_stage IN ('draft', 'analyzing', 'plan_review', 'retrieving', "
+            "'screening', 'collection_building', 'researching', 'failed')",
+            name="workflow_stage",
+        ),
+        # 工作区列表按所有者、状态和最近更新读取，这个索引避免用户数据增长后全表排序。
+        Index(
+            "ix_research_collections_owner_status_updated_at",
+            "owner_user_id",
+            "status",
+            "updated_at",
+        ),
         {"comment": "用户的研究工作区，也是 RAG 检索权限边界"},
     )
 
@@ -48,6 +62,16 @@ class ResearchCollection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="active", index=True, comment="工作区状态"
     )
+    workflow_stage: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=WorkspaceWorkflowStage.DRAFT.value,
+        server_default=text("'draft'"),
+        index=True,
+        comment="研究流程阶段：draft 草稿、analyzing 意图解析中、plan_review 计划待确认、"
+        "retrieving 文献检索中、screening 候选筛选、collection_building 集合构建中、"
+        "researching 可以证据研究、failed 执行失败",
+    )
 
     owner: Mapped[User] = relationship(back_populates="research_collections")
     collection_papers: Mapped[list[CollectionPaper]] = relationship(
@@ -59,6 +83,20 @@ class ResearchCollection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
     )
     research_runs: Mapped[list[ResearchRun]] = relationship(back_populates="collection")
+    research_plans: Mapped[list[ResearchPlan]] = relationship(
+        back_populates="collection",
+        cascade="all, delete-orphan",
+    )
+    search_runs: Mapped[list[SearchRun]] = relationship(
+        back_populates="collection",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def workflow_stage_display(self) -> dict[str, str]:
+        """返回 API 可直接使用的中文阶段说明，不把展示文本写入数据库。"""
+        presentation = get_workflow_stage_presentation(self.workflow_stage)
+        return {"label": presentation.label, "description": presentation.description}
 
 
 class CollectionPaper(Base):

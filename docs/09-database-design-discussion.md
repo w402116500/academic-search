@@ -1,6 +1,6 @@
 # academic-search 数据库设计讨论稿
 
-状态：SQLAlchemy 模型、严格准入 Alembic 迁移、开放获取直链 PDF 的受控下载暂存、研究集合入库事务与 RAG 入库 Worker 已实现；自动投递和 API 业务接口尚未实现。
+状态：SQLAlchemy 模型、严格准入 Alembic 迁移、开放获取直链 PDF 的受控下载暂存、研究集合入库事务与 RAG 入库 Worker 已实现；准入自动投递和 API 业务接口尚未实现。
 
 定位：定义 PostgreSQL 的业务数据模型，以及它与对象存储、Milvus、Redis 的数据边界。首版遵循一个明确前提：**检索结果只是临时候选；只有 DOI 题录核验完成、用户主动选择并且合法正文已实际取得的文献，才写入 PostgreSQL。**
 
@@ -299,7 +299,8 @@ backend/
 │  │     ├─ collection.py        # research_collections、collection_papers
 │  │     ├─ paper.py             # papers
 │  │     ├─ document.py          # documents、ingestion_runs、document_chunks
-│  │     └─ research.py          # conversations、messages、research_runs、research_evidences
+│  │     ├─ research.py          # conversations、messages、research_runs、research_evidences
+│  │     └─ workflow.py          # research_plans、search_runs
 │  ├─ schemas/                   # Pydantic 请求 / 响应 DTO，不等同数据库模型
 │  ├─ services/                  # 文献校验、入库、RAG 等业务逻辑
 │  └─ api/                       # FastAPI 路由
@@ -310,26 +311,27 @@ backend/
 
 首版按业务领域拆分模型文件，而不是把全部模型堆进一个 `models.py`。`schemas` 与 `models` 必须分开：前者定义 API 的输入输出，后者定义 PostgreSQL 表和外键。服务层负责“DOI 题录与正文均验证成功后才入库”等业务规则，路由层只调用服务并返回响应。
 
-已实现的数据库基础设施包括 `app/db/base.py`、`app/db/session.py`、`app/db/models/`、`alembic/env.py` 与三条迁移：初始建表、schema 注释和严格准入同步。最新 revision `d7a4c9e2f18b_align_research_document_admission` 已将 `papers.doi` 改为非空唯一、移除 `bibliographic_fingerprint`、补齐格式中立题录字段，并同步 `documents.origin_kind` 与 `ingestion_runs.is_current`。`app/modules/fulltext` 将合法获取的 PDF 写入私有暂存键；`app/modules/collections/ResearchCollectionAdmissionService` 已在验证候选、题录、全文和工作区权限后，以可补偿流程转正对象，并在一个事务中写入长期书目、集合关联、文件和初始入库运行。它尚未接入 HTTP API 或 arq Worker，后两者实现时必须消费这条既有准入边界，不能绕过或修改初始迁移。
+已实现的数据库基础设施包括 `app/db/base.py`、`app/db/session.py`、`app/db/models/`、`alembic/env.py` 与五条迁移：初始建表、schema 注释、严格准入同步、研究工作流状态和工作流唯一约束校正。最新 revision `f41c8e7b2a06_align_workflow_unique_constraints` 使 `arq_job_id`、`redis_session_key` 的数据库唯一约束与 SQLAlchemy 模型保持一致；其前一条 revision `e2a7c4b9d113_add_research_workflow_models` 为工作区增加独立 `workflow_stage`，并创建 `research_plans`、`search_runs`。候选详情仍不写入 PostgreSQL，而只在 Redis TTL 内保存，防止未通过 DOI 与全文准入的数据混入 `papers`。`d7a4c9e2f18b_align_research_document_admission` 已将 `papers.doi` 改为非空唯一、移除 `bibliographic_fingerprint`、补齐格式中立题录字段，并同步 `documents.origin_kind` 与 `ingestion_runs.is_current`。`app/modules/fulltext` 将合法获取的 PDF 写入私有暂存键；`app/modules/collections/ResearchCollectionAdmissionService` 已在验证候选、题录、全文和工作区权限后，以可补偿流程转正对象，并在一个事务中写入长期书目、集合关联、文件和初始入库运行。`app.workers.ingestion` 已实现消费该运行的解析、切块、embedding 和 Milvus 写入；准入服务尚未接入 HTTP API 或自动 arq 投递，后续接口必须消费这条既有准入边界，不能绕过或修改初始迁移。
 
 ## 8. 首批 Alembic 迁移顺序
 
-当前首版使用一条初始迁移 `105ffabed7bc_create_initial_schema` 创建全部 11 张表。这适合尚无生产数据的项目起点；后续任何结构变更都必须单独新增 Alembic revision，不能修改此初始迁移。
+初始迁移 `105ffabed7bc_create_initial_schema` 创建 11 张核心表；之后通过独立 revision 逐步演进，不能修改初始迁移。研究入口闭环新增 `research_plans`、`search_runs` 两张运行状态表，因此当前模型共 13 张表。
 
 | 逻辑层                   | 包含表                                                             | 目的                             |
 | ------------------------ | ------------------------------------------------------------------ | -------------------------------- |
 | 用户、工作区与已验证书目 | `users`、`research_collections`、`papers`、`collection_papers`     | 建立用户、工作区与已验证书目     |
 | 文件与入库               | `documents`、`ingestion_runs`、`document_chunks`                   | 支持异步解析、分块与 Milvus 写入 |
 | 对话与研究               | `conversations`、`messages`、`research_runs`、`research_evidences` | 支持可引用 RAG 问答和恢复状态    |
+| 研究入口与检索运行       | `research_plans`、`search_runs`                                    | 支持计划确认、任务恢复与检索进度 |
 
-第一阶段不创建 `search_runs`、`search_candidates`、`paper_identifiers`、`paper_authors`、`paper_source_records`、`citation_validations`、`collection_documents` 或 `chunk_vector_indexes`。它们对应的需求尚未出现，先完成“筛选并验证引文 -> 加入工作区 -> 获取全文 -> 异步入库 -> 带页码引用回答”的闭环。
+为匹配“输入要求 -> 计划确认 -> 多源检索 -> 统一结果”的前端流程，首版新增轻量 `search_runs`，但不创建 `search_candidates`：长期数据库只保留运行状态、统计、错误与 Redis 会话键；标题、摘要、来源原始记录和可审核候选在 `SEARCH_SESSION_TTL_SECONDS` 内存放于 Redis，到期后变为可再生数据。`paper_identifiers`、`paper_authors`、`paper_source_records`、`citation_validations`、`collection_documents` 和 `chunk_vector_indexes` 仍不创建，避免把尚未出现的检索审计和多版本索引需求提前复杂化。
 
 ## 9. 后续扩展条件
 
 | 出现的实际需求                     | 再增加的表或调整                                                        |
 | ---------------------------------- | ----------------------------------------------------------------------- |
 | 需要按样式、语言或版本缓存大量引用文本 | 再增加 `paper_citations`，按论文、样式和语言缓存；首版直接从 `papers` 的格式中立字段生成 |
-| 要求审计每一次检索与被拒绝候选     | 增加 `search_runs`、`search_provider_runs`、`search_candidates`         |
+| 要求审计每一次来源调用与被拒绝候选 | 增加 `search_provider_runs`、`search_candidates`，扩展现有 `search_runs` |
 | 同一文件跨工作区复用且避免重复解析 | 恢复 `collection_documents`，并重新定义对象和向量的共享策略             |
 | 同时维护多种 embedding 模型        | 增加 `chunk_vector_indexes`，按片段和索引版本记录状态                   |
 | 需要完整的多 Agent 节点可视化      | 增加 `agent_run_steps`，关联 `research_runs`                            |

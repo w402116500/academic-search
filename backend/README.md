@@ -1,8 +1,9 @@
 # Backend Development Environment
 
-The backend package includes a minimal FastAPI application entry point at `app/main.py` and
-an asynchronous SQLAlchemy/Alembic PostgreSQL foundation under `app/db/`. Business routes,
-literature validation services, and workers are not implemented yet.
+The backend package provides local account authentication, research-workspace and research-plan
+APIs, an asynchronous SQLAlchemy/Alembic PostgreSQL foundation under `app/db/`, and separate
+intent-analysis and RAG-ingestion workers. Multi-source search orchestration and research-agent
+APIs are not implemented yet.
 
 ## Database Commands
 
@@ -16,3 +17,35 @@ uv run --directory backend alembic check
 
 The database URL comes from the repository-root `.env` file. Do not edit an existing Alembic
 revision after it has been applied; create a new revision for every schema change.
+
+## Authentication And Workspaces
+
+Set a random `AUTH_JWT_SECRET_KEY` with at least 32 characters in the repository-root `.env`.
+The versioned APIs are available under `/api/v1`:
+
+- `POST /auth/register`, `POST /auth/login`, and `GET /auth/me`
+- `POST /collections`, `GET /collections`, `GET /collections/{id}`
+- `PATCH /collections/{id}`, `POST /collections/{id}/archive`, and
+  `POST /collections/{id}/restore`
+- `POST /collections/research` creates a workspace and starts structured intent analysis
+- `GET /collections/{id}/plan`, `POST /collections/{id}/plan/regenerate`, and
+  `POST /collections/{id}/plan/confirm`
+
+Collection APIs require the `Authorization: Bearer <access_token>` header. `POST /collections`
+creates a manually named empty workspace; homepage-style submission uses
+`POST /collections/research`, which stores the raw requirement and queues intent analysis. A
+confirmed plan still does not start a search job: the next implementation phase creates the
+corresponding `search_run`.
+
+## Workers
+
+Run the intent-analysis worker in one terminal and the RAG ingestion worker in another:
+
+```powershell
+uv run --directory backend arq app.workers.workflow.WorkerSettings
+uv run --directory backend arq app.workers.ingestion.WorkerSettings
+```
+
+Both workers read the root `.env`. The intent worker uses `OPENAI_API_KEY`, `OPENAI_BASE_URL`,
+`OPENAI_CHAT_MODEL`, and `WORKFLOW_INTENT_TIMEOUT_SECONDS`; it validates a JSON research-plan
+draft before making it available for user confirmation.

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Academic Search - 开始研究</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app launch-app" data-runner data-runner-state="idle">
+      <header class="launch-header">
+        <a class="brand" href="01-research-entry.html" aria-label="Academic Search 首页">
+          <span class="brand-mark">AS</span><span>Academic Search</span>
+        </a>
+        <nav class="launch-header-actions" data-auth-area aria-label="全局导航">
+          <a class="header-login" href="06-login.html">登录</a>
+        </nav>
+      </header>
+
+      <main class="launch-main">
+        <section class="runner-view launch-idle" data-runner-view="idle" aria-labelledby="launch-title">
+          <span class="eyebrow">开始一项研究</span>
+          <h1 id="launch-title">输入你的研究要求。</h1>
+          <p>系统会先分析研究意图。确认方向后，再启动多源文献检索、题录规整和全文核验。</p>
+          <form class="research-request-form" data-research-request-form>
+            <label class="sr-only" for="research-request">研究要求</label>
+            <textarea id="research-request" data-research-request placeholder="例如：我想研究睡眠质量与大学生心理健康的关系，重点关注实证研究和可获取全文的期刊论文。"></textarea>
+            <div class="request-form-footer">
+              <span>支持中文或英文研究要求</span>
+              <button class="button primary" type="submit">开始分析<i data-lucide="arrow-right"></i></button>
+            </div>
+            <p class="request-error" data-request-error role="alert">请先输入研究要求。</p>
+          </form>
+        </section>
+
+        <section class="runner-view analysis-runner" data-runner-view="analyzing" aria-labelledby="analysis-title" hidden>
+          <div class="request-echo"><i data-lucide="message-square-text"></i><p data-request-echo></p></div>
+          <div class="runner-heading"><span class="eyebrow">任务解析中</span><h1 id="analysis-title">正在理解这项研究。</h1><p data-analysis-message>系统正在识别研究对象和需要核验的关系。</p></div>
+          <ol class="analysis-steps" aria-label="意图分析处理步骤">
+            <li class="analysis-step" data-analysis-step><span class="step-indicator"><i data-lucide="scan-text"></i></span><span><strong>识别研究对象</strong><small>定位人群、场景与主题边界</small></span><i class="step-result" data-lucide="check"></i></li>
+            <li class="analysis-step" data-analysis-step><span class="step-indicator"><i data-lucide="git-compare-arrows"></i></span><span><strong>拆分核心关系</strong><small>提取影响因素、结果变量与比较关系</small></span><i class="step-result" data-lucide="check"></i></li>
+            <li class="analysis-step" data-analysis-step><span class="step-indicator"><i data-lucide="languages"></i></span><span><strong>生成检索表达</strong><small>组织中英文概念组和同义表达</small></span><i class="step-result" data-lucide="check"></i></li>
+            <li class="analysis-step" data-analysis-step><span class="step-indicator"><i data-lucide="shield-check"></i></span><span><strong>确定准入规则</strong><small>保留有 DOI、引用信息和可处理全文的文献</small></span><i class="step-result" data-lucide="check"></i></li>
+          </ol>
+        </section>
+
+        <section class="runner-view intent-review" data-runner-view="review" aria-labelledby="review-title" hidden>
+          <div class="request-echo compact"><i data-lucide="message-square-text"></i><p data-request-echo></p></div>
+          <div class="runner-heading"><span class="eyebrow">确认研究方向</span><h1 id="review-title">选择这次检索的主线。</h1><p>确认系统对研究问题的理解，再设定本次检索的时间范围和文献语言。</p></div>
+
+          <div class="direction-options" role="radiogroup" aria-label="研究方向">
+            <button class="direction-option selected" data-direction type="button" role="radio" aria-checked="true"><span class="direction-choice"></span><span><strong>考察睡眠质量与大学生抑郁、焦虑症状的关系</strong><small>关注睡眠质量、情绪健康指标与横断面或纵向实证研究。</small></span></button>
+            <button class="direction-option" data-direction type="button" role="radio" aria-checked="false"><span class="direction-choice"></span><span><strong>分析睡眠时长、作息规律与大学生心理健康</strong><small>关注睡眠时长、睡眠规律、昼夜节律与心理健康结果。</small></span></button>
+            <button class="direction-option" data-direction type="button" role="radio" aria-checked="false"><span class="direction-choice"></span><span><strong>比较不同生活方式因素对睡眠与心理健康关系的影响</strong><small>关注运动、屏幕使用、压力水平等因素的调节作用。</small></span></button>
+          </div>
+
+          <section class="scope-settings" aria-labelledby="scope-settings-title">
+            <div class="scope-settings-heading"><h2 id="scope-settings-title">设定文献范围</h2><p>仅确认时间和语言。系统会根据研究方向生成其余检索表达。</p></div>
+            <div class="scope-control-grid">
+              <div class="scope-control"><label for="literature-time-range">时间范围</label><select id="literature-time-range" data-literature-time-range><option value="不限时间">不限时间</option><option value="近 3 年">近 3 年</option><option value="近 5 年">近 5 年</option><option value="2019 年至今" selected>2019 年至今</option><option value="custom">自定义时间</option></select></div>
+              <div class="scope-control"><label for="literature-language">文献语言</label><select id="literature-language" data-literature-language><option value="中文和英文" selected>中文和英文</option><option value="仅中文">仅中文</option><option value="仅英文">仅英文</option></select></div>
+            </div>
+            <div class="custom-date-range" data-custom-date-range hidden>
+              <div><label for="literature-start-year">起始年份</label><input id="literature-start-year" data-literature-start-year type="number" inputmode="numeric" min="1900" placeholder="例如：2018" /></div>
+              <div><label for="literature-end-year">结束年份</label><input id="literature-end-year" data-literature-end-year type="number" inputmode="numeric" min="1900" placeholder="例如：2024" /></div>
+              <p class="scope-year-hint">可填写 1900 至 <span data-current-year></span> 年。</p>
+            </div>
+            <p class="scope-rule"><i data-lucide="shield-check"></i>固定准入：DOI、引用信息与可处理全文</p>
+            <p class="scope-error" data-scope-error role="alert" hidden></p>
+          </section>
+          <div class="review-actions"><button class="button primary" data-confirm-intent type="button">确认并开始检索<i data-lucide="arrow-right"></i></button></div>
+        </section>
+
+        <section class="runner-view search-runner" data-runner-view="searching" aria-labelledby="search-title" hidden>
+          <div class="request-echo compact"><i data-lucide="message-square-text"></i><p data-request-echo></p></div>
+          <div class="runner-heading"><span class="eyebrow">文献检索中</span><h1 id="search-title">正在建立可研究的文献集合。</h1><p data-search-message>正在向已启用的文献源发送检索请求。</p></div>
+
+          <ol class="search-pipeline" aria-label="文献检索与处理链路">
+            <li class="search-stage" data-search-stage><span class="step-indicator"><i data-lucide="database-zap"></i></span><span><strong>多源检索</strong><small>查询 OpenAlex、Crossref、arXiv 和 Semantic Scholar</small></span><span class="stage-state">等待</span></li>
+            <li class="search-stage" data-search-stage><span class="step-indicator"><i data-lucide="list-tree"></i></span><span><strong>记录规整</strong><small>统一题名、作者、DOI、摘要和引用字段</small></span><span class="stage-state">等待</span></li>
+            <li class="search-stage" data-search-stage><span class="step-indicator"><i data-lucide="combine"></i></span><span><strong>去重与题录核验</strong><small>合并重复记录，保留正式题录与引用信息</small></span><span class="stage-state">等待</span></li>
+            <li class="search-stage" data-search-stage><span class="step-indicator"><i data-lucide="file-search-2"></i></span><span><strong>全文可用性检查</strong><small>为后续 RAG 研究筛出可处理的文献</small></span><span class="stage-state">等待</span></li>
+          </ol>
+
+          <div class="source-activity" aria-label="文献源请求状态">
+            <span data-source-state>OpenAlex</span><span data-source-state>Crossref</span><span data-source-state>arXiv</span><span data-source-state>Semantic Scholar</span>
+          </div>
+        </section>
+
+        <section class="runner-view candidates-ready" data-runner-view="ready" aria-labelledby="ready-title" hidden>
+          <div class="request-echo compact"><i data-lucide="message-square-text"></i><p data-request-echo></p></div>
+          <div class="runner-heading"><span class="eyebrow">候选文献已就绪</span><h1 id="ready-title">现在可以开始文献筛选。</h1><p>以下为原型演示数据。真实系统会在这里呈现可追溯的多源记录、题录和全文处理状态。</p></div>
+          <div class="candidate-summary" aria-label="候选文献处理结果">
+            <div><strong>48</strong><span>原始候选记录</span></div>
+            <div><strong>31</strong><span>规整去重后记录</span></div>
+            <div><strong>8</strong><span>全文可研究文献</span></div>
+          </div>
+          <div class="ready-actions"><a class="button primary" href="03-literature-results.html">查看候选文献<i data-lucide="arrow-right"></i></a><button class="button" data-restart-research type="button"><i data-lucide="rotate-ccw"></i>开始另一项研究</button></div>
+        </section>
+      </main>
+    </div>
+    <div class="toast" role="status" aria-live="polite"></div>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>lucide.createIcons();</script>
+    <script src="prototype.js"></script>
+  </body>
+</html>
