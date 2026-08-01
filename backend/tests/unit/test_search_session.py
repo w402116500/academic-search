@@ -1,0 +1,106 @@
+"""Redis 检索会话快照和事件游标测试。"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+from app.modules.workflow.search_session import SearchSessionStore
+
+
+class FakeRedis:
+    """覆盖会话存储所需 Redis 方法的内存替身，不依赖本地 Redis 服务。"""
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.expirations: dict[str, int] = {}
+        self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        self._next_event_number = 1
+
+    async def set(self, key: str, value: str, *, ex: int) -> bool:
+        self.values[key] = value
+        self.expirations[key] = ex
+        return True
+
+    async def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    async def xadd(
+        self,
+        key: str,
+        fields: dict[str, str],
+        *,
+        maxlen: int,
+        approximate: bool,
+    ) -> str:
+        _ = maxlen, approximate
+        event_id = f"{self._next_event_number}-0"
+        self._next_event_number += 1
+        self.streams.setdefault(key, []).append((event_id, fields))
+        return event_id
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        self.expirations[key] = seconds
+        return True
+
+    async def xread(
+        self,
+        streams: dict[str, str],
+        *,
+        count: int,
+        block: int,
+    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
+        _ = block
+        result: list[tuple[str, list[tuple[str, dict[str, str]]]]] = []
+        for key, last_event_id in streams.items():
+            records = self.streams.get(key, [])
+            if last_event_id == "$":
+                selected: list[tuple[str, dict[str, str]]] = []
+            else:
+                last_number = int(last_event_id.split("-", maxsplit=1)[0])
+                selected = [
+                    record
+                    for record in records
+                    if int(record[0].split("-", maxsplit=1)[0]) > last_number
+                ][:count]
+            if selected:
+                result.append((key, selected))
+        return result
+
+
+@pytest.mark.asyncio
+async def test_snapshot_round_trip_refreshes_ttl() -> None:
+    """候选快照以 JSON 保存，并在每次覆盖时刷新会话 TTL。"""
+    redis = FakeRedis()
+    store = SearchSessionStore(redis, ttl_seconds=7200)  # type: ignore[arg-type]
+    snapshot: dict[str, Any] = {"status": "running", "candidates": [{"title": "绿地"}]}
+
+    await store.write_snapshot("search:1", snapshot)
+
+    assert json.loads(redis.values["search:1"]) == snapshot
+    assert await store.read_snapshot("search:1") == snapshot
+    assert redis.expirations["search:1"] == 7200
+
+
+@pytest.mark.asyncio
+async def test_events_are_read_after_cursor_and_refresh_stream_ttl() -> None:
+    """事件读取只返回游标之后的记录，适配 SSE 断线重连。"""
+    redis = FakeRedis()
+    store = SearchSessionStore(redis, ttl_seconds=300)  # type: ignore[arg-type]
+    first_id = await store.append_event("search:1", {"stage": "provider_search"})
+    second_id = await store.append_event("search:1", {"stage": "completed"})
+
+    events = await store.read_events("search:1", last_event_id=first_id, block_ms=0)
+
+    assert events == [(second_id, {"stage": "completed"})]
+    assert redis.expirations["search:1:events"] == 300
+
+
+@pytest.mark.asyncio
+async def test_events_reject_invalid_cursor() -> None:
+    """不接受任意字符串作为 Redis Stream 游标，避免注入错误读取语义。"""
+    store = SearchSessionStore(FakeRedis(), ttl_seconds=300)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="无效的 Redis Stream 事件 ID"):
+        await store.read_events("search:1", last_event_id="latest")

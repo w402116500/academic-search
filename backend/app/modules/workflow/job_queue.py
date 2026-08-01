@@ -17,8 +17,20 @@ class ResearchPlanJobQueue(Protocol):
         raise NotImplementedError
 
 
+class SearchRunJobQueue(Protocol):
+    """检索运行服务依赖的最小投递接口，业务测试可替换为内存替身。"""
+
+    async def enqueue_search(self, search_run_id: UUID) -> str:
+        """投递一个多源检索任务，返回可审计的 arq job 标识。"""
+        raise NotImplementedError
+
+
 class ResearchPlanQueueError(RuntimeError):
     """Redis 或 arq 队列无法接收计划分析任务时抛出。"""
+
+
+class SearchRunQueueError(RuntimeError):
+    """Redis 或 arq 队列无法接收检索运行任务时抛出。"""
 
 
 class ArqResearchPlanJobQueue:
@@ -42,6 +54,31 @@ class ArqResearchPlanJobQueue:
         except Exception as exc:
             # 连接和协议异常在队列边界转成业务错误；调用方会把计划明确标记为失败。
             raise ResearchPlanQueueError("研究计划分析任务无法投递到 Redis。") from exc
+        finally:
+            if redis is not None:
+                await redis.aclose(close_connection_pool=True)
+
+
+class ArqSearchRunJobQueue:
+    """向独立的检索 Worker 投递任务；每次调用后释放短暂 Redis 连接。"""
+
+    async def enqueue_search(self, search_run_id: UUID) -> str:
+        """使用 SearchRun UUID 作为幂等 job ID，避免重复投递同一运行。"""
+        redis = None
+        try:
+            redis = await create_pool(redis_settings_from_environment())
+            job = await redis.enqueue_job(
+                "run_search",
+                str(search_run_id),
+                _job_id=str(search_run_id),
+            )
+            if job is None:
+                raise SearchRunQueueError("文献检索任务已存在或无法投递。")
+            return job.job_id
+        except SearchRunQueueError:
+            raise
+        except Exception as exc:
+            raise SearchRunQueueError("文献检索任务无法投递到 Redis。") from exc
         finally:
             if redis is not None:
                 await redis.aclose(close_connection_pool=True)

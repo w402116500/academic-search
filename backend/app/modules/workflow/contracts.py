@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
+from app.modules.search.contracts import UnifiedCandidate
 from app.modules.workflow.state import (
     ResearchPlanStatus,
     SearchRunStage,
@@ -50,6 +51,28 @@ class ResearchPlanError(RuntimeError):
     """研究计划不满足当前操作前置条件时抛出的明确异常。"""
 
     def __init__(self, code: ResearchPlanErrorCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class SearchRunErrorCode(StrEnum):
+    """检索运行服务可以稳定返回给 API 的业务错误码。"""
+
+    COLLECTION_NOT_FOUND = "search_run_collection_not_found"
+    COLLECTION_NOT_ACTIVE = "search_run_collection_not_active"
+    PLAN_NOT_CONFIRMED = "search_run_plan_not_confirmed"
+    ACTIVE_RUN_EXISTS = "search_run_active_exists"
+    RUN_NOT_FOUND = "search_run_not_found"
+    RUN_NOT_RETRYABLE = "search_run_not_retryable"
+    QUEUE_UNAVAILABLE = "search_run_queue_unavailable"
+    SESSION_EXPIRED = "search_run_session_expired"
+    PLAN_DATA_INVALID = "search_run_plan_data_invalid"
+
+
+class SearchRunError(RuntimeError):
+    """检索运行前置条件、队列或短期会话不满足时抛出的明确异常。"""
+
+    def __init__(self, code: SearchRunErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 
@@ -273,3 +296,23 @@ class SearchRunResponse(BaseModel):
     finished_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class SearchCandidatesResponse(BaseModel):
+    """检索候选快照响应；候选来源于 Redis 短期会话。"""
+
+    run_id: UUID
+    status: SearchRunStatus
+    candidate_counts: dict[str, Any]
+    candidates: list[UnifiedCandidate]
+
+
+class SearchProgressEvent(BaseModel):
+    """通过 SSE 暴露的可验证检索进度，不包含模型思维过程。"""
+
+    run_id: UUID
+    status: SearchRunStatus
+    stage: SearchRunStage
+    provider_summary: dict[str, Any] = Field(default_factory=dict)
+    candidate_counts: dict[str, Any] = Field(default_factory=dict)
+    message: str | None = None

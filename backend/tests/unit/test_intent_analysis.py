@@ -29,6 +29,7 @@ class FakeStructuredModel:
 def _settings() -> WorkflowSettings:
     """构造不读取本地 `.env` 的测试模型配置。"""
     return WorkflowSettings(
+        workflow_chat_provider="openai_compatible",
         openai_api_key=SecretStr("test-key"),
         openai_base_url="https://example.test/v1",
         openai_chat_model="test-chat-model",
@@ -90,6 +91,19 @@ async def test_analyzer_returns_validated_plan_and_server_owned_model_snapshot()
     assert set(result.draft.direction_query_plans[0].model_dump()) == {"direction_id", "queries"}
     assert result.model_snapshot["model"] == "test-chat-model"
     assert "api_key" not in result.model_snapshot
+
+
+def test_deepseek_configuration_is_the_default_chat_provider() -> None:
+    """默认聊天后端使用 DeepSeek，且审计快照不保存密钥。"""
+    settings = WorkflowSettings(
+        deepseek_api_key=SecretStr("test-deepseek-key"),
+        deepseek_base_url="https://api.deepseek.com/v1",
+        deepseek_chat_model="deepseek-chat",
+    )
+
+    assert settings.active_chat_model == "deepseek-chat"
+    assert settings.model_snapshot["provider"] == "deepseek"
+    assert settings.model_snapshot["base_url"] == "https://api.deepseek.com/v1"
 
 
 @pytest.mark.asyncio

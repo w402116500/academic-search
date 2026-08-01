@@ -109,7 +109,11 @@ WORKFLOW_STAGE_TRANSITIONS: dict[WorkspaceWorkflowStage, frozenset[WorkspaceWork
         {WorkspaceWorkflowStage.SCREENING, WorkspaceWorkflowStage.FAILED}
     ),
     WorkspaceWorkflowStage.SCREENING: frozenset(
-        {WorkspaceWorkflowStage.COLLECTION_BUILDING, WorkspaceWorkflowStage.FAILED}
+        {
+            WorkspaceWorkflowStage.RETRIEVING,
+            WorkspaceWorkflowStage.COLLECTION_BUILDING,
+            WorkspaceWorkflowStage.FAILED,
+        }
     ),
     WorkspaceWorkflowStage.COLLECTION_BUILDING: frozenset(
         {WorkspaceWorkflowStage.RESEARCHING, WorkspaceWorkflowStage.FAILED}

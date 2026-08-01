@@ -111,6 +111,7 @@ class LiteratureSourceSettings(BaseSettings):
     search_max_concurrent_providers: int = Field(default=3, ge=1, le=10)
     search_session_ttl_seconds: int = Field(default=7200, ge=60, le=86400)
     search_provider_cache_ttl_seconds: int = Field(default=1800, ge=0, le=86400)
+    search_citation_enrichment_limit: int = Field(default=25, ge=0, le=200)
 
     # 网络路由只影响外部 HTTP 请求，不决定数据源使用官方 API 还是兼容网关。
     literature_default_network_mode: NetworkMode = "direct"
@@ -127,7 +128,7 @@ class LiteratureSourceSettings(BaseSettings):
     # None 表示继承 LITERATURE_DEFAULT_NETWORK_MODE。
     openalex_network_mode: NetworkMode | None = None
 
-    # Crossref 的配置先纳入统一契约，具体 Provider 在下一阶段实现。
+    # Crossref 与其他来源共用统一配置契约，由 Provider Registry 按开关注册。
     crossref_enabled: bool = True
     crossref_base_url: str = "https://api.crossref.org"
     crossref_contact_email: str | None = None

@@ -92,6 +92,9 @@ class MilvusDocumentChunkIndex:
                 for item in chunks
             ],
         )
+        # Milvus 写入默认是最终一致的；入库完成后必须刷新，保证后续检索
+        # 能立即看到刚提交的文献片段，而不是在短暂窗口内返回空结果。
+        self._client.flush(collection_name=self._collection_name)
 
     def _ensure_collection(self, dimension: int) -> None:
         """首次写入时创建固定 schema；既有集合继续使用其原始向量维度。"""

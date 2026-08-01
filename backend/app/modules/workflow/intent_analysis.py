@@ -71,7 +71,7 @@ _SYSTEM_PROMPT = (
 
 
 class OpenAICompatibleIntentAnalyzer:
-    """通过 LangChain 调用 OpenAI 或兼容服务，并二次校验结构化输出。"""
+    """通过 LangChain 调用选定的聊天后端，并二次校验结构化输出。"""
 
     def __init__(
         self,
@@ -117,9 +117,9 @@ class OpenAICompatibleIntentAnalyzer:
     def _create_model(settings: WorkflowSettings) -> StructuredIntentModel:
         """构造 JSON 模式调用器；schema 校验仍由 ``analyze`` 统一执行。"""
         chat_model = ChatOpenAI(
-            model=settings.openai_chat_model,
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
+            model=settings.active_chat_model,
+            api_key=settings.active_api_key,
+            base_url=settings.active_base_url,
             temperature=0,
             timeout=settings.workflow_intent_timeout_seconds,
             max_retries=0,

@@ -73,12 +73,31 @@
 | 2026-07-31 | PowerShell 单行 `async def` 真实调用脚本语法错误 | 1 | 改用 here-string 管道执行多行 Python 脚本 |
 | 2026-07-31 | 首次真实 JSON mode 输出使用自定义包装和字段 | 1 | 在提示词中明确顶层与嵌套 JSON 形状，并将 LangChain 解析异常分类为结构错误 |
 
+## Session: 2026-08-01
+
+### Phase 4: 多源检索任务与进度
+
+- **Status:** complete
+- Completed implementation:
+  - 增加 `SearchRunService`，仅允许已确认计划创建检索运行，并用唯一活动索引防止重复提交。
+  - 增加 arq `run_search` Worker，复用 Provider Registry、来源网络路由和限速配置。
+  - 增加并发来源执行、统一规整/去重/初筛、可选 DOI 题录补全，以及来源级错误隔离。
+  - 增加 Redis JSON 快照与 Stream 事件，提供候选读取、SSE 断线恢复和失败重试 API。
+  - 终态 SSE 连接在发送初始快照后立即结束，不再无意义阻塞等待新事件。
+  - 增加 Redis 会话单元测试和真实 PostgreSQL/Redis 多源运行验收测试。
+  - 修正 Milvus upsert 后的最终一致性窗口，入库向量 flush 后才返回成功。
+- Verification:
+  - `uv run pytest tests`：101 passed、4 skipped；`uv run pytest tests/unit`：98 passed。
+  - `uv run ruff check app tests`、`uv run ruff format --check app tests`、`uv run pyright`：通过。
+  - `uv run alembic check`：无待生成迁移。
+  - 真实多源运行：四个启用来源成功，75 条原始候选规整去重后 57 条，状态 `completed`；临时数据已清理。
+
 ## 5-Question Reboot Check
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 1 至 Phase 3 已完成，Phase 4 待开始 |
-| Where am I going? | 从已确认计划创建多源检索运行，并提供进度与候选结果 |
+| Where am I? | Phase 1 至 Phase 4 已完成，下一阶段是全文准入与入库任务 API |
+| Where am I going? | 从 Redis 候选中获取并核验全文，通过准入后投递 RAG 入库任务 |
 | What's the goal? | 打通研究要求到统一文献结果的后端闭环 |
 | What have I learned? | Provider、准入服务和 RAG 入库 Worker 已存在；真实模型需要明确 JSON 结构提示才能稳定通过契约 |
-| What have I done? | 完成工作流状态、研究计划 API、意图分析 Worker、数据库迁移和真实模型验证 |
+| What have I done? | 完成工作流状态、研究计划 API、意图分析 Worker、多源检索 Worker、Redis/SSE 进度和真实多源验证 |

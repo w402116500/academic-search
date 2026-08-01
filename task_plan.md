@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 4: 多源检索任务与进度（pending）
+Phase 5: 全文准入与入库任务 API（pending）
 
 ## Phases
 
@@ -40,15 +40,15 @@ Phase 4: 多源检索任务与进度（pending）
 
 ### Phase 4: 多源检索任务与进度
 
-- [ ] 由确认计划创建 `search_run`，防止未确认计划直接检索
-- [ ] 用 arq/Redis 投递检索任务，复用现有 Provider Registry 和限速配置
-- [ ] 并发执行 OpenAlex、Crossref、arXiv、Semantic Scholar，并隔离单源失败
-- [ ] 接入现有规整、去重、初筛、题录补全和引用格式化处理链
-- [ ] 保存短期候选结果、来源状态和可恢复错误，不将未准入候选写入长期 `papers`
-- [ ] 提供检索运行详情、候选结果和重试接口
-- [ ] 提供 SSE 进度事件：阶段、来源状态、数量、失败原因和完成状态
-- [ ] 编写离线 Provider 编排测试和真实多源集成测试
-- **Status:** pending
+- [x] 由确认计划创建 `search_run`，防止未确认计划直接检索
+- [x] 用 arq/Redis 投递检索任务，复用现有 Provider Registry 和限速配置
+- [x] 并发执行 OpenAlex、Crossref、arXiv、Semantic Scholar，并隔离单源失败
+- [x] 接入现有规整、去重、初筛、题录补全和引用格式化处理链
+- [x] 保存短期候选结果、来源状态和可恢复错误，不将未准入候选写入长期 `papers`
+- [x] 提供检索运行详情、候选结果和重试接口
+- [x] 提供 SSE 进度事件：阶段、来源状态、数量、失败原因和完成状态
+- [x] 编写离线 Provider 编排测试和真实多源集成测试
+- **Status:** complete
 
 ### Phase 5: 全文准入与入库任务 API
 
@@ -100,6 +100,6 @@ Phase 4: 多源检索任务与进度（pending）
 
 ## Notes
 
-- Phase 1 至 Phase 3 已完成；当前实现到“提交要求 -> 意图分析 -> 用户确认计划”。
+- Phase 1 至 Phase 4 已完成；当前实现到“提交要求 -> 意图分析 -> 用户确认计划 -> 多源检索结果”。
 - `ResearchCollectionAdmissionService`、`app.workers.ingestion` 和现有 Provider 代码应作为既有能力复用，后续 API 不得绕过其准入边界。
 - 每完成一个 Phase，都要同步更新 `task_plan.md` 和 `progress.md`；新发现写入 `findings.md`。

@@ -30,6 +30,8 @@
 | 工作区阶段和生命周期分离 | `workflow_stage` 只表达研究推进；`status` 保持 `active/archived` 生命周期职责 |
 | 重复阶段事件幂等 | 浏览器重试和 arq 至少一次投递到达同一目标阶段时不重复写库 |
 | 意图分析首版使用 OpenAI 兼容 JSON mode | 结构化输出经 Pydantic 二次校验；实际兼容网关必须在提示词中明确顶层字段和嵌套结构，不能假定它会自动遵守 schema |
+| 多源检索使用独立 `search_run` 和 Redis 会话 | PostgreSQL 保存可恢复运行摘要，Redis 保存带 TTL 的候选和事件；确认计划与启动检索保持两个显式动作，避免用户确认时立即消耗外部来源配额 |
+| Provider 编排采用确定性并发而非 Agent 自主循环 | 来源限速、单源失败隔离、规整去重和题录补全必须可预测；后续研究问答才使用 RAG Agent |
 
 ## Issues
 
@@ -57,3 +59,11 @@
 
 - 当前静态原型首页以研究要求输入为唯一主操作，提交后在原位展示任务解析和后续阶段。
 - 工作区切换器支持搜索和内部滚动，不通过独立工作区列表页中转。
+
+## Phase 4 Verification
+
+- 离线测试：98 个单元测试通过，Ruff、格式化、Pyright 和 `alembic check` 通过；完整测试集为 101 passed、4 skipped。
+- 真实测试：`RUN_LIVE_SEARCH_RUN_TESTS=1 uv run pytest tests/integration/test_live_search_run.py -m live -s` 通过。
+- 真实结果：OpenAlex、Crossref、arXiv、Semantic Scholar 均返回成功；75 条原始候选规整去重后得到 57 条候选，运行状态为 `completed`。
+- 真实数据边界：候选和事件只写入 Redis 短期会话，`papers` 没有被搜索运行直接写入；临时用户、工作区、计划和运行已清理。
+- Milvus 可见性：向量 upsert 后显式 flush，避免入库完成到首次检索之间因最终一致性出现空结果。

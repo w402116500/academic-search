@@ -6,6 +6,7 @@ import os
 from urllib.parse import urlsplit
 
 from arq.connections import RedisSettings
+from redis.asyncio import Redis
 
 
 def redis_settings_from_environment() -> RedisSettings:
@@ -28,4 +29,27 @@ def redis_settings_from_environment() -> RedisSettings:
         username=parsed.username,
         password=parsed.password,
         ssl=parsed.scheme == "rediss",
+    )
+
+
+def redis_client_from_environment() -> Redis:
+    """创建供 API 和检索 Worker 使用的 Redis 客户端，复用同一份 URL 校验规则。"""
+    raw_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    parsed = urlsplit(raw_url)
+    if parsed.scheme not in {"redis", "rediss"} or parsed.hostname is None:
+        raise RuntimeError("REDIS_URL 必须是完整的 redis:// 或 rediss:// 地址")
+
+    database_text = parsed.path.strip("/") or "0"
+    if not database_text.isdecimal():
+        raise RuntimeError("REDIS_URL 的数据库编号必须是非负整数")
+
+    host = "127.0.0.1" if parsed.hostname == "localhost" else parsed.hostname
+    return Redis(
+        host=host,
+        port=parsed.port or 6379,
+        db=int(database_text),
+        username=parsed.username,
+        password=parsed.password,
+        ssl=parsed.scheme == "rediss",
+        decode_responses=True,
     )

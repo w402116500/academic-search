@@ -123,7 +123,7 @@ async def confirm_research_plan(
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ResearchPlanResponse:
-    """固化用户选择；下一阶段才会据此创建唯一的文献检索运行。"""
+    """固化用户选择；后续由显式检索接口据此创建唯一运行。"""
     try:
         plan = await ResearchPlanService(session).confirm_current_plan(
             owner_user_id=current_user.id,

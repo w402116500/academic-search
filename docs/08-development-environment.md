@@ -1,6 +1,6 @@
 # academic-search 开发环境
 
-状态：已配置。此环境用于本地开发和面试演示；已包含认证、工作区、研究计划 API，以及意图分析和 RAG 入库 Worker。多源检索与研究 Agent 尚未实现。
+状态：已配置。此环境用于本地开发和面试演示；已包含认证、工作区、研究计划、多源检索 API，以及意图分析、多源检索和 RAG 入库 Worker。研究 Agent 尚未实现。
 
 ## 1. 运行模型
 
@@ -62,9 +62,27 @@ uv run --directory backend arq app.workers.workflow.WorkerSettings
 uv run --directory backend arq app.workers.ingestion.WorkerSettings
 ```
 
-两个 Worker 都会从 `REDIS_URL` 连接 arq 队列。意图分析 Worker 在用户调用 `POST /api/v1/collections/research` 后访问 OpenAI 兼容 Chat 模型，返回经过 Pydantic 校验的 2-3 个研究方向和方向对应检索表达式；它不会自动开始文献检索。入库 Worker 在后续全文准入任务投递后，访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。
+这两个 Worker 都会从 `REDIS_URL` 连接 arq 队列。意图分析 Worker 在用户调用 `POST /api/v1/collections/research` 后访问聊天模型，返回经过 Pydantic 校验的 2-3 个研究方向和方向对应检索表达式；检索运行也由同一个 Worker 消费。它只在用户确认计划后调用 OpenAlex、Crossref、arXiv 和 Semantic Scholar，并将候选放入 Redis 短期会话。入库 Worker 在后续全文准入任务投递后，访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。
 
-意图分析模型使用 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_CHAT_MODEL` 和可选的 `WORKFLOW_INTENT_TIMEOUT_SECONDS`。模型输出不符合计划结构时，工作区会进入 `failed`，用户可修改原始要求并调用重新生成接口；系统不会把自由文本直接作为检索词执行。
+意图分析和后续研究对话使用 `WORKFLOW_CHAT_PROVIDER` 选择聊天后端，当前默认值为 `deepseek`，对应 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_CHAT_MODEL`。如需切换到其他 OpenAI 兼容聊天服务，将其改为 `openai_compatible` 并配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_CHAT_MODEL`。`OPENAI_*` 也继续用于 RAG embedding 配置。模型输出不符合计划结构时，工作区会进入 `failed`，用户可修改原始要求并调用重新生成接口；系统不会把自由文本直接作为检索词执行。
+
+确认研究计划后，前端调用 `POST /api/v1/collections/{collection_id}/search-runs` 显式启动多源检索。检索 Worker 由同一个 `app.workers.workflow.WorkerSettings` 消费，按已确认查询并发调用已启用来源，并通过下列接口恢复状态：
+
+- `GET /api/v1/collections/{collection_id}/search-runs/current`：刷新页面时读取最近一次运行。
+- `GET /api/v1/collections/{collection_id}/search-runs/{run_id}`：读取 PostgreSQL 中的运行状态和来源摘要。
+- `GET /api/v1/collections/{collection_id}/search-runs/{run_id}/candidates`：读取 Redis TTL 内的统一候选。
+- `GET /api/v1/collections/{collection_id}/search-runs/{run_id}/events`：通过 SSE 接收阶段、来源状态、计数和失败原因，并支持 `Last-Event-ID` 断线恢复。
+- `POST /api/v1/collections/{collection_id}/search-runs/{run_id}/retry`：为失败、部分失败或过期运行创建新的尝试。
+
+候选只在 Redis 中短期保存，未通过 DOI、全文和权限准入前不会写入 PostgreSQL 的 `papers`。真实多源运行验收默认关闭；需要显式设置 `RUN_LIVE_SEARCH_RUN_TESTS=1` 后运行：
+
+```powershell
+Set-Location backend
+$env:RUN_LIVE_SEARCH_RUN_TESTS = "1"
+uv run pytest tests/integration/test_live_search_run.py -m live -s
+```
+
+该测试会创建随机临时用户、工作区、研究计划和检索运行，结束时删除数据库与 Redis 数据；它会消耗外部文献来源配额，不应放入常规 CI。
 
 本地 Docker Redis 仅映射 IPv4 时，推荐使用 `REDIS_URL=redis://127.0.0.1:6379/0`。Worker 会兼容旧的 `localhost` 配置并自动转为该 IPv4 地址；远程 Redis 地址保持原样。
 
