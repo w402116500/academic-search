@@ -7,6 +7,7 @@ from typing import Annotated
 from app.api.deps.auth import get_current_user
 from app.core.security import (
     AuthenticationConfigurationError,
+    AuthenticationSettings,
     create_access_token,
     get_authentication_settings,
 )
@@ -46,15 +47,24 @@ def _auth_error_response(error: AuthError) -> HTTPException:
     )
 
 
-def _authentication_response(user: User) -> AuthenticationResponse:
-    """以同一格式返回注册和登录成功结果。"""
+def _authentication_settings_or_unavailable() -> AuthenticationSettings:
+    """在执行认证副作用前确认 JWT 配置可安全签名。"""
     try:
-        token = create_access_token(user_id=user.id, settings=get_authentication_settings())
+        settings = get_authentication_settings()
+        settings.signing_secret()
     except AuthenticationConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": "authentication_unavailable", "message": "认证服务暂不可用。"},
         ) from exc
+    return settings
+
+
+def _authentication_response(
+    user: User, settings: AuthenticationSettings
+) -> AuthenticationResponse:
+    """以同一格式返回注册和登录成功结果。"""
+    token = create_access_token(user_id=user.id, settings=settings)
     return AuthenticationResponse(access_token=token, user=CurrentUserResponse.model_validate(user))
 
 
@@ -69,11 +79,13 @@ async def register(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> AuthenticationResponse:
     """创建账号并立即返回访问令牌，邮箱验证将在后续独立接入。"""
+    # 注册会写入用户表，因此必须先确认能够签发令牌，避免账号半成功。
+    settings = _authentication_settings_or_unavailable()
     try:
         user = await AuthenticationService(session).register(request)
     except AuthError as exc:
         raise _auth_error_response(exc) from exc
-    return _authentication_response(user)
+    return _authentication_response(user, settings)
 
 
 @router.post("/login", response_model=AuthenticationResponse, summary="使用邮箱密码登录")
@@ -82,11 +94,12 @@ async def login(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> AuthenticationResponse:
     """验证本地账号密码并签发新的短生命周期访问令牌。"""
+    settings = _authentication_settings_or_unavailable()
     try:
         user = await AuthenticationService(session).authenticate(request)
     except AuthError as exc:
         raise _auth_error_response(exc) from exc
-    return _authentication_response(user)
+    return _authentication_response(user, settings)
 
 
 @router.get("/me", response_model=CurrentUserResponse, summary="获取当前登录账号")

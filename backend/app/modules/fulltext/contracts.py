@@ -6,12 +6,16 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
+from app.modules.search.contracts import UnifiedCandidate
 from pydantic import BaseModel, Field, model_validator
 
 
 class FulltextAcquisitionStatus(StrEnum):
-    """全文获取任务对调用方暴露的最终状态。"""
+    """全文获取任务对调用方暴露的可恢复状态。"""
 
+    QUEUED = "queued"
+    DOWNLOADING = "downloading"
+    VALIDATING = "validating"
     AVAILABLE = "available"
     REQUIRES_UPLOAD = "requires_upload"
     REJECTED = "rejected"
@@ -36,6 +40,7 @@ class FulltextAcquisitionErrorCode(StrEnum):
     INVALID_CONTENT_TYPE = "invalid_content_type"
     INVALID_PDF = "invalid_pdf"
     STORAGE_ERROR = "storage_error"
+    TASK_ERROR = "task_error"
 
 
 class FulltextAcquisitionError(BaseModel):
@@ -64,7 +69,7 @@ class AcquiredFulltext(BaseModel):
 
 
 class FulltextAcquisitionResult(BaseModel):
-    """全文获取的互斥结果，供 SSE、重试和后续入库服务使用。"""
+    """全文获取的互斥结果，供轮询、重试和后续准入服务使用。"""
 
     candidate_id: UUID
     status: FulltextAcquisitionStatus
@@ -77,7 +82,33 @@ class FulltextAcquisitionResult(BaseModel):
         if self.status is FulltextAcquisitionStatus.AVAILABLE:
             if self.document is None or self.error is not None:
                 raise ValueError("available 结果必须且只能携带已校验文件")
+        elif self.status in {
+            FulltextAcquisitionStatus.QUEUED,
+            FulltextAcquisitionStatus.DOWNLOADING,
+            FulltextAcquisitionStatus.VALIDATING,
+        }:
+            if self.document is not None or self.error is not None:
+                raise ValueError("执行中的全文任务不能携带文件或失败原因")
         elif self.document is not None or self.error is None:
-            raise ValueError("非 available 结果必须且只能携带失败原因")
+            raise ValueError("终态失败的全文结果必须且只能携带失败原因")
 
+        return self
+
+
+class CandidateFulltextState(BaseModel):
+    """一个搜索候选的短期全文任务状态，整体只保存于 Redis。"""
+
+    search_run_id: UUID
+    candidate: UnifiedCandidate
+    attempt_no: int = Field(ge=1)
+    result: FulltextAcquisitionResult
+    arq_job_id: str | None = Field(default=None, min_length=1, max_length=128)
+    requested_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def candidate_and_result_must_match(self) -> CandidateFulltextState:
+        """防止不同候选的全文状态被错误拼接后绕过准入校验。"""
+        if self.candidate.candidate_id != self.result.candidate_id:
+            raise ValueError("全文任务候选与结果标识不一致")
         return self

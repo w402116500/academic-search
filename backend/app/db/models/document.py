@@ -116,7 +116,7 @@ class IngestionRun(UUIDPrimaryKeyMixin, Base):
             "document_id", "pipeline_version", "attempt_no", name="document_pipeline_attempt"
         ),
         CheckConstraint(
-            "status IN ('queued', 'running', 'completed', 'failed', 'cancelled')",
+            "status IN ('pending', 'queued', 'running', 'completed', 'failed', 'cancelled')",
             name="status",
         ),
         CheckConstraint("stage IN ('parse', 'chunk', 'embed', 'index')", name="stage"),
@@ -147,7 +147,12 @@ class IngestionRun(UUIDPrimaryKeyMixin, Base):
         String(64), nullable=False, comment="解析与向量化流程版本"
     )
     status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="queued", index=True, comment="运行状态"
+        String(32),
+        nullable=False,
+        default="pending",
+        index=True,
+        comment="运行状态：pending 待确认、queued 已投递、running 执行中、"
+        "completed 完成、failed 失败、cancelled 已取消",
     )
     stage: Mapped[str] = mapped_column(
         String(32),

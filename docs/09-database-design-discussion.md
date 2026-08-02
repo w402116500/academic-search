@@ -1,6 +1,6 @@
 # academic-search 数据库设计讨论稿
 
-状态：SQLAlchemy 模型、严格准入 Alembic 迁移、开放获取直链 PDF 的受控下载暂存、研究集合入库事务与 RAG 入库 Worker 已实现；准入自动投递和 API 业务接口尚未实现。
+状态：SQLAlchemy 模型、严格准入 Alembic 迁移、开放获取直链 PDF 的受控下载暂存、研究集合入库事务、准入与集合构建 API，以及 RAG 入库 Worker 已实现；RAG 检索、研究对话、回答 trace 与治理 API 尚未实现。
 
 定位：定义 PostgreSQL 的业务数据模型，以及它与对象存储、Milvus、Redis 的数据边界。首版遵循一个明确前提：**检索结果只是临时候选；只有 DOI 题录核验完成、用户主动选择并且合法正文已实际取得的文献，才写入 PostgreSQL。**
 
@@ -28,7 +28,7 @@ PostgreSQL 是业务真相来源，保存用户、研究工作区、已确认文
 3. 系统从该格式中立题录生成 **GB/T 7714-2015 顺序编码制** 引文；标题、作者、日期、类型、出处、DOI 与 URL 等关键字段必须无缺失、无冲突。
 4. 后端仅对来源明确的开放获取直链 PDF 自动下载，或接收用户有权处理的 PDF；不处理仅有落地页、付费墙或访问受限的候选。
 5. 文件通过类型、大小、内容完整性、来源权限和 SHA-256 校验并写入私有暂存区后，准入服务转正对象，并在一个 PostgreSQL 事务中写入 `papers`、`collection_papers`、`documents` 与初始 `ingestion_runs`；任一步失败均补偿清理对象。
-6. 准入服务创建状态为 `queued` 的入库运行；`app.workers.ingestion` 消费其 ID 后按 `parse -> chunk -> embed -> index` 推进。只有解析、切块、嵌入与 Milvus 写入全部成功的当前版本才可参与 RAG；自动投递入口仍待 API 层实现。
+6. 准入服务先创建状态为 `pending`、阶段为 `parse` 的入库运行；用户确认集合构建后，集合构建 API 将其转为 `queued` 并投递 arq，`app.workers.ingestion` 再按 `parse -> chunk -> embed -> index` 推进。只有解析、切块、嵌入与 Milvus 写入全部成功的当前版本才可参与 RAG。
 
 因此，`papers` 中的每一行都代表“有正式 DOI 题录且已有可处理正文的研究文献”，而不是一个待筛选的搜索结果或只有题录的收藏。无法验证 DOI 题录、未取得正文或全文校验失败的候选在界面中提示具体原因，不创建长期业务记录。
 
@@ -311,7 +311,7 @@ backend/
 
 首版按业务领域拆分模型文件，而不是把全部模型堆进一个 `models.py`。`schemas` 与 `models` 必须分开：前者定义 API 的输入输出，后者定义 PostgreSQL 表和外键。服务层负责“DOI 题录与正文均验证成功后才入库”等业务规则，路由层只调用服务并返回响应。
 
-已实现的数据库基础设施包括 `app/db/base.py`、`app/db/session.py`、`app/db/models/`、`alembic/env.py` 与五条迁移：初始建表、schema 注释、严格准入同步、研究工作流状态和工作流唯一约束校正。最新 revision `f41c8e7b2a06_align_workflow_unique_constraints` 使 `arq_job_id`、`redis_session_key` 的数据库唯一约束与 SQLAlchemy 模型保持一致；其前一条 revision `e2a7c4b9d113_add_research_workflow_models` 为工作区增加独立 `workflow_stage`，并创建 `research_plans`、`search_runs`。候选详情仍不写入 PostgreSQL，而只在 Redis TTL 内保存，防止未通过 DOI 与全文准入的数据混入 `papers`。`d7a4c9e2f18b_align_research_document_admission` 已将 `papers.doi` 改为非空唯一、移除 `bibliographic_fingerprint`、补齐格式中立题录字段，并同步 `documents.origin_kind` 与 `ingestion_runs.is_current`。`app/modules/fulltext` 将合法获取的 PDF 写入私有暂存键；`app/modules/collections/ResearchCollectionAdmissionService` 已在验证候选、题录、全文和工作区权限后，以可补偿流程转正对象，并在一个事务中写入长期书目、集合关联、文件和初始入库运行。`app.workers.ingestion` 已实现消费该运行的解析、切块、embedding 和 Milvus 写入；准入服务尚未接入 HTTP API 或自动 arq 投递，后续接口必须消费这条既有准入边界，不能绕过或修改初始迁移。
+已实现的数据库基础设施包括 `app/db/base.py`、`app/db/session.py`、`app/db/models/`、`alembic/env.py` 与七条迁移：初始建表、schema 注释、严格准入同步、工作区列表索引、研究工作流状态、工作流唯一约束校正和入库 `pending` 状态。最新 revision `a6d2e9f7c418_add_pending_ingestion_status` 使“准入后待用户确认构建”成为可持久化状态；`f41c8e7b2a06_align_workflow_unique_constraints` 使 `arq_job_id`、`redis_session_key` 的数据库唯一约束与 SQLAlchemy 模型保持一致；`e2a7c4b9d113_add_research_workflow_models` 为工作区增加独立 `workflow_stage`，并创建 `research_plans`、`search_runs`。候选详情仍不写入 PostgreSQL，而只在 Redis TTL 内保存，防止未通过 DOI 与全文准入的数据混入 `papers`。`d7a4c9e2f18b_align_research_document_admission` 已将 `papers.doi` 改为非空唯一、移除 `bibliographic_fingerprint`、补齐格式中立题录字段，并同步 `documents.origin_kind` 与 `ingestion_runs.is_current`。`app/modules/fulltext` 将合法获取的 PDF 写入私有暂存键；`app/modules/collections/ResearchCollectionAdmissionService` 已在验证候选、题录、全文和工作区权限后，以可补偿流程转正对象，并在一个事务中写入长期书目、集合关联、文件和初始 `pending` 入库运行。候选全文、准入和集合构建 API 均已接入这条边界；集合构建服务负责将运行转为 `queued` 并投递 arq，`app.workers.ingestion` 再完成解析、切块、embedding 和 Milvus 写入。后续 RAG 检索与研究对话接口必须继续复用这些准入、版本和权限边界。
 
 ## 8. 首批 Alembic 迁移顺序
 

@@ -12,6 +12,8 @@ from app.modules.collections.workspace_contracts import (
     CreateWorkspaceRequest,
     UpdateWorkspaceRequest,
     WorkspaceError,
+    WorkspaceErrorCode,
+    WorkspaceListResponse,
     WorkspaceResponse,
 )
 from app.modules.collections.workspace_service import ResearchWorkspaceService
@@ -23,13 +25,13 @@ router = APIRouter(prefix="/collections", tags=["研究工作区"])
 
 def _workspace_error_response(error: WorkspaceError) -> HTTPException:
     """工作区越权和不存在统一返回 404，不向用户泄漏资源归属。"""
-    status_code = (
-        status.HTTP_404_NOT_FOUND
-        if error.code.value == "workspace_not_found"
-        else status.HTTP_409_CONFLICT
-    )
+    status_code_by_error = {
+        WorkspaceErrorCode.NOT_FOUND: status.HTTP_404_NOT_FOUND,
+        WorkspaceErrorCode.NOT_ACTIVE: status.HTTP_409_CONFLICT,
+        WorkspaceErrorCode.INVALID_CURSOR: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    }
     return HTTPException(
-        status_code=status_code,
+        status_code=status_code_by_error[error.code],
         detail={"code": error.code, "message": str(error)},
     )
 
@@ -53,18 +55,40 @@ async def create_workspace(
     return WorkspaceResponse.model_validate(collection)
 
 
-@router.get("", response_model=list[WorkspaceResponse], summary="列出我的研究工作区")
+@router.get("", response_model=WorkspaceListResponse, summary="搜索我的研究工作区")
 async def list_workspaces(
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
     include_archived: bool = Query(default=False, description="是否包含已归档工作区"),
-) -> list[WorkspaceResponse]:
-    """默认只显示活动工作区，按最近更新时间降序返回。"""
-    collections = await ResearchWorkspaceService(session).list_owned(
-        owner_user_id=current_user.id,
-        include_archived=include_archived,
+    query: str | None = Query(
+        default=None,
+        alias="q",
+        min_length=1,
+        max_length=200,
+        description="按工作区名称或当前研究阶段搜索",
+    ),
+    cursor: str | None = Query(
+        default=None,
+        max_length=1_000,
+        description="上一页返回的不透明分页游标",
+    ),
+    limit: int = Query(default=20, ge=1, le=50, description="本次最多返回的工作区数量"),
+) -> WorkspaceListResponse:
+    """供工作区切换器按需加载，默认只显示活动工作区。"""
+    try:
+        page = await ResearchWorkspaceService(session).list_owned(
+            owner_user_id=current_user.id,
+            include_archived=include_archived,
+            query=query,
+            cursor=cursor,
+            limit=limit,
+        )
+    except WorkspaceError as exc:
+        raise _workspace_error_response(exc) from exc
+    return WorkspaceListResponse(
+        items=[WorkspaceResponse.model_validate(collection) for collection in page.items],
+        next_cursor=page.next_cursor,
     )
-    return [WorkspaceResponse.model_validate(collection) for collection in collections]
 
 
 @router.get("/{collection_id}", response_model=WorkspaceResponse, summary="获取研究工作区详情")

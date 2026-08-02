@@ -82,7 +82,12 @@ class ResearchCollection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="collection",
         cascade="all, delete-orphan",
     )
-    research_runs: Mapped[list[ResearchRun]] = relationship(back_populates="collection")
+    # ResearchRun 的外键已经声明 ON DELETE CASCADE；交给数据库级联，避免 ORM
+    # 在删除工作区时先将 collection_id 置空而违反 research_runs 的非空约束。
+    research_runs: Mapped[list[ResearchRun]] = relationship(
+        back_populates="collection",
+        passive_deletes=True,
+    )
     research_plans: Mapped[list[ResearchPlan]] = relationship(
         back_populates="collection",
         cascade="all, delete-orphan",

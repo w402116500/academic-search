@@ -60,4 +60,9 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="owner",
         cascade="all, delete-orphan",
     )
-    conversations: Mapped[list[Conversation]] = relationship(back_populates="owner")
+    # 对话通过 owner_user_id 的 ON DELETE CASCADE 删除；不让 ORM 先写入 NULL，
+    # 以保持 conversations.owner_user_id 的非空约束和数据库级联语义一致。
+    conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="owner",
+        passive_deletes=True,
+    )

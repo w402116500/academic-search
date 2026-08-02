@@ -1,6 +1,6 @@
 # academic-search RAG 文献研究讨论稿
 
-状态：进行中；研究集合准入、开放获取直链 PDF 下载暂存、PDF 入库 Worker 与 Milvus L3 向量写入已实现；自动投递 API、检索与 Agent 尚未实现。
+状态：进行中；研究集合准入、开放获取直链 PDF 下载暂存、准入与集合构建 API、PDF 入库 Worker 及 Milvus L3 向量写入已实现；RAG 检索、证据组装与研究对话 Agent 尚未实现。
 定位：定义用户获得文献后，如何将选定文献变成可检索、可引用、可比较的研究集合。
 关联：检索结果入口见 [`03-literature-search-and-discovery-discussion.md`](03-literature-search-and-discovery-discussion.md)；运行治理见 [`06-session-reliability-and-governance-discussion.md`](06-session-reliability-and-governance-discussion.md)。
 
@@ -42,7 +42,7 @@ RAG 的准入条件是“已核验 DOI + 已实际取得的合法正文”，两
 
 自动下载必须是后端受控任务：只使用搜索会话中已发现的 URL，限制协议、重定向、下载大小和超时；阻断本地/私有网络目标；同时校验 HTTP `Content-Type` 与 PDF 魔数；流式计算 SHA-256。对象先以临时键上传；准入服务通过服务端复制将其转为正式对象，再创建数据库记录。对象存储与数据库之间使用补偿清理：任一步失败都删除本次可能遗留的正式键和暂存键。
 
-下载校验通过后，系统在一个事务中写入 `papers`、`collection_papers`、`documents` 和初始 `ingestion_runs`；随后由 Worker 开始解析。这样数据库中的论文不是“有一条题录”，而是“已经拥有可追溯研究正文”的文献。当前 `ResearchCollectionAdmissionService` 已实现这一准入事务、工作区权限校验、同 DOI 幂等处理和对象补偿清理；它创建 `queued / parse` 入库运行。`app.workers.ingestion` 已可消费该运行并完成 PDF 解析、切块、embedding 与 Milvus 写入；自动将准入结果投递 arq 的 HTTP API 仍待实现。
+下载校验通过后，系统在一个事务中写入 `papers`、`collection_papers`、`documents` 和初始 `ingestion_runs`；随后由 Worker 开始解析。这样数据库中的论文不是“有一条题录”，而是“已经拥有可追溯研究正文”的文献。当前 `ResearchCollectionAdmissionService` 已实现这一准入事务、工作区权限校验、同 DOI 幂等处理和对象补偿清理；`POST .../fulltext/admission` 会创建 `pending / parse` 入库运行。用户确认集合构建后，`POST /collections/{collection_id}/build` 才将活动运行转为 `queued` 并逐篇投递 arq；`app.workers.ingestion` 消费这些任务并完成 PDF 解析、切块、embedding 与 Milvus 写入。
 
 解析失败、扫描件质量过低、页码无法定位等情况必须显式标注，不能让用户误以为该文献已经具备可靠问答能力。`documents` 创建成功不等于可被 RAG 回答，只有当前入库运行完成并且向量索引写入成功后才可检索。
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
+from app.workers.queues import WORKFLOW_QUEUE_NAME
 from app.workers.redis import redis_settings_from_environment
 from arq import create_pool
 
@@ -25,12 +26,30 @@ class SearchRunJobQueue(Protocol):
         raise NotImplementedError
 
 
+class CandidateFulltextJobQueue(Protocol):
+    """全文获取服务依赖的最小任务投递接口。"""
+
+    async def enqueue_fulltext(
+        self,
+        *,
+        search_run_id: UUID,
+        candidate_id: UUID,
+        attempt_no: int,
+    ) -> str:
+        """投递候选全文获取任务，返回可恢复的 arq Job 标识。"""
+        raise NotImplementedError
+
+
 class ResearchPlanQueueError(RuntimeError):
     """Redis 或 arq 队列无法接收计划分析任务时抛出。"""
 
 
 class SearchRunQueueError(RuntimeError):
     """Redis 或 arq 队列无法接收检索运行任务时抛出。"""
+
+
+class CandidateFulltextQueueError(RuntimeError):
+    """Redis 或 arq 队列无法接收全文获取任务时抛出。"""
 
 
 class ArqResearchPlanJobQueue:
@@ -45,6 +64,7 @@ class ArqResearchPlanJobQueue:
                 "analyze_research_plan",
                 str(research_plan_id),
                 _job_id=str(research_plan_id),
+                _queue_name=WORKFLOW_QUEUE_NAME,
             )
             if job is None:
                 raise ResearchPlanQueueError("研究计划分析任务已存在或无法投递。")
@@ -71,6 +91,7 @@ class ArqSearchRunJobQueue:
                 "run_search",
                 str(search_run_id),
                 _job_id=str(search_run_id),
+                _queue_name=WORKFLOW_QUEUE_NAME,
             )
             if job is None:
                 raise SearchRunQueueError("文献检索任务已存在或无法投递。")
@@ -79,6 +100,38 @@ class ArqSearchRunJobQueue:
             raise
         except Exception as exc:
             raise SearchRunQueueError("文献检索任务无法投递到 Redis。") from exc
+        finally:
+            if redis is not None:
+                await redis.aclose(close_connection_pool=True)
+
+
+class ArqCandidateFulltextJobQueue:
+    """向工作流 Worker 投递短期全文下载任务。"""
+
+    async def enqueue_fulltext(
+        self,
+        *,
+        search_run_id: UUID,
+        candidate_id: UUID,
+        attempt_no: int,
+    ) -> str:
+        """使用运行、候选和尝试序号组成幂等 Job ID，允许失败后创建新尝试。"""
+        redis = None
+        job_id = f"fulltext-{search_run_id}-{candidate_id}-{attempt_no}"
+        try:
+            redis = await create_pool(redis_settings_from_environment())
+            job = await redis.enqueue_job(
+                "acquire_candidate_fulltext",
+                str(search_run_id),
+                str(candidate_id),
+                attempt_no,
+                _job_id=job_id,
+                _queue_name=WORKFLOW_QUEUE_NAME,
+            )
+            # arq 返回 None 说明相同尝试已排队；这对重复点击是幂等成功。
+            return job.job_id if job is not None else job_id
+        except Exception as exc:
+            raise CandidateFulltextQueueError("全文获取任务无法投递到 Redis。") from exc
         finally:
             if redis is not None:
                 await redis.aclose(close_connection_pool=True)

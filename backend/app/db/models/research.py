@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -68,6 +69,12 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="conversation",
         cascade="all, delete-orphan",
     )
+    # 会话被物理删除时由 research_runs.conversation_id 的数据库级联清理运行；
+    # 普通用户删除仍是软删除，不会触发这里的物理删除行为。
+    research_runs: Mapped[list[ResearchRun]] = relationship(
+        back_populates="conversation",
+        passive_deletes=True,
+    )
 
 
 class Message(UUIDPrimaryKeyMixin, Base):
@@ -84,6 +91,7 @@ class Message(UUIDPrimaryKeyMixin, Base):
             "status IN ('pending', 'streaming', 'completed', 'failed')",
             name="status",
         ),
+        Index("ix_messages_conversation_created_at", "conversation_id", "created_at"),
         {"comment": "对话中的用户、助手或系统消息"},
     )
 
@@ -131,6 +139,13 @@ class ResearchRun(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "research_runs"
     __table_args__ = (
         CheckConstraint(
+            "stage IN "
+            "('dispatch', 'preparing', 'hybrid_retrieval', 'parent_merging', "
+            "'reranking', 'evidence_verifying', 'answering', 'completed', "
+            "'awaiting_clarification', 'failed', 'cancelled')",
+            name="stage",
+        ),
+        CheckConstraint(
             "mode IN ('single_rag', 'multi_agent', 'research_note')",
             name="mode",
         ),
@@ -139,9 +154,17 @@ class ResearchRun(UUIDPrimaryKeyMixin, Base):
             "('queued', 'running', 'awaiting_clarification', 'completed', 'failed', 'cancelled')",
             name="status",
         ),
+        Index("ix_research_runs_conversation_created_at", "conversation_id", "created_at"),
         {"comment": "一次 RAG 或 LangGraph 研究执行的状态与审计信息"},
     )
 
+    conversation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="触发本次运行的研究会话标识",
+    )
     collection_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         ForeignKey("research_collections.id", ondelete="CASCADE"),
@@ -156,6 +179,9 @@ class ResearchRun(UUIDPrimaryKeyMixin, Base):
         # 一条用户消息只有一个权威执行记录；重试在同一 research_run 内完成。
         unique=True,
         comment="触发本次研究的用户消息标识",
+    )
+    arq_job_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, unique=True, comment="Redis arq 研究任务标识"
     )
     output_message_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
@@ -172,6 +198,13 @@ class ResearchRun(UUIDPrimaryKeyMixin, Base):
     )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="queued", index=True, comment="研究运行状态"
+    )
+    stage: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="dispatch",
+        index=True,
+        comment="可展示执行阶段：dispatch、检索、证据核验、回答或终态",
     )
     langgraph_thread_id: Mapped[str | None] = mapped_column(
         String(128), nullable=True, unique=True, comment="LangGraph checkpoint 线程标识"
@@ -206,6 +239,7 @@ class ResearchRun(UUIDPrimaryKeyMixin, Base):
     )
 
     collection: Mapped[ResearchCollection] = relationship(back_populates="research_runs")
+    conversation: Mapped[Conversation] = relationship(back_populates="research_runs")
     evidences: Mapped[list[ResearchEvidence]] = relationship(
         back_populates="research_run",
         cascade="all, delete-orphan",

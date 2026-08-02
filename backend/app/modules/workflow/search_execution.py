@@ -12,6 +12,8 @@ from app.core.settings import LiteratureSourceSettings, get_literature_source_se
 from app.db.models.workflow import ResearchPlan, SearchRun
 from app.modules.search.citation_enrichment import CitationMetadataEnricher
 from app.modules.search.contracts import (
+    CandidateRelevanceLevel,
+    CandidateRelevanceState,
     ProviderError,
     ProviderErrorCode,
     ProviderQuery,
@@ -23,9 +25,17 @@ from app.modules.search.processing import process_provider_results
 from app.modules.search.providers.base import SearchProvider
 from app.modules.search.providers.doi_resolver import DoiMetadataResolver
 from app.modules.search.providers.registry import ProviderRegistry, build_provider_registry
+from app.modules.workflow.candidate_relevance import (
+    OpenAICompatibleCandidateRelevanceEvaluator,
+    build_candidate_relevance_context,
+    mark_candidate_relevance_failed,
+    skip_candidate_relevance,
+)
 from app.modules.workflow.contracts import ProviderSearchQuery, ResearchScope, SearchProgressEvent
+from app.modules.workflow.query_plan import read_confirmed_query_plan
 from app.modules.workflow.search_run_service import SearchRunService
 from app.modules.workflow.search_session import SearchSessionStore
+from app.modules.workflow.settings import get_workflow_settings
 from app.modules.workflow.state import SearchRunStage, SearchRunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +62,7 @@ class SearchRunExecutor:
         literature_settings: LiteratureSourceSettings | None = None,
         registry: ProviderRegistry | None = None,
         citation_enricher: CitationMetadataEnricher | None = None,
+        relevance_evaluator: OpenAICompatibleCandidateRelevanceEvaluator | None = None,
     ) -> None:
         self._session = session
         self._search_run = search_run
@@ -59,6 +70,7 @@ class SearchRunExecutor:
         self._literature_settings = literature_settings or get_literature_source_settings()
         self._registry = registry or build_provider_registry(self._literature_settings)
         self._citation_enricher = citation_enricher
+        self._relevance_evaluator = relevance_evaluator
         self._workflow_service = SearchRunService(session)
 
     async def execute(self) -> dict[str, str]:
@@ -83,7 +95,7 @@ class SearchRunExecutor:
             return self._result(SearchRunStatus.FAILED)
 
         try:
-            query_specs, scope = self._read_confirmed_query_plan(plan)
+            query_specs, scope = read_confirmed_query_plan(plan)
         except ValueError as exc:
             await self._fail(code="search_plan_data_invalid", message=str(exc))
             return self._result(SearchRunStatus.FAILED)
@@ -171,6 +183,15 @@ class SearchRunExecutor:
             message="候选已完成规整、去重和基础筛选。",
         )
 
+        candidates = await self._assess_relevance(
+            plan=plan,
+            query_specs=query_specs,
+            scope=scope,
+            candidates=processed.candidates,
+            provider_summary=provider_summary,
+            candidate_counts=candidate_counts,
+        )
+
         # 题录补全是独立的可观测阶段；即使配置为 0，也发布阶段事件让前端知道
         # 候选已经通过基础筛选，正在准备最终展示结果。
         await self._workflow_service.update_progress(
@@ -184,10 +205,10 @@ class SearchRunExecutor:
             stage=SearchRunStage.CITATION_ENRICHMENT,
             provider_summary=provider_summary,
             candidate_counts=candidate_counts,
-            candidates=processed.candidates,
+            candidates=candidates,
             message="正在补全可复制的正式题录。",
         )
-        candidates = await self._enrich_citations(processed.candidates)
+        candidates = await self._enrich_citations(candidates)
         final_status = (
             SearchRunStatus.FAILED
             if successful_provider_count == 0
@@ -238,24 +259,6 @@ class SearchRunExecutor:
         """读取检索运行绑定的计划，Worker 不能自行寻找其他版本。"""
         return await self._session.scalar(
             select(ResearchPlan).where(ResearchPlan.id == self._search_run.research_plan_id)
-        )
-
-    @staticmethod
-    def _read_confirmed_query_plan(
-        plan: ResearchPlan,
-    ) -> tuple[list[ProviderSearchQuery], ResearchScope]:
-        """读取已确认查询和范围，异常数据不会继续访问外部网络。"""
-        if plan.status != "confirmed":
-            raise ValueError("研究计划尚未确认，不能执行文献检索。")
-        raw_queries = plan.query_plan.get("queries")
-        confirmed_scope = plan.scope.get("confirmed")
-        if not isinstance(raw_queries, list) or not raw_queries:
-            raise ValueError("已确认研究计划缺少可执行查询。")
-        if not isinstance(confirmed_scope, dict):
-            raise ValueError("已确认研究计划缺少检索范围。")
-        return (
-            [ProviderSearchQuery.model_validate(item) for item in raw_queries],
-            ResearchScope.model_validate(confirmed_scope),
         )
 
     def _group_provider_queries(
@@ -353,7 +356,11 @@ class SearchRunExecutor:
         included_ids = [
             candidate.candidate_id
             for candidate in candidates
-            if candidate.triage is not None and candidate.triage.included
+            if candidate.triage is not None
+            and candidate.triage.included
+            and candidate.relevance_assessment is not None
+            and candidate.relevance_assessment.level
+            in {CandidateRelevanceLevel.CORE, CandidateRelevanceLevel.RELATED}
         ]
         selected_ids = set(included_ids[:limit])
         semaphore = asyncio.Semaphore(8)
@@ -365,6 +372,109 @@ class SearchRunExecutor:
                 return await citation_enricher.enrich(candidate)
 
         return tuple(await asyncio.gather(*(enrich(candidate) for candidate in candidates)))
+
+    async def _assess_relevance(
+        self,
+        *,
+        plan: ResearchPlan,
+        query_specs: list[ProviderSearchQuery],
+        scope: ResearchScope,
+        candidates: tuple[UnifiedCandidate, ...],
+        provider_summary: dict[str, Any],
+        candidate_counts: dict[str, Any],
+    ) -> tuple[UnifiedCandidate, ...]:
+        """先发布统一候选，再按批次写回可核对的语义判断。"""
+        context = build_candidate_relevance_context(
+            research_question=plan.raw_request,
+            direction_options=plan.direction_options,
+            selected_direction_id=plan.selected_direction_id,
+            query_specs=query_specs,
+            scope=scope,
+        )
+        prepared_candidates = tuple(
+            candidate
+            if candidate.triage and candidate.triage.included
+            else skip_candidate_relevance(candidate)
+            for candidate in candidates
+        )
+        eligible = [
+            candidate
+            for candidate in prepared_candidates
+            if candidate.triage and candidate.triage.included
+        ]
+        candidate_counts["relevance_total_count"] = len(eligible)
+        candidate_counts["relevance_completed_count"] = 0
+        candidate_counts["relevance_failed_count"] = 0
+        await self._workflow_service.update_progress(
+            search_run_id=self._search_run.id,
+            stage=SearchRunStage.RELEVANCE_ASSESSMENT,
+            provider_summary=provider_summary,
+            candidate_counts=candidate_counts,
+        )
+        await self._publish(
+            status=SearchRunStatus.RUNNING,
+            stage=SearchRunStage.RELEVANCE_ASSESSMENT,
+            provider_summary=provider_summary,
+            candidate_counts=candidate_counts,
+            candidates=prepared_candidates,
+            message="候选已展示，正在依据标题和摘要分析相关性。",
+        )
+        if not eligible:
+            return prepared_candidates
+
+        try:
+            settings = get_workflow_settings()
+            evaluator = self._relevance_evaluator or OpenAICompatibleCandidateRelevanceEvaluator(
+                settings
+            )
+        except Exception:
+            unavailable_candidates = tuple(
+                mark_candidate_relevance_failed(
+                    candidate,
+                    "候选相关性模型尚未配置或暂时不可用，请稍后重试。",
+                    code="candidate_relevance_model_unavailable",
+                )
+                if candidate.triage and candidate.triage.included
+                else candidate
+                for candidate in prepared_candidates
+            )
+            candidate_counts["relevance_failed_count"] = len(eligible)
+            await self._publish(
+                status=SearchRunStatus.RUNNING,
+                stage=SearchRunStage.RELEVANCE_ASSESSMENT,
+                provider_summary=provider_summary,
+                candidate_counts=candidate_counts,
+                candidates=unavailable_candidates,
+                message="候选已展示，但相关性模型当前不可用。",
+            )
+            return unavailable_candidates
+
+        by_id = {candidate.candidate_id: candidate for candidate in prepared_candidates}
+        for index in range(0, len(eligible), settings.workflow_relevance_batch_size):
+            assessed = await evaluator.assess(
+                context=context,
+                candidates=eligible[index : index + settings.workflow_relevance_batch_size],
+            )
+            by_id.update({candidate.candidate_id: candidate for candidate in assessed})
+            current = tuple(by_id[candidate.candidate_id] for candidate in prepared_candidates)
+            candidate_counts["relevance_completed_count"] = sum(
+                candidate.relevance_state is CandidateRelevanceState.COMPLETED
+                for candidate in current
+            )
+            candidate_counts["relevance_failed_count"] = sum(
+                candidate.relevance_state is CandidateRelevanceState.FAILED for candidate in current
+            )
+            await self._publish(
+                status=SearchRunStatus.RUNNING,
+                stage=SearchRunStage.RELEVANCE_ASSESSMENT,
+                provider_summary=provider_summary,
+                candidate_counts=candidate_counts,
+                candidates=current,
+                message=(
+                    f"已完成 {candidate_counts['relevance_completed_count']} 条候选的相关性分析。"
+                ),
+            )
+        return tuple(by_id[candidate.candidate_id] for candidate in prepared_candidates)
 
     async def _publish(
         self,

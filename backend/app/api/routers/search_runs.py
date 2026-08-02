@@ -11,6 +11,11 @@ from app.api.deps.auth import get_current_user
 from app.core.settings import get_literature_source_settings
 from app.db.models.user import User
 from app.db.session import get_db_session
+from app.modules.workflow.candidate_relevance_service import (
+    CandidateRelevanceRetryError,
+    CandidateRelevanceRetryErrorCode,
+    CandidateRelevanceService,
+)
 from app.modules.workflow.contracts import (
     SearchCandidatesResponse,
     SearchProgressEvent,
@@ -43,6 +48,21 @@ def _search_error_response(error: SearchRunError) -> HTTPException:
         status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     else:
         status_code = status.HTTP_409_CONFLICT
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": error.code, "message": str(error)},
+    )
+
+
+def _relevance_retry_error_response(error: CandidateRelevanceRetryError) -> HTTPException:
+    """将候选相关性重试的会话与状态错误映射为稳定 HTTP 响应。"""
+    status_code = (
+        status.HTTP_404_NOT_FOUND
+        if error.code is CandidateRelevanceRetryErrorCode.CANDIDATE_NOT_FOUND
+        else status.HTTP_410_GONE
+        if error.code is CandidateRelevanceRetryErrorCode.SESSION_EXPIRED
+        else status.HTTP_409_CONFLICT
+    )
     return HTTPException(
         status_code=status_code,
         detail={"code": error.code, "message": str(error)},
@@ -193,6 +213,47 @@ async def get_search_candidates(
     return SearchCandidatesResponse(
         run_id=run.id,
         status=SearchRunStatus(snapshot.get("status", run.status)),
+        candidate_counts=snapshot.get("candidate_counts", {}),
+        candidates=snapshot.get("candidates", []),
+    )
+
+
+@router.post(
+    "/{collection_id}/search-runs/{search_run_id}/candidates/{candidate_id}/relevance/retry",
+    response_model=SearchCandidatesResponse,
+    summary="重试候选相关性分析",
+)
+async def retry_candidate_relevance(
+    collection_id: UUID,
+    search_run_id: UUID,
+    candidate_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SearchCandidatesResponse:
+    """只重试当前用户、当前会话中失败且可重试的一条候选理由。"""
+    settings = get_literature_source_settings()
+    redis = redis_client_from_environment()
+    try:
+        result = await CandidateRelevanceService(
+            session,
+            SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
+        ).retry(
+            owner_user_id=current_user.id,
+            collection_id=collection_id,
+            search_run_id=search_run_id,
+            candidate_id=candidate_id,
+        )
+    except SearchRunError as exc:
+        raise _search_error_response(exc) from exc
+    except CandidateRelevanceRetryError as exc:
+        raise _relevance_retry_error_response(exc) from exc
+    finally:
+        await redis.aclose()
+
+    snapshot = result.snapshot
+    return SearchCandidatesResponse(
+        run_id=result.search_run.id,
+        status=SearchRunStatus(snapshot.get("status", result.search_run.status)),
         candidate_counts=snapshot.get("candidate_counts", {}),
         candidates=snapshot.get("candidates", []),
     )

@@ -63,6 +63,7 @@ async def test_openalex_provider_maps_candidates_and_restores_abstract() -> None
 
     candidate = result.candidates[0]
     assert candidate.source_record_id == "W1234567890"
+    assert candidate.language == "en"
     assert [author.name for author in candidate.authors] == ["Ada Lovelace", "Alan Turing"]
     assert candidate.abstract == "Large language models support academic writing"
     assert candidate.venue == "Journal of Academic AI"

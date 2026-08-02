@@ -48,6 +48,7 @@ class SearchRunStage(StrEnum):
     PROVIDER_SEARCH = "provider_search"  # 来源检索：各 Provider 独立请求和报告状态。
     NORMALIZE = "normalize"  # 结果规整：统一标题、作者、年份、DOI 和链接字段。
     TRIAGE = "triage"  # 元数据初筛：去重、基础准入和候选质量检查。
+    RELEVANCE_ASSESSMENT = "relevance_assessment"  # 语义评估：依据标题和摘要解释候选相关性。
     CITATION_ENRICHMENT = "citation_enrichment"  # 题录补全：按需获取格式中立的正式题录。
     COMPLETED = "completed"  # 处理完成：结果可供前端读取和用户审核。
 

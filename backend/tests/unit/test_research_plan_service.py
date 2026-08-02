@@ -35,12 +35,15 @@ _PLAN_ID = UUID("00000000-0000-0000-0000-000000000403")
 
 
 class FakeRow:
-    """模拟 SQLAlchemy 返回的两列 Row，保留服务使用的 ``tuple`` 入口。"""
+    """模拟 SQLAlchemy 返回的两列 Row，兼容新版的 ``_tuple`` 解包入口。"""
 
     def __init__(self, values: tuple[object, object]) -> None:
         self._values = values
 
     def tuple(self) -> tuple[object, object]:
+        return self._values
+
+    def _tuple(self) -> tuple[object, object]:
         return self._values
 
 

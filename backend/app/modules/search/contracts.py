@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -20,6 +21,19 @@ class SourceName(StrEnum):
     CROSSREF = "crossref"
     ARXIV = "arxiv"
     SEMANTIC_SCHOLAR = "semantic_scholar"
+
+
+class CandidateLanguage(StrEnum):
+    """候选文献的主语言分类，用于展示与前端筛选。
+
+    ``OTHER`` 与 ``UNKNOWN`` 必须保留：公开来源并不总是只返回中英文记录，
+    也不应把无法可靠判断的文本错误标成英文。
+    """
+
+    CHINESE = "zh"
+    ENGLISH = "en"
+    OTHER = "other"
+    UNKNOWN = "unknown"
 
 
 class ProviderErrorCode(StrEnum):
@@ -139,6 +153,8 @@ class RawCandidate(BaseModel):
     source_record_id: str = Field(min_length=1, max_length=512)
     source_record_url: str | None = None
     title: str = Field(min_length=1, max_length=5000)
+    # 来源直接声明的语言优先于后续文本识别；缺失时保留 None 而非伪造结果。
+    language: CandidateLanguage | None = None
     authors: tuple[CandidateAuthor, ...] = ()
     abstract: str | None = None
     published_year: int | None = Field(default=None, ge=1600, le=2100)
@@ -202,6 +218,53 @@ class TriageDecision(BaseModel):
     included: bool
     exclusion_reasons: tuple[TriageReasonCode, ...] = ()
     warnings: tuple[TriageReasonCode, ...] = ()
+
+
+class CandidateRelevanceLevel(StrEnum):
+    """统一候选与当前已确认研究方向的关系层级。"""
+
+    CORE = "core"  # 可优先审核的核心研究候选。
+    RELATED = "related"  # 与研究问题存在直接关联，但不一定覆盖全部关系。
+    BACKGROUND = "background"  # 可补充概念或背景，不能单独承担核心证据。
+    NOT_RECOMMENDED = "not_recommended"  # 现有标题和摘要不支持优先保留。
+    INSUFFICIENT_INFORMATION = "insufficient_information"  # 公开元数据不足，无法可靠判断。
+
+
+class CandidateRelevanceState(StrEnum):
+    """短期候选相关性评估的处理状态。"""
+
+    PENDING = "pending"  # 候选已展示，等待模型批量评估。
+    COMPLETED = "completed"  # 已得到并通过服务端证据校验的评估。
+    FAILED = "failed"  # 模型或结构校验失败，不能用伪理由替代。
+    SKIPPED = "skipped"  # 未通过基础初筛，因此没有进入语义评估。
+
+
+class CandidateRelevanceEvidence(BaseModel):
+    """支撑系统相关性判断的一段候选标题或摘要原文。"""
+
+    source_field: Literal["title", "abstract"]
+    quote: str = Field(min_length=1, max_length=500)
+
+
+class CandidateRelevanceAssessment(BaseModel):
+    """候选相关性 Agent 的可展示结构化输出，不表示论文质量评分。"""
+
+    level: CandidateRelevanceLevel
+    # 面向用户的简短概述。它与原始摘要不同，专门回答“这篇主要研究什么”。
+    study_focus: str = Field(min_length=1, max_length=600)
+    reason: str = Field(min_length=1, max_length=800)
+    helpful_aspect: str = Field(min_length=1, max_length=800)
+    limitations: tuple[str, ...] = Field(default_factory=tuple, max_length=4)
+    recommendation: str = Field(min_length=1, max_length=500)
+    evidence: tuple[CandidateRelevanceEvidence, ...] = Field(min_length=1, max_length=3)
+
+
+class CandidateRelevanceError(BaseModel):
+    """相关性评估失败时给前端展示的稳定摘要。"""
+
+    code: str = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=500)
+    retryable: bool
 
 
 class CandidateLinks(BaseModel):
@@ -332,6 +395,8 @@ class UnifiedCandidate(BaseModel):
     doi: str | None = None
     title: str = Field(min_length=1, max_length=5000)
     title_key: str = Field(min_length=1, max_length=5000)
+    # 统一候选始终提供可展示的语言状态，兼容历史 Redis 快照中缺少该字段的记录。
+    language: CandidateLanguage = CandidateLanguage.UNKNOWN
     authors: tuple[CandidateAuthor, ...] = ()
     abstract: str | None = None
     published_year: int | None = Field(default=None, ge=1600, le=2100)
@@ -350,6 +415,10 @@ class UnifiedCandidate(BaseModel):
     field_provenance: dict[str, SourceName] = Field(default_factory=dict)
     conflicts: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     triage: TriageDecision | None = None
+    # 评估只存在于 Redis 搜索会话，不能替代论文准入或写入长期 papers 表。
+    relevance_state: CandidateRelevanceState = CandidateRelevanceState.PENDING
+    relevance_assessment: CandidateRelevanceAssessment | None = None
+    relevance_error: CandidateRelevanceError | None = None
     # 题录由用户复制或加入研究集合时按需补全，不能在候选召回阶段伪造为已核验。
     citation: CitationMetadata | None = None
 

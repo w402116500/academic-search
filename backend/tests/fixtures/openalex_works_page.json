@@ -6,6 +6,7 @@
     {
       "id": "https://openalex.org/W1234567890",
       "display_name": "Large language models for academic writing support",
+      "language": "en",
       "doi": "https://doi.org/10.1000/example.1",
       "publication_year": 2024,
       "publication_date": "2024-05-01",

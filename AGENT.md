@@ -102,3 +102,9 @@ Codebase reading roles:
 ## Skills
 
 Skills live in `~/.codex/skills/` (personal) and `.codex/skills/` (project-shared). Before starting a task, scan available skills. If one matches, read its `SKILL.md` and follow it. Announce which skill you're using.
+
+## Frontend Design Skill
+
+- 本项目任何用户可见页面的前端设计、重构或美化，必须优先使用 `design-taste-frontend`（`C:\Users\yz\.agents\skills\design-taste-frontend\SKILL.md`）。
+- 不得使用 `frontend-design` 技能作为本项目的前端设计依据。
+- 研究工作台、数据表格和多步骤流程不属于 `design-taste-frontend` 的主适用范围；在这些页面中，仅采用其设计审计、视觉一致性、可访问性与反模板化原则，功能交互仍以现有产品流程为准。

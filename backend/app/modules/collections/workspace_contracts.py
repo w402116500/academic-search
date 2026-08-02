@@ -15,6 +15,7 @@ class WorkspaceErrorCode(StrEnum):
 
     NOT_FOUND = "workspace_not_found"
     NOT_ACTIVE = "workspace_not_active"
+    INVALID_CURSOR = "workspace_invalid_cursor"
 
 
 class WorkspaceError(RuntimeError):
@@ -94,6 +95,14 @@ class WorkspaceResponse(BaseModel):
     workflow_stage_display: WorkflowStageDisplay
     created_at: datetime
     updated_at: datetime
+
+
+class WorkspaceListResponse(BaseModel):
+    """工作区切换器使用的游标分页结果。"""
+
+    items: list[WorkspaceResponse]
+    # 存在下一页时返回不透明游标；客户端只负责原样回传，不能解析或修改。
+    next_cursor: str | None = None
 
 
 class WorkflowStageDisplay(BaseModel):

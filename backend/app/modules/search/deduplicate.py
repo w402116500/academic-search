@@ -8,6 +8,7 @@ from difflib import SequenceMatcher
 
 from app.modules.search.contracts import (
     CandidateAuthor,
+    CandidateLanguage,
     CandidateLinks,
     CitationDate,
     RawCandidate,
@@ -16,6 +17,7 @@ from app.modules.search.contracts import (
 )
 from app.modules.search.normalize import (
     NormalizedCandidateRecord,
+    infer_candidate_language,
     normalize_author_key,
     normalize_candidate_record,
     normalize_doi,
@@ -107,6 +109,7 @@ def _build_unified_candidate(records: Sequence[NormalizedCandidateRecord]) -> Un
     raw_records = tuple(record.raw for record in records)
     selected_doi, doi_source = _select_first(records, "doi", normalize=True)
     selected_title, title_source = _select_first(records, "title")
+    selected_language, language_source = _select_first(records, "language")
     selected_authors, authors_source = _select_authors(records)
     selected_abstract, abstract_source = _select_longest_text(records, "abstract")
     selected_year, year_source = _select_first(records, "published_year")
@@ -129,6 +132,7 @@ def _build_unified_candidate(records: Sequence[NormalizedCandidateRecord]) -> Un
     provenance = _field_provenance(
         doi=doi_source,
         title=title_source,
+        language=language_source,
         authors=authors_source,
         abstract=abstract_source,
         published_year=year_source,
@@ -149,6 +153,14 @@ def _build_unified_candidate(records: Sequence[NormalizedCandidateRecord]) -> Un
         doi=selected_doi if isinstance(selected_doi, str) else None,
         title=selected_title,
         title_key=title_key,
+        language=(
+            selected_language
+            if isinstance(selected_language, CandidateLanguage)
+            else infer_candidate_language(
+                selected_title,
+                selected_abstract if isinstance(selected_abstract, str) else None,
+            )
+        ),
         authors=selected_authors,
         abstract=selected_abstract if isinstance(selected_abstract, str) else None,
         published_year=selected_year if isinstance(selected_year, int) else None,
@@ -270,6 +282,11 @@ def _conflicts(records: Sequence[NormalizedCandidateRecord]) -> dict[str, tuple[
             (normalize_doi(record.raw.doi), record.raw.doi) for record in records if record.raw.doi
         ),
         "title": tuple((record.title_key, record.raw.title) for record in records),
+        "language": tuple(
+            (record.raw.language.value, record.raw.language.value)
+            for record in records
+            if record.raw.language is not None
+        ),
         "authors": tuple(
             (
                 ";".join(normalize_author_key(author.name) or "" for author in record.raw.authors),

@@ -17,6 +17,10 @@ class TextEmbedder(Protocol):
         """为输入文本按原顺序生成等数量向量，失败时抛出 ``IngestionError``。"""
         raise NotImplementedError
 
+    async def embed_query(self, text: str) -> tuple[float, ...]:
+        """为一个研究问题生成查询向量，必须与已入库向量保持同一维度。"""
+        raise NotImplementedError
+
 
 class OpenAICompatibleTextEmbedder:
     """通过 LangChain 调用 OpenAI 或兼容服务的文本嵌入接口。"""
@@ -63,6 +67,35 @@ class OpenAICompatibleTextEmbedder:
             )
 
         return vectors
+
+    async def embed_query(self, text: str) -> tuple[float, ...]:
+        """生成单条查询向量，并在适配器边界阻断空向量或非数值结果。"""
+        normalized = text.strip()
+        if not normalized:
+            raise IngestionError(
+                IngestionErrorCode.EMBEDDING_MISMATCH,
+                "研究问题不能为空白，无法生成检索向量。",
+            )
+        try:
+            client = self._client or self._create_client()
+            self._client = client
+            raw_vector = await client.aembed_query(normalized)
+            vector = tuple(float(value) for value in raw_vector)
+        except IngestionError:
+            raise
+        except Exception as exc:
+            raise IngestionError(
+                IngestionErrorCode.EMBEDDING_FAILED,
+                "查询嵌入模型调用失败，暂时无法检索文献证据。",
+                retryable=True,
+            ) from exc
+        if not vector:
+            raise IngestionError(
+                IngestionErrorCode.EMBEDDING_MISMATCH,
+                "查询嵌入模型返回了空向量，无法检索文献证据。",
+                retryable=True,
+            )
+        return vector
 
     def _create_client(self) -> OpenAIEmbeddings:
         """在任务真正需要向量时才校验模型凭据，避免空闲 Worker 无法启动。"""

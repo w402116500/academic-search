@@ -7,6 +7,12 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
+from app.modules.fulltext.contracts import (
+    AcquiredFulltext,
+    FulltextAcquisitionError,
+    FulltextAcquisitionStatus,
+)
+from app.modules.search.citation_formatter import CitationFormat
 from app.modules.search.contracts import UnifiedCandidate
 from app.modules.workflow.state import (
     ResearchPlanStatus,
@@ -73,6 +79,41 @@ class SearchRunError(RuntimeError):
     """检索运行前置条件、队列或短期会话不满足时抛出的明确异常。"""
 
     def __init__(self, code: SearchRunErrorCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class CandidateFulltextErrorCode(StrEnum):
+    """候选全文任务服务可以稳定返回给 API 的业务错误码。"""
+
+    CANDIDATE_NOT_FOUND = "candidate_fulltext_not_found"
+    CANDIDATE_NOT_ELIGIBLE = "candidate_fulltext_not_eligible"
+    SEARCH_NOT_FINISHED = "candidate_fulltext_search_not_finished"
+    SESSION_EXPIRED = "candidate_fulltext_session_expired"
+    STATE_NOT_FOUND = "candidate_fulltext_state_not_found"
+    NOT_RETRYABLE = "candidate_fulltext_not_retryable"
+
+
+class CandidateFulltextError(RuntimeError):
+    """候选不存在、会话过期或全文任务重试非法时抛出的明确异常。"""
+
+    def __init__(self, code: CandidateFulltextErrorCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class CandidateCitationErrorCode(StrEnum):
+    """候选正式引用渲染可以稳定返回给 API 的业务错误码。"""
+
+    CANDIDATE_NOT_FOUND = "candidate_citation_not_found"
+    SESSION_EXPIRED = "candidate_citation_session_expired"
+    CITATION_NOT_READY = "candidate_citation_not_ready"
+
+
+class CandidateCitationError(RuntimeError):
+    """候选不存在、会话过期或题录尚不可安全格式化时抛出的明确错误。"""
+
+    def __init__(self, code: CandidateCitationErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 
@@ -316,3 +357,24 @@ class SearchProgressEvent(BaseModel):
     provider_summary: dict[str, Any] = Field(default_factory=dict)
     candidate_counts: dict[str, Any] = Field(default_factory=dict)
     message: str | None = None
+
+
+class CandidateFulltextResponse(BaseModel):
+    """单篇候选全文任务的短期状态；文件详情仅在 available 时出现。"""
+
+    search_run_id: UUID
+    candidate_id: UUID
+    attempt_no: int
+    status: FulltextAcquisitionStatus
+    document: AcquiredFulltext | None = None
+    error: FulltextAcquisitionError | None = None
+    requested_at: datetime
+    updated_at: datetime
+
+
+class CandidateCitationResponse(BaseModel):
+    """由后端从已核验格式中立题录渲染出的单个正式引用。"""
+
+    candidate_id: UUID
+    format: CitationFormat
+    text: str = Field(min_length=1, description="可直接复制或导出的正式引用文本")

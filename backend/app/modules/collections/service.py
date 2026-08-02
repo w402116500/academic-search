@@ -204,7 +204,8 @@ class ResearchCollectionAdmissionService:
             ingestion_run = IngestionRun(
                 document_id=document_id,
                 pipeline_version=_PIPELINE_VERSION,
-                status="queued",
+                # 用户尚未确认构建集合；此时文件可审核，但绝不能被 Worker 领取。
+                status="pending",
                 stage="parse",
                 chunking_config={},
                 embedding_config={},

@@ -190,7 +190,12 @@ class SqlAlchemyIngestionRepository:
             run.stage = "embed"
 
     async def load_vector_chunks(self, context: IngestionContext) -> tuple[VectorChunk, ...]:
-        """按稳定 ordinal 读取 L3 原文；Milvus 不保存原文副本。"""
+        """按稳定 ordinal 读取 L3 原文；Milvus 不保存原文副本。
+
+        SQLAlchemy 的首次查询会自动开启事务。这里会先把 ORM 结果转换为
+        与会话脱钩的值对象，再结束只读事务，避免后续阶段开启短写事务时报
+        ``A transaction is already begun on this Session``。
+        """
         result = await self._session.scalars(
             select(DocumentChunk)
             .where(
@@ -199,7 +204,7 @@ class SqlAlchemyIngestionRepository:
             )
             .order_by(DocumentChunk.ordinal)
         )
-        return tuple(
+        chunks = tuple(
             VectorChunk(
                 chunk_id=chunk.id,
                 owner_user_id=context.owner_user_id,
@@ -211,6 +216,9 @@ class SqlAlchemyIngestionRepository:
             )
             for chunk in result
         )
+        # ``VectorChunk`` 不再依赖 ORM 对象，因此可安全关闭本次查询隐式开启的事务。
+        await self._session.rollback()
+        return chunks
 
     async def record_embedding(
         self,

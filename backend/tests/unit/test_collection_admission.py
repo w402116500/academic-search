@@ -183,7 +183,7 @@ def _available_fulltext(*, candidate_id: UUID = _CANDIDATE_ID) -> FulltextAcquis
 
 
 @pytest.mark.asyncio
-async def test_admit_creates_paper_collection_document_and_queued_ingestion_run() -> None:
+async def test_admit_creates_paper_collection_document_and_pending_ingestion_run() -> None:
     """新的合格候选应只在对象转正后被一次事务写为完整研究文献。"""
     session = FakeSession(
         scalar_values=[_collection(), None, _collection(), None, None],
@@ -214,7 +214,7 @@ async def test_admit_creates_paper_collection_document_and_queued_ingestion_run(
     assert document.object_key.startswith(f"documents/{_COLLECTION_ID}/{document.id}/")
     assert document.object_key.endswith(f"{_SHA256}.pdf")
     assert ingestion_run.document_id == document.id
-    assert ingestion_run.status == "queued"
+    assert ingestion_run.status == "pending"
     assert ingestion_run.stage == "parse"
     assert storage.promotions == [(_STAGING_KEY, document.object_key, _SHA256)]
     assert not storage.deleted

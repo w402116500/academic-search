@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from types import SimpleNamespace
 from typing import cast
 from uuid import uuid4
@@ -14,11 +15,16 @@ from app.modules.ingestion.milvus import MilvusDocumentChunkIndex
 from app.modules.ingestion.settings import IngestionSettings, get_ingestion_settings
 from pymilvus import MilvusClient
 
+_LIVE_TEST_ENVIRONMENT_FLAG = "RUN_LIVE_EMBEDDING_TESTS"
+
 
 @pytest.mark.live
 @pytest.mark.asyncio
 async def test_live_embedding_provider_returns_vectors_accepted_by_milvus() -> None:
     """验证真实模型维度与临时 L3 向量写入，不保留测试 collection。"""
+    if os.getenv(_LIVE_TEST_ENVIRONMENT_FLAG) != "1":
+        pytest.skip(f"仅在 {_LIVE_TEST_ENVIRONMENT_FLAG}=1 时运行真实 embedding 验收")
+
     settings = get_ingestion_settings()
     texts = (
         "Academic RAG retrieves evidence from verified research papers.",

@@ -27,6 +27,8 @@ dependencies = [
   "argon2-cffi>=23.1,<26",
   "pyjwt>=2.10,<3",
   "email-validator>=2.2,<3",
+  "langgraph-checkpoint-postgres>=2,<4",
+  "psycopg[binary]>=3.2,<4",
 ]
 
 [dependency-groups]
@@ -42,6 +44,8 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+# 测试进程共享 SQLAlchemy asyncpg 引擎；统一事件循环避免连接池复用已关闭循环中的连接。
+asyncio_default_test_loop_scope = "session"
 markers = [
   "live: 使用真实外部学术 API 和本地 .env 的集成测试。",
 ]

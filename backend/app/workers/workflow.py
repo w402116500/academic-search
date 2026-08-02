@@ -12,6 +12,8 @@ from app.modules.workflow.intent_analysis import (
 )
 from app.modules.workflow.plan_service import ResearchPlanService
 from app.modules.workflow.settings import get_workflow_settings
+from app.workers.fulltext import acquire_candidate_fulltext
+from app.workers.queues import WORKFLOW_QUEUE_NAME
 from app.workers.redis import redis_settings_from_environment
 from app.workers.search import run_search
 
@@ -62,9 +64,10 @@ async def analyze_research_plan(
 class WorkerSettings:
     """供 ``arq app.workers.workflow.WorkerSettings`` 启动的独立分析 Worker。"""
 
-    # 意图分析和多源检索共用一个 arq 队列，避免不同 Worker 抢到自己不认识的任务。
-    functions = [analyze_research_plan, run_search]
+    # 意图分析、检索和全文获取共用一个 arq 队列，避免不同 Worker 抢到未知任务。
+    functions = [analyze_research_plan, run_search, acquire_candidate_fulltext]
     redis_settings = redis_settings_from_environment()
+    queue_name = WORKFLOW_QUEUE_NAME
     max_jobs = 2
     # 失败会明确写入计划状态，用户可修改要求后生成新版本，因此不静默自动重试。
     max_tries = 1

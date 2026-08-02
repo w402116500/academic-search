@@ -16,10 +16,8 @@ from app.modules.search.contracts import (
     UnifiedCandidate,
 )
 from app.modules.search.normalize import (
-    normalize_author_key,
     normalize_document_type,
     normalize_doi,
-    normalize_optional_text,
     normalize_title_key,
 )
 
@@ -140,7 +138,13 @@ def _merge_doi_record(
     provenance: dict[str, str],
     record: DoiCslRecord,
 ) -> tuple[dict[str, object], dict[str, str], dict[str, tuple[str, ...]]]:
-    """仅补充空字段，已有字段不一致时记录冲突而不静默覆盖。"""
+    """以 DOI 正式记录补全题录，仅对文献身份字段保留阻断性冲突。
+
+    DOI 已经是候选与正式记录之间最强的身份锚点。来源返回的作者全名、发表
+    日期、刊物名称和落地页经常与正式注册记录存在展示或版本差异，因此这些
+    字段由 DOI 记录覆盖，不能把它们误判为“不是同一篇论文”。只有 DOI 本身
+    或标题明显不一致时，才阻止后续的引用生成和全文获取。
+    """
     resolver_values: dict[str, object] = {
         "authors": record.authors,
         "title": record.title,
@@ -153,7 +157,9 @@ def _merge_doi_record(
         "article_number": record.article_number,
         "publisher": record.publisher,
         "doi": record.doi,
-        "url": record.url or record.source_url,
+        # 对外题录统一输出现代 DOI 规范地址，避免 http/dx.doi.org 这类历史别名
+        # 与 https://doi.org/... 被误判为不同文献。
+        "url": _canonical_doi_url(record.doi) or record.url or record.source_url,
     }
     merged_values = values.copy()
     merged_provenance = provenance.copy()
@@ -162,26 +168,28 @@ def _merge_doi_record(
     for field_name, incoming in resolver_values.items():
         current = merged_values[field_name]
 
-        if _is_missing(current):
-            merged_values[field_name] = incoming
-
-            if not _is_missing(incoming):
-                merged_provenance[field_name] = _DOI_PROVENANCE
-
-            continue
-
         if _is_missing(incoming):
             continue
 
-        if _values_match(field_name, current, incoming):
-            # DOI 返回的结构化作者与更完整日期能提高各 CSL 样式的准确度，属于补足精度。
-            if _prefer_resolver_value(field_name, current, incoming):
-                merged_values[field_name] = incoming
-                merged_provenance[field_name] = _DOI_PROVENANCE
-
+        if (
+            field_name in {"doi", "title"}
+            and not _is_missing(current)
+            and not _values_match(
+                field_name,
+                current,
+                incoming,
+            )
+        ):
+            # DOI 与标题共同承担身份校验职责。两者任一明显不一致时，不应静默
+            # 用 DOI 返回的记录覆盖当前候选，以免用户下载到错误论文的全文。
+            conflicts[field_name] = (_display_value(current), _display_value(incoming))
             continue
 
-        conflicts[field_name] = (_display_value(current), _display_value(incoming))
+        # 通过身份校验后，DOI Content Negotiation 的 CSL 记录是格式化引用的权威
+        # 来源。即使候选已有值，也要采用它，以消除来源端的日期、作者、刊物和
+        # URL 表示差异。
+        merged_values[field_name] = incoming
+        merged_provenance[field_name] = _DOI_PROVENANCE
 
     return merged_values, merged_provenance, conflicts
 
@@ -192,17 +200,9 @@ def _is_missing(value: object) -> bool:
 
 
 def _values_match(field_name: str, current: object, incoming: object) -> bool:
-    """按字段语义比较，忽略大小写、姓名格式和仅有日期精度造成的伪冲突。"""
-    if field_name == "authors":
-        return _author_keys(current) == _author_keys(incoming)
-
+    """比较会阻断题录核验的 DOI 与标题身份字段。"""
     if field_name == "doi":
         return normalize_doi(_as_text(current)) == normalize_doi(_as_text(incoming))
-
-    if field_name == "document_type":
-        return normalize_document_type(_as_text(current)) == normalize_document_type(
-            _as_text(incoming)
-        )
 
     if field_name == "title":
         current_title = _as_text(current)
@@ -213,72 +213,18 @@ def _values_match(field_name: str, current: object, incoming: object) -> bool:
             and normalize_title_key(current_title) == normalize_title_key(incoming_title)
         )
 
-    if field_name == "issued_date":
-        return _dates_match(current, incoming)
-
-    return normalize_optional_text(_as_text(current)) == normalize_optional_text(_as_text(incoming))
-
-
-def _author_keys(value: object) -> tuple[str, ...]:
-    """以作者顺序和规整姓名比较，避免不同展示格式被误判为冲突。"""
-    if not isinstance(value, tuple):
-        return ()
-
-    return tuple(
-        normalize_author_key(author.display_name()) or ""
-        for author in value
-        if isinstance(author, CitationAuthor)
-    )
-
-
-def _dates_match(current: object, incoming: object) -> bool:
-    """年份相同且候选缺少月日时，允许 DOI 记录补足日期精度。"""
-    if not isinstance(current, CitationDate) or not isinstance(incoming, CitationDate):
-        return False
-
-    if current.year != incoming.year:
-        return False
-
-    if current.month is not None and current.month != incoming.month:
-        return False
-
-    return current.day is None or current.day == incoming.day
-
-
-def _prefer_resolver_value(field_name: str, current: object, incoming: object) -> bool:
-    """只在语义一致但 DOI 更精确时采用它，绝不覆盖存在内容差异的候选字段。"""
-    if field_name == "authors":
-        return _authors_are_structured(incoming) and not _authors_are_structured(current)
-
-    if field_name == "issued_date":
-        return (
-            isinstance(current, CitationDate)
-            and isinstance(incoming, CitationDate)
-            and (
-                current.month is None
-                and incoming.month is not None
-                or current.day is None
-                and incoming.day is not None
-            )
-        )
-
     return False
-
-
-def _authors_are_structured(value: object) -> bool:
-    """只有全部作者都带有姓氏时，才把该作者集当作可安全格式化的结构化姓名。"""
-    return (
-        isinstance(value, tuple)
-        and bool(value)
-        and all(
-            isinstance(author, CitationAuthor) and author.family is not None for author in value
-        )
-    )
 
 
 def _as_text(value: object) -> str | None:
     """为规整比较提取字符串；其他类型不会被隐式转换为展示文本。"""
     return value if isinstance(value, str) else None
+
+
+def _canonical_doi_url(value: str | None) -> str | None:
+    """将可识别 DOI 转为唯一的 https://doi.org 地址，供引用与比较统一使用。"""
+    doi = normalize_doi(value)
+    return f"https://doi.org/{doi}" if doi is not None else None
 
 
 def _display_value(value: object) -> str:

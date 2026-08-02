@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -25,8 +26,13 @@ _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000202")
 class FakeSession:
     """工作区服务所需的最小异步会话替身。"""
 
-    def __init__(self, scalar_values: list[object | None] | None = None) -> None:
+    def __init__(
+        self,
+        scalar_values: list[object | None] | None = None,
+        scalar_batches: list[list[object]] | None = None,
+    ) -> None:
         self._scalar_values = iter(scalar_values or [])
+        self._scalar_batches = iter(scalar_batches or [])
         self.added: list[object] = []
         self.flush_count = 0
         self.commit_count = 0
@@ -37,6 +43,9 @@ class FakeSession:
 
     async def scalar(self, _statement: object) -> object | None:
         return next(self._scalar_values)
+
+    async def scalars(self, _statement: object) -> list[object]:
+        return next(self._scalar_batches)
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -60,6 +69,14 @@ def _collection(*, status: str = "active") -> ResearchCollection:
         description="Original description",
         status=status,
     )
+
+
+def _listed_collection(*, collection_id: UUID, updated_at: datetime) -> ResearchCollection:
+    """构建具有稳定分页排序键的工作区。"""
+    collection = _collection()
+    collection.id = collection_id
+    collection.updated_at = updated_at
+    return collection
 
 
 @pytest.mark.asyncio
@@ -137,3 +154,47 @@ async def test_get_owned_returns_not_found_for_foreign_or_deleted_resources() ->
         )
 
     assert error.value.code is WorkspaceErrorCode.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_list_owned_uses_an_opaque_cursor_for_the_next_page() -> None:
+    """列表多取一条判断下一页，并用最后一条已返回记录生成游标。"""
+    now = datetime.now(UTC)
+    first = _listed_collection(collection_id=UUID(int=301), updated_at=now)
+    second = _listed_collection(collection_id=UUID(int=302), updated_at=now - timedelta(minutes=1))
+    extra = _listed_collection(collection_id=UUID(int=303), updated_at=now - timedelta(minutes=2))
+    first_session = FakeSession(scalar_batches=[[first, second, extra]])
+
+    first_page = await ResearchWorkspaceService(cast(AsyncSession, first_session)).list_owned(
+        owner_user_id=_OWNER_ID,
+        query="研究中",
+        limit=2,
+    )
+
+    assert first_page.items == [first, second]
+    assert first_page.next_cursor is not None
+
+    final = _listed_collection(collection_id=UUID(int=304), updated_at=now - timedelta(minutes=3))
+    second_session = FakeSession(scalar_batches=[[final]])
+    second_page = await ResearchWorkspaceService(cast(AsyncSession, second_session)).list_owned(
+        owner_user_id=_OWNER_ID,
+        cursor=first_page.next_cursor,
+        limit=2,
+    )
+
+    assert second_page.items == [final]
+    assert second_page.next_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_list_owned_rejects_a_damaged_cursor() -> None:
+    """客户端传回损坏游标时返回稳定错误，而不是暴露解码异常。"""
+    service = ResearchWorkspaceService(cast(AsyncSession, FakeSession()))
+
+    with pytest.raises(WorkspaceError) as error:
+        await service.list_owned(
+            owner_user_id=_OWNER_ID,
+            cursor="not-a-workspace-cursor",
+        )
+
+    assert error.value.code is WorkspaceErrorCode.INVALID_CURSOR

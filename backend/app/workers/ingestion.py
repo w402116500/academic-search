@@ -7,6 +7,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from app.db.session import async_session_factory
+from app.modules.collections.build_service import ResearchCollectionBuildService
 from app.modules.fulltext.settings import get_fulltext_acquisition_settings
 from app.modules.fulltext.storage import Boto3StagingObjectStorage
 from app.modules.ingestion.chunking import ChunkingConfig, HierarchicalChunker
@@ -17,6 +18,7 @@ from app.modules.ingestion.parser import PdfTextParser
 from app.modules.ingestion.repository import SqlAlchemyIngestionRepository
 from app.modules.ingestion.service import DocumentIngestionService
 from app.modules.ingestion.settings import IngestionSettings, get_ingestion_settings
+from app.workers.queues import INGESTION_QUEUE_NAME
 from app.workers.redis import redis_settings_from_environment
 
 
@@ -64,16 +66,23 @@ async def ingest_document(ctx: dict[str, Any], ingestion_run_id: str) -> dict[st
         ) from exc
 
     dependencies = cast(WorkerDependencies, ctx["ingestion_dependencies"])
-    async with async_session_factory() as session:
-        outcome = await DocumentIngestionService(
-            repository=SqlAlchemyIngestionRepository(session),
-            storage=dependencies.storage,
-            parser=dependencies.parser,
-            chunker=dependencies.chunker,
-            embedder=dependencies.embedder,
-            vector_index=dependencies.vector_index,
-            embedding_config=dependencies.settings.embedding_snapshot,
-        ).run(run_id)
+    try:
+        async with async_session_factory() as session:
+            outcome = await DocumentIngestionService(
+                repository=SqlAlchemyIngestionRepository(session),
+                storage=dependencies.storage,
+                parser=dependencies.parser,
+                chunker=dependencies.chunker,
+                embedder=dependencies.embedder,
+                vector_index=dependencies.vector_index,
+                embedding_config=dependencies.settings.embedding_snapshot,
+            ).run(run_id)
+    finally:
+        # 入库服务已先提交本次运行的 completed/failed 状态；这里再汇总工作区展示阶段。
+        async with async_session_factory() as stage_session:
+            await ResearchCollectionBuildService(
+                stage_session
+            ).refresh_collection_stage_for_ingestion_run(run_id)
 
     return {
         "ingestion_run_id": str(outcome.ingestion_run_id),
@@ -88,6 +97,7 @@ class WorkerSettings:
     functions = [ingest_document]
     on_startup = startup
     redis_settings = redis_settings_from_environment()
+    queue_name = INGESTION_QUEUE_NAME
     max_jobs = 2
     max_tries = 3
     job_timeout = 900

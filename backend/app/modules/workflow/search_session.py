@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from collections.abc import Awaitable
+from typing import Any, cast
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -26,6 +27,20 @@ def build_search_session_key(search_run_id: UUID) -> str:
 def build_search_event_stream_key(search_run_id: UUID) -> str:
     """为一次检索运行生成独立的 Redis Stream 键。"""
     return f"{build_search_session_key(search_run_id)}:events"
+
+
+def build_candidate_fulltext_key(session_key: str, candidate_id: UUID) -> str:
+    """为某次检索中的一个候选生成独立全文状态键。"""
+    if not session_key.startswith(f"{SEARCH_SESSION_KEY_PREFIX}:"):
+        raise ValueError("全文状态必须位于服务端生成的检索会话键下")
+    return f"{session_key}:candidate:{candidate_id}:fulltext"
+
+
+def build_candidate_relevance_retry_lock_key(session_key: str, candidate_id: UUID) -> str:
+    """为单篇候选的相关性重试建立短期互斥锁，防止重复模型调用。"""
+    if not session_key.startswith(f"{SEARCH_SESSION_KEY_PREFIX}:"):
+        raise ValueError("相关性重试锁必须位于服务端生成的检索会话键下")
+    return f"{session_key}:candidate:{candidate_id}:relevance-retry-lock"
 
 
 class SearchSessionStore:
@@ -67,6 +82,27 @@ class SearchSessionStore:
         )
         await self._redis.expire(stream_key, self._ttl_seconds)
         return str(event_id)
+
+    async def try_acquire_lock(self, key: str, *, token: str, ttl_seconds: int) -> bool:
+        """尝试获取带租约的短期锁；同一候选的并发重试只允许一个请求执行。"""
+        acquired = await self._redis.set(key, token, nx=True, ex=ttl_seconds)
+        return bool(acquired)
+
+    async def release_lock(self, key: str, *, token: str) -> None:
+        """仅由持有者释放锁，避免过期后删除其他请求重新获得的锁。"""
+        result = self._redis.eval(
+            """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('DEL', KEYS[1])
+            end
+            return 0
+            """,
+            1,
+            key,
+            token,
+        )
+        # redis-py 的类型存根把 eval 标为同步返回，但 asyncio 客户端实际返回 awaitable。
+        await cast(Awaitable[Any], result)
 
     async def read_events(
         self,

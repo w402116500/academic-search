@@ -111,7 +111,8 @@ class LiteratureSourceSettings(BaseSettings):
     search_max_concurrent_providers: int = Field(default=3, ge=1, le=10)
     search_session_ttl_seconds: int = Field(default=7200, ge=60, le=86400)
     search_provider_cache_ttl_seconds: int = Field(default=1800, ge=0, le=86400)
-    search_citation_enrichment_limit: int = Field(default=25, ge=0, le=200)
+    # 题录只预取少量高相关候选；用户复制引用或加入集合时仍可按需补全。
+    search_citation_enrichment_limit: int = Field(default=12, ge=0, le=200)
 
     # 网络路由只影响外部 HTTP 请求，不决定数据源使用官方 API 还是兼容网关。
     literature_default_network_mode: NetworkMode = "direct"

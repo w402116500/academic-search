@@ -146,7 +146,7 @@ class SearchRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint(
             "stage IN ('dispatch', 'provider_search', 'normalize', 'triage', "
-            "'citation_enrichment', 'completed')",
+            "'relevance_assessment', 'citation_enrichment', 'completed')",
             name="stage",
         ),
         CheckConstraint("attempt_no > 0", name="attempt_positive"),
@@ -202,7 +202,8 @@ class SearchRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         server_default=text("'dispatch'"),
         index=True,
         comment="处理阶段：dispatch 投递、provider_search 来源检索、normalize 规整、"
-        "triage 初筛、citation_enrichment 题录补全、completed 完成",
+        "triage 初筛、relevance_assessment 相关性评估、citation_enrichment 题录补全、"
+        "completed 完成",
     )
     attempt_no: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1"), comment="本次运行的重试序号"

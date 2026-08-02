@@ -24,6 +24,30 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+# LangGraph checkpointer 在首次研究任务执行时自行建表，不由本项目的 ORM 或 Alembic 管理。
+# 不过滤它们会让 ``alembic check`` 错误地产生删除第三方运行时表的迁移建议。
+LANGGRAPH_CHECKPOINT_TABLES = frozenset(
+    {
+        "checkpoint_blobs",
+        "checkpoint_migrations",
+        "checkpoint_writes",
+        "checkpoints",
+    }
+)
+
+
+def include_object(
+    object_: object, name: str | None, type_: str, reflected: bool, compare_to: object
+) -> bool:
+    """仅让 Alembic 比对本项目拥有的 schema，不管理 LangGraph 运行时 checkpoint。"""
+    if type_ == "table" and name in LANGGRAPH_CHECKPOINT_TABLES:
+        return False
+    if type_ == "index":
+        table = getattr(object_, "table", None)
+        if getattr(table, "name", None) in LANGGRAPH_CHECKPOINT_TABLES:
+            return False
+    return True
+
 
 def _database_url() -> str:
     """获取用于迁移的 asyncpg 连接串。"""
@@ -44,6 +68,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -60,6 +85,7 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():

@@ -8,7 +8,7 @@ import unicodedata
 from dataclasses import dataclass
 from urllib.parse import unquote
 
-from app.modules.search.contracts import CandidateAuthor, RawCandidate
+from app.modules.search.contracts import CandidateAuthor, CandidateLanguage, RawCandidate
 
 _DOI_PREFIX_PATTERN = re.compile(r"^(?:doi\s*:\s*|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
 _DOI_TRAILING_PUNCTUATION = ".,;:"
@@ -32,6 +32,10 @@ _DOCUMENT_TYPE_ALIASES = {
     "referenceentry": "reference_entry",
     "retraction": "retraction",
 }
+_CHINESE_CHARACTER_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_LATIN_CHARACTER_PATTERN = re.compile(r"[A-Za-z]")
+_CHINESE_LANGUAGE_ALIASES = frozenset({"zh", "zh-cn", "zh-hans", "chi", "zho", "chinese"})
+_ENGLISH_LANGUAGE_ALIASES = frozenset({"en", "en-us", "en-gb", "eng", "english"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +75,42 @@ def normalize_document_type(value: str | None) -> str | None:
     return _DOCUMENT_TYPE_ALIASES.get(key, "other")
 
 
+def normalize_candidate_language(value: CandidateLanguage | str | None) -> CandidateLanguage | None:
+    """将来源语言码收敛为候选语言分类，未知来源值不错误归为英文。"""
+    if value is None:
+        return None
+
+    if isinstance(value, CandidateLanguage):
+        return value
+
+    normalized = normalize_text(value).casefold().replace("_", "-")
+
+    if not normalized:
+        return None
+    if normalized in _CHINESE_LANGUAGE_ALIASES:
+        return CandidateLanguage.CHINESE
+    if normalized in _ENGLISH_LANGUAGE_ALIASES:
+        return CandidateLanguage.ENGLISH
+    return CandidateLanguage.OTHER
+
+
+def infer_candidate_language(title: str, abstract: str | None = None) -> CandidateLanguage:
+    """在来源未给语言时，以标题优先的保守规则给出展示分类。
+
+    标题比摘要短且更接近用户在候选列表中看到的文本，因此中文标题即使附带英文
+    摘要，也会稳定归为中文文献。无法从标题判断时才回退摘要。
+    """
+    for text in (title, abstract):
+        if not text:
+            continue
+        if _CHINESE_CHARACTER_PATTERN.search(text):
+            return CandidateLanguage.CHINESE
+        if _LATIN_CHARACTER_PATTERN.search(text):
+            return CandidateLanguage.ENGLISH
+
+    return CandidateLanguage.UNKNOWN
+
+
 def normalize_raw_candidate(candidate: RawCandidate) -> RawCandidate:
     """在去重前规整来源候选的展示字段，避免格式噪声进入后续全部阶段。"""
     source_record_id = candidate.source_record_id.strip()
@@ -101,6 +141,7 @@ def normalize_raw_candidate(candidate: RawCandidate) -> RawCandidate:
             "source_record_id": source_record_id,
             "source_record_url": normalize_optional_text(candidate.source_record_url),
             "title": title,
+            "language": normalize_candidate_language(candidate.language),
             "authors": tuple(authors),
             "abstract": normalize_optional_text(candidate.abstract),
             "doi": normalize_doi(candidate.doi),

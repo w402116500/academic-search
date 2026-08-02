@@ -20,6 +20,7 @@ from app.modules.search.contracts import (
     RawCandidate,
     SourceName,
 )
+from app.modules.search.normalize import normalize_candidate_language
 from app.modules.search.providers.http_client import create_provider_async_client
 from app.modules.search.providers.rate_limit import InProcessRequestThrottle
 
@@ -211,6 +212,7 @@ class CrossrefProvider:
             source_record_id=doi,
             source_record_url=f"{self._settings.base_url}/works/{quote(doi, safe='')}",
             title=title,
+            language=normalize_candidate_language(item.get("language")),
             authors=self._authors(item.get("author")),
             abstract=self._plain_text(item.get("abstract")),
             published_year=self._published_year(item),

@@ -3,6 +3,7 @@
 from app.modules.fulltext.acquisition import OpenAccessPdfAcquirer
 from app.modules.fulltext.contracts import (
     AcquiredFulltext,
+    CandidateFulltextState,
     FulltextAcquisitionError,
     FulltextAcquisitionErrorCode,
     FulltextAcquisitionResult,
@@ -16,6 +17,7 @@ from app.modules.fulltext.storage import Boto3StagingObjectStorage, FulltextStor
 
 __all__ = [
     "AcquiredFulltext",
+    "CandidateFulltextState",
     "Boto3StagingObjectStorage",
     "FulltextAcquisitionError",
     "FulltextAcquisitionErrorCode",

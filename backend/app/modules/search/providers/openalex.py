@@ -18,6 +18,7 @@ from app.modules.search.contracts import (
     RawCandidate,
     SourceName,
 )
+from app.modules.search.normalize import normalize_candidate_language
 from app.modules.search.providers.http_client import create_provider_async_client
 from app.modules.search.providers.rate_limit import InProcessRequestThrottle
 
@@ -210,6 +211,7 @@ class OpenAlexProvider:
             source_record_id=source_record_id,
             source_record_url=source_record_url,
             title=title,
+            language=normalize_candidate_language(work.get("language")),
             authors=self._authors(work.get("authorships")),
             abstract=self._restore_abstract(work.get("abstract_inverted_index")),
             published_year=self._optional_year(work.get("publication_year")),

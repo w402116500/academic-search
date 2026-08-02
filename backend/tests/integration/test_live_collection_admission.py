@@ -168,7 +168,8 @@ async def test_live_admission_promotes_object_and_persists_research_records() ->
             assert document is not None
             assert ingestion_run is not None
             assert ingestion_run.document_id == document.id
-            assert ingestion_run.status == "queued"
+            # 新准入先停在 pending，必须由用户显式确认构建集合才会投递 Worker。
+            assert ingestion_run.status == "pending"
             assert ingestion_run.stage == "parse"
             document_object_key = document.object_key
 

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from app.modules.search.contracts import (
     CandidateAuthor,
+    CandidateLanguage,
     CitationDate,
     ProviderError,
     ProviderErrorCode,
@@ -23,6 +24,7 @@ def make_candidate(
     source_record_id: str,
     title: str,
     *,
+    language: CandidateLanguage | None = None,
     doi: str | None = None,
     author_name: str = "Ada Lovelace",
     abstract: str | None = "A concise abstract.",
@@ -45,6 +47,7 @@ def make_candidate(
         source_record_id=source_record_id,
         source_record_url=f"https://source.example.org/{source_record_id}",
         title=title,
+        language=language,
         authors=(CandidateAuthor(name=author_name),) if author_name else (),
         abstract=abstract,
         published_year=published_year,
@@ -116,6 +119,7 @@ def test_processing_merges_three_source_records_and_preserves_provenance() -> No
         SourceName.OPENALEX,
         "W1",
         "Large Language Models for Academic Writing",
+        language=CandidateLanguage.ENGLISH,
         doi="https://doi.org/10.1000/Example.DOI.",
         abstract="An extended abstract from OpenAlex with methodological details.",
         published_year=2023,
@@ -175,6 +179,7 @@ def test_processing_merges_three_source_records_and_preserves_provenance() -> No
     candidate = result.candidates[0]
     assert candidate.doi == "10.1000/example.doi"
     assert candidate.title == "Large language models for academic writing"
+    assert candidate.language is CandidateLanguage.ENGLISH
     assert candidate.abstract == "An extended abstract from OpenAlex with methodological details."
     assert candidate.citation_counts_by_source == {"openalex": 12, "crossref": 9}
     assert candidate.published_date == CitationDate(year=2024, month=5, day=1)
@@ -187,6 +192,7 @@ def test_processing_merges_three_source_records_and_preserves_provenance() -> No
     assert candidate.is_open_access is True
     assert len(candidate.source_records) == 3
     assert candidate.field_provenance["title"] is SourceName.CROSSREF
+    assert candidate.field_provenance["language"] is SourceName.OPENALEX
     assert candidate.field_provenance["abstract"] is SourceName.OPENALEX
     assert "doi" not in candidate.conflicts
     assert "title" not in candidate.conflicts
@@ -196,6 +202,24 @@ def test_processing_merges_three_source_records_and_preserves_provenance() -> No
     assert candidate.triage.included is True
     assert TriageReasonCode.PREPRINT_ONLY not in candidate.triage.warnings
     assert TriageReasonCode.METADATA_CONFLICT in candidate.triage.warnings
+
+
+def test_processing_infers_chinese_language_when_sources_omit_language() -> None:
+    """来源未提供语言时，中文标题应以可解释规则标为中文候选。"""
+    candidate = make_candidate(
+        SourceName.CROSSREF,
+        "10.1000/chinese-language",
+        "城市绿地可达性与老年人心理健康",
+        doi="10.1000/chinese-language",
+    )
+
+    result = process_provider_results(
+        (make_provider_result(SourceName.CROSSREF, candidate),),
+        ProviderQuery(query="城市绿地"),
+    )
+
+    assert result.candidates[0].language is CandidateLanguage.CHINESE
+    assert "language" not in result.candidates[0].field_provenance
 
 
 def test_similar_title_with_different_first_author_is_not_merged() -> None:

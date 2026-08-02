@@ -110,6 +110,43 @@ async def test_enrichment_keeps_candidate_value_and_marks_conflicting_doi_title(
 
 
 @pytest.mark.asyncio
+async def test_enrichment_uses_doi_record_for_non_identity_metadata_differences() -> None:
+    """作者写法、日期版本、刊物和 DOI URL 差异不应阻断正式题录。"""
+    candidate = _candidate().model_copy(
+        update={
+            "authors": (CandidateAuthor(name="Barbara Händel"),),
+            "published_date": CitationDate(year=2016, month=8, day=9),
+            "venue": "Institutional Repository",
+        }
+    )
+    record = _record().model_copy(
+        update={
+            "authors": (CitationAuthor(given="Barbara Friederike", family="Händel"),),
+            "issued_date": CitationDate(year=2016, month=10),
+            "venue": "Journal of Research Methods",
+            "url": "http://dx.doi.org/10.1000/crossref.example",
+        }
+    )
+    resolver = StubResolver(
+        DoiMetadataResolution(
+            doi="10.1000/crossref.example",
+            record=record,
+        )
+    )
+
+    enriched = await CitationMetadataEnricher(resolver).enrich(candidate)
+
+    assert enriched.citation is not None
+    assert enriched.citation.status is CitationMetadataStatus.READY
+    assert enriched.citation.authors[0].given == "Barbara Friederike"
+    assert enriched.citation.issued_date is not None
+    assert enriched.citation.issued_date.to_csl_date_parts() == [2016, 10]
+    assert enriched.citation.venue == "Journal of Research Methods"
+    assert enriched.citation.url == "https://doi.org/10.1000/crossref.example"
+    assert not enriched.citation.conflicts
+
+
+@pytest.mark.asyncio
 async def test_enrichment_without_doi_never_calls_resolver_and_reports_partial_metadata() -> None:
     """无 DOI 候选仍可继续展示，但不会触发无法执行的内容协商请求。"""
     unused_result = DoiMetadataResolution(doi="10.1000/unused", record=_record())

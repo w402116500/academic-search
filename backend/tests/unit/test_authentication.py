@@ -9,6 +9,7 @@ from typing import cast
 from uuid import UUID
 
 import pytest
+from app.api.routers import auth as auth_router
 from app.core.security import (
     AuthenticationSettings,
     InvalidAccessTokenError,
@@ -19,6 +20,7 @@ from app.core.security import (
 from app.db.models.user import User
 from app.modules.auth.contracts import AuthError, AuthErrorCode, LoginRequest, RegisterRequest
 from app.modules.auth.service import AuthenticationService
+from fastapi import HTTPException
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -112,6 +114,36 @@ async def test_register_rejects_an_existing_email() -> None:
         )
 
     assert error.value.code is AuthErrorCode.EMAIL_ALREADY_REGISTERED
+
+
+@pytest.mark.asyncio
+async def test_register_does_not_write_an_account_without_a_jwt_signing_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """认证配置缺失时，路由必须在进入注册数据库事务前返回 503。"""
+    session = FakeSession([])
+
+    def invalid_settings() -> AuthenticationSettings:
+        return AuthenticationSettings(auth_jwt_secret_key=SecretStr("change-me-" + "x" * 48))
+
+    async def unexpected_register(_self: AuthenticationService, _request: RegisterRequest) -> User:
+        raise AssertionError("JWT 配置无效时不应创建用户")
+
+    monkeypatch.setattr(auth_router, "get_authentication_settings", invalid_settings)
+    monkeypatch.setattr(AuthenticationService, "register", unexpected_register)
+
+    with pytest.raises(HTTPException) as error:
+        await auth_router.register(
+            RegisterRequest(
+                email="researcher@example.com",
+                password="a secure test password",
+                display_name="Researcher",
+            ),
+            cast(AsyncSession, session),
+        )
+
+    assert error.value.status_code == 503
+    assert session.added == []
 
 
 @pytest.mark.asyncio

@@ -85,6 +85,7 @@ def _candidate_summary(candidate: UnifiedCandidate) -> dict[str, object]:
         "candidate_id": str(candidate.candidate_id),
         "doi": candidate.doi,
         "title": candidate.title,
+        "language": candidate.language.value,
         "authors": [author.name for author in candidate.authors[:3]],
         "author_count": len(candidate.authors),
         "published_year": candidate.published_year,

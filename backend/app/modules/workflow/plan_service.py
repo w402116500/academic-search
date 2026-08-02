@@ -309,7 +309,7 @@ class ResearchPlanService:
                 ResearchPlanErrorCode.COLLECTION_NOT_FOUND,
                 "研究工作区或其研究计划不存在。",
             )
-        collection, plan = row.tuple()
+        collection, plan = row._tuple()
         if require_active and collection.status != "active":
             raise ResearchPlanError(
                 ResearchPlanErrorCode.COLLECTION_NOT_ACTIVE,
@@ -346,7 +346,7 @@ class ResearchPlanService:
         if row is None:
             # 已删除工作区留下的旧队列消息不应该恢复已删除的数据。
             return None, None
-        collection, plan = row.tuple()
+        collection, plan = row._tuple()
         return collection, plan
 
     @staticmethod

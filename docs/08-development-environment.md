@@ -1,6 +1,6 @@
 # academic-search 开发环境
 
-状态：已配置。此环境用于本地开发和面试演示；已包含认证、工作区、研究计划、多源检索 API，以及意图分析、多源检索和 RAG 入库 Worker。研究 Agent 尚未实现。
+状态：已配置。此环境用于本地开发和面试演示；已包含认证、工作区、研究计划、多源检索、全文准入与集合构建 API，以及意图分析、多源检索、全文获取和 RAG 入库 Worker。研究 Agent 尚未实现。
 
 ## 1. 运行模型
 
@@ -62,9 +62,9 @@ uv run --directory backend arq app.workers.workflow.WorkerSettings
 uv run --directory backend arq app.workers.ingestion.WorkerSettings
 ```
 
-这两个 Worker 都会从 `REDIS_URL` 连接 arq 队列。意图分析 Worker 在用户调用 `POST /api/v1/collections/research` 后访问聊天模型，返回经过 Pydantic 校验的 2-3 个研究方向和方向对应检索表达式；检索运行也由同一个 Worker 消费。它只在用户确认计划后调用 OpenAlex、Crossref、arXiv 和 Semantic Scholar，并将候选放入 Redis 短期会话。入库 Worker 在后续全文准入任务投递后，访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。
+两个 Worker 都会从 `REDIS_URL` 连接 arq，但绝不共享任务队列：工作流 Worker 只消费 `arq:queue:workflow` 中的意图分析、检索和候选全文任务；入库 Worker 只消费 `arq:queue:ingestion` 中的 PDF 解析、嵌入和 Milvus 写入任务。工作流 Worker 在用户调用 `POST /api/v1/collections/research` 后访问聊天模型，返回经过 Pydantic 校验的 2-3 个研究方向和方向对应检索表达式；检索运行与候选全文获取也由同一个 Worker 消费。它只在用户确认计划后调用 OpenAlex、Crossref、arXiv 和 Semantic Scholar，并将候选放入 Redis 短期会话；基础初筛后先发布候选快照，再按 `WORKFLOW_RELEVANCE_BATCH_SIZE` 批量调用相关性 Agent 并将核验后的结果写回同一会话。候选全文仅可使用该会话中服务端已发现的直接 PDF URL。入库 Worker 只在用户确认构建集合后接收 `queued` 文献，随后访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。
 
-意图分析和后续研究对话使用 `WORKFLOW_CHAT_PROVIDER` 选择聊天后端，当前默认值为 `deepseek`，对应 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_CHAT_MODEL`。如需切换到其他 OpenAI 兼容聊天服务，将其改为 `openai_compatible` 并配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_CHAT_MODEL`。`OPENAI_*` 也继续用于 RAG embedding 配置。模型输出不符合计划结构时，工作区会进入 `failed`，用户可修改原始要求并调用重新生成接口；系统不会把自由文本直接作为检索词执行。
+意图分析、候选相关性评估和后续研究对话使用 `WORKFLOW_CHAT_PROVIDER` 选择聊天后端，当前默认值为 `deepseek`，对应 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_CHAT_MODEL`。如需切换到其他 OpenAI 兼容聊天服务，将其改为 `openai_compatible` 并配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_CHAT_MODEL`。`WORKFLOW_RELEVANCE_TIMEOUT_SECONDS` 限制单批相关性调用，`WORKFLOW_RELEVANCE_BATCH_SIZE` 控制每批候选数，`WORKFLOW_RELEVANCE_ABSTRACT_MAX_CHARACTERS` 与 `WORKFLOW_RELEVANCE_MAX_OUTPUT_TOKENS` 分别限制单篇输入摘要和一批输出长度；批次按顺序执行，因此并发数固定为 1。`OPENAI_*` 也继续用于 RAG embedding 配置。模型输出不符合计划结构时，工作区会进入 `failed`，用户可修改原始要求并调用重新生成接口；候选相关性输出异常则只标记当前候选失败，用户可单项重试，系统不会把自由文本直接作为检索词执行。
 
 确认研究计划后，前端调用 `POST /api/v1/collections/{collection_id}/search-runs` 显式启动多源检索。检索 Worker 由同一个 `app.workers.workflow.WorkerSettings` 消费，按已确认查询并发调用已启用来源，并通过下列接口恢复状态：
 
@@ -83,6 +83,28 @@ uv run pytest tests/integration/test_live_search_run.py -m live -s
 ```
 
 该测试会创建随机临时用户、工作区、研究计划和检索运行，结束时删除数据库与 Redis 数据；它会消耗外部文献来源配额，不应放入常规 CI。
+
+全文准入与集合构建采用两个明确动作，而不是在下载完成后自动向量化：
+
+```text
+Redis 搜索候选
+  -> 候选全文任务（queued / downloading / validating / available）
+  -> POST .../fulltext/admission（写入 PostgreSQL，IngestionRun = pending）
+  -> POST /api/v1/collections/{collection_id}/build（转为 queued 并投递 arq）
+  -> ingestion Worker（parse / chunk / embed / index）
+  -> completed + is_current=true（可用于 RAG）
+```
+
+可通过以下本地集成测试验证两段持久化边界；测试会创建并清理随机 PostgreSQL、Redis 或 MinIO 临时数据：
+
+```powershell
+Set-Location backend
+$env:RUN_LIVE_COLLECTION_ADMISSION_TESTS = "1"
+uv run pytest tests/integration/test_live_collection_admission.py -m live -s
+
+$env:RUN_LIVE_COLLECTION_BUILD_TESTS = "1"
+uv run pytest tests/integration/test_live_collection_build.py -m live -s
+```
 
 本地 Docker Redis 仅映射 IPv4 时，推荐使用 `REDIS_URL=redis://127.0.0.1:6379/0`。Worker 会兼容旧的 `localhost` 配置并自动转为该 IPv4 地址；远程 Redis 地址保持原样。
 
@@ -148,6 +170,10 @@ Set-Location ../backend
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
+
+# 显式运行一次真实 DeepSeek 候选相关性验收；不会写入数据库、Redis 或对象存储。
+$env:RUN_LIVE_CANDIDATE_RELEVANCE_TESTS = "1"
+uv run pytest tests/integration/test_live_candidate_relevance.py -m live -s
 ```
 
 停止服务：

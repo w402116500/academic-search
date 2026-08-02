@@ -34,6 +34,12 @@ class WorkflowSettings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_chat_model: str = "gpt-4.1-mini"
     workflow_intent_timeout_seconds: float = Field(default=45, gt=0, le=180)
+    workflow_relevance_timeout_seconds: float = Field(default=45, gt=0, le=180)
+    workflow_relevance_batch_size: int = Field(default=6, ge=1, le=12)
+    # 单篇摘要发送给相关性 Agent 前的字符上限，防止少数超长摘要挤占整批上下文。
+    workflow_relevance_abstract_max_characters: int = Field(default=3_000, ge=500, le=10_000)
+    # 限制一批结构化评估的最大生成量；服务端仍会校验字段数量和证据原文。
+    workflow_relevance_max_output_tokens: int = Field(default=2_400, ge=256, le=8_000)
 
     @field_validator("deepseek_api_key", "openai_api_key", mode="before")
     @classmethod
