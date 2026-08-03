@@ -43,28 +43,29 @@ export function isFulltextTerminal(status: FulltextStatus | undefined): boolean 
 }
 
 /**
- * 仅允许题录已通过 DOI 核验的候选发起全文请求，避免前端发送服务端必然拒绝的请求。
+ * 有 DOI 的候选可以发起全文核验。Worker 会先按需补齐正式题录，随后才下载全文；
+ * 因此浏览器不能把“当前尚无 ready 题录”误判为无法开始核验。
  */
 export function canRequestFulltext(
   candidate: Candidate,
   fulltext: FulltextResponse | null | undefined,
 ): boolean {
-  return Boolean(candidate.doi && candidate.citation?.status === "ready" && !fulltext);
+  return Boolean(candidate.doi && !fulltext);
 }
 
-/** 为题录非 ready 的不同原因提供准确的、不会被误解为加载中的状态文案。 */
+/** 为题录非 ready 的不同原因提供准确的正式引用提示。 */
 export function citationReadinessMessage(citation: CitationMetadata | null): string {
   switch (citation?.status) {
     case "conflict":
-      return "题录元数据存在冲突，暂不能生成正式引用或获取全文。";
+      return "题录元数据存在冲突，暂不能生成正式引用。全文核验会再次尝试补齐题录。";
     case "partial":
-      return "题录信息不完整，暂不能生成正式引用或获取全文。";
+      return "题录信息不完整，暂不能生成正式引用。全文核验会再次尝试补齐题录。";
     case "unresolved":
-      return "题录核验尚未完成，暂不能生成正式引用或获取全文。";
+      return "题录核验尚未完成，暂不能生成正式引用。";
     case "ready":
       return "题录已通过 DOI 核验，可以生成正式引用。";
     default:
-      return "题录尚未核验完成，暂不能生成正式引用或获取全文。";
+      return "题录尚未核验完成，暂不能生成正式引用。";
   }
 }
 

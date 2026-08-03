@@ -388,3 +388,43 @@
 - 前端复验通过：使用 Node `20.19.6` 与 pnpm `10.34.5` 执行 typecheck、lint、Prettier、Vitest（`16 passed`）、Playwright（`4 passed`）与生产构建均成功。
 - 完成暂存区审计：152 个文件的差异通过 `git diff --cached --check`；十份讨论稿均已纳入；`.env` 未暂存；对新增差异执行密钥模式扫描未命中。
 - 已创建本地提交 `feat: 完成研究工作流与候选相关性评估`；pre-commit 的合并冲突、YAML、文件结尾、尾随空格、Ruff、Ruff format 和 Prettier 检查均通过。
+
+## 2026-08-03 — Phase 12 候选审核与集合准备交互规划
+
+- **Status:** planned
+- 用户指出结果页缺少真正的候选选择和分页，导致“确认 0 篇入集合”没有可理解的前置操作。
+- 已审计当前实现：右侧检查器焦点与待确认集合数量被错误地放在同一视觉语境中；单篇全文准入存在，但没有跨页准备清单或批量操作。
+- 已将 Phase 12 写入 `task_plan.md`，按交互边界、Redis/API 与批量核验、Vue 审核体验、真实端到端验收及讨论稿/提交四个阶段执行；本轮仅完成规划，尚未修改业务代码。
+- 复核后已修正计划章节顺序：Phase 10.3–10.5 保持在 Phase 10 内，随后依次为已完成的 Phase 11 与待实施的 Phase 12；未改动业务代码。
+
+## 2026-08-03 — Phase 12 候选审核与集合准备交互实施
+
+- **Status:** in_progress
+- 已开始实施。后端将复用现有单篇题录、全文与集合准入服务；准备清单和批量操作进度只写入 Redis 搜索会话，长期集合仍由 PostgreSQL 承载。
+- 首轮静态检查暴露两个实现错误：候选审核错误映射插入时打断了既有相关性重试的返回语句，且 Redis 候选快照的处理统计缺少显式字典校验。已按检查位置修复；格式和类型检查将重新执行，不能将其视为无关告警。
+- 候选审核单元测试首次将 `available` 全文状态构造为没有已验证文件的非法结果，Pydantic 正确拒绝。测试已改为合法的 `queued` 状态，继续验证分页、跨页选择与状态汇总边界。
+- 续作恢复时，PowerShell 用于分段阅读的插值字符串将 `$file:` 误解析为变量名，命令在未读取源码前失败；后续改用 `${file}` 形式，不重复同一错误写法。该错误没有修改业务文件。
+- 误从仓库根目录读取 `package.json`，该文件实际位于 `frontend/package.json`；PowerShell 报路径不存在。后续前端验证固定在 `frontend/` 工作目录执行，不把这一诊断命令视为验证失败。
+- 后端 Phase 12 定向验证通过：`8 passed`，Ruff、Ruff format 与 Pyright 全部无问题。
+- 直接执行系统默认 `pnpm` 时，Codex Desktop 注入了 Node `24.14.0` 和 pnpm `11.9.0`，与项目锁定的 Node `20.19.6`、pnpm `10.34.5` 不兼容而在依赖状态检查前失败。后续将显式使用项目 Node 20 与 pnpm 10，不修改锁文件或 engines。
+- 使用工作区依赖探测工具时首次将返回值误按 MCP `content` 数组解析，实际返回为字符串；随后按字符串读取成功。另一次递归搜索 Node 安装目录在 60 秒超时，仅确认 `E:\nodejs\node.exe` 已在 PATH；后续改为直接检查该已定位路径和版本管理器目录。
+- 用 `E:\nodejs\corepack.cmd` 已确认运行时为 Node `20.19.6`、pnpm `10.34.5`；前端 typecheck 随后暴露候选列表改为分页响应后，`PaperDetailView` 仍使用旧的全量 `candidates` 响应。这会使详情页不仅类型失败，也无法读取非第一页候选。修复方向是增加受所有权保护的单篇候选审核读取接口，详情页改为直接读取当前候选，而不是扫描分页列表。
+- 已新增单篇候选审核读取接口并改造详情页读取方式。首轮 Ruff 只发现路由 contracts import 排序，已由 Ruff 自动修复；随后后端定向 `8 passed`、Ruff、格式和 Pyright 均通过，前端 Node 20/pnpm 10 typecheck 也通过。
+- 前端 ESLint 已通过；Prettier 检查发现 `PaperDetailView.vue` 与本轮重写的 `ResultsView.vue` 未符合项目格式，导致后续 unit/build 未执行。下一步仅对这两份源码运行项目 Prettier，再重新执行完整前端验证。
+- 已对两份 Vue 源码完成 Prettier，ESLint 与格式检查随后通过。Vitest 仍有一条旧断言把“题录冲突”视为不能开始全文任务，但真实 Worker 会先重新补齐题录；测试应更新为“带 DOI 且尚无全文任务即可开始核验”，再复跑 unit/build。
+- 已更新全文入口的单元测试语义，typecheck 与 ESLint 通过；Prettier 仅提示该测试文件本身尚未格式化，因此 unit/build 尚未再次执行。接下来格式化此测试后复跑。
+- 前端复验已通过：Node `20.19.6` + pnpm `10.34.5` 下 typecheck、ESLint、Prettier、Vitest（`16 passed`）和 Vite production build 均成功。
+- 新增的 Playwright 审核流程首次运行发现两处模拟契约错误，而非页面业务逻辑：新测试把候选选择端点错误拼成了 `/candidates/candidate-selection`；旧工作流模拟没有按新的服务端 `filter` 参数筛选分页响应。将分别修正模拟路径与筛选返回值后复跑完整 E2E。
+- 第二次 E2E 已使旧认证和工作流用例通过；新审核用例先遇到表格单元格的严格定位歧义，已改为锁定候选行的标题单元格。第三次只剩断言同时匹配表格、检查器和证据摘要中的同一标题；下一步将断言范围限定为候选表格，避免把正常的多处标题呈现误判为失败。
+- 第四次 Playwright 全部通过：认证、既有工作流桌面/窄屏与新增候选审核流程共 `5 passed`。新增流程覆盖跨页选择、行点击不改变多选、刷新恢复、已选筛选、批量核验、批量准入和待确认集合计数同步。
+- 浏览器真实页面可访问但处于登录页。未读取用户浏览器存储或猜测现有账户密码；后续真实验收将使用临时、可精确清理的本地 API/Redis 数据，而不操作用户已有工作区。
+- 一次用于查找测试账户说明的 `rg` 同时传入不存在的仓库根 `tests` 路径而返回错误；有效搜索结果未发现可公开复用的测试账户。后续搜索限定实际 `backend/tests` 路径。
+- 基于真实 PostgreSQL、Redis 与 FastAPI ASGI 的临时数据验收已跑到最后清理分支：候选分页、Redis 选择、单篇详情、批量核验任务投递、非法游标和跨账号隔离均通过。最后断言仍使用旧的 `search_run_session_expired` 错误码，而新审核服务正确返回 `candidate_review_session_expired`；将同步断言后重跑。测试 `finally` 已执行临时资源清理。
+- 真实验收复跑通过：临时账号、PostgreSQL、Redis、FastAPI、MinIO 和真实批量准入路由完成“Redis 准备清单 -> 批量核验任务 -> 可处理全文状态 -> 批量加入待确认集合”。测试在 MinIO 中上传并转正最小 PDF，确认 PostgreSQL 待确认入库记录与 API 集合统计同步，随后精确删除正式/暂存对象、Redis 键、用户、工作区和测试唯一 DOI 论文。外部 Provider、模型和下载网络未在本轮重复调用。
+
+- 真实 arXiv 专项验收首轮在外层 64 秒命令时限前被终止。随后用 `curl` 验证直连可达但 20 秒仅收取约 0.56 MB；`127.0.0.1:7897` 代理可达且同期收取约 1.86 MB。因此第二次验收仅以进程环境显式启用全文代理，不修改仓库或 `.env`。
+- 代理下真实 Worker 已成功下载 arXiv PDF、校验、写入 MinIO、批量准入；专项测试随后因错误假设 `Document.latest_ingestion_run` 关系而失败。实际模型使用 `Document.ingestion_runs`，已将测试改为按文档 ID 查询 `IngestionRun` 并验证其初始 `pending` 状态，待复跑。
+- 真实 arXiv 专项验收已在代理模式下通过（`1 passed in 26.69s`）。发布前定向单元测试随后通过 `11 passed`；Ruff 发现专项测试的未使用导入和超长行，已按报告位置修复，待重新执行静态、前端和全量回归。
+- Phase 12 收尾验证完成：后端候选审核定向测试 `11 passed`、Ruff、Ruff format 和 Pyright 通过；后端全量 `144 passed, 11 skipped`，Alembic check 无待生成迁移。前端在 Node `20.19.6` 与 pnpm `10.34.5` 下通过 Prettier、ESLint、vue-tsc、Vitest（`16 passed`）、Playwright（`5 passed`）与生产构建。
+- 已同步检索、结果、前端体验、前端交互和开发环境讨论稿，并新增 `frontend/README.md`。文档明确“正在查看 / 本次准备清单 / 待确认集合 / 可研究集合”四层边界、游标分页、批量核验与严格准入顺序。
+- Git 提交前审计通过：`git diff --check` 无输出，`.env` 未被跟踪，差异密钥前缀扫描未命中；已创建本地提交 `feat: 完善候选审核与批量准入`。

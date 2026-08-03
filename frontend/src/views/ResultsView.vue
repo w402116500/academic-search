@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import {
+  ArrowLeft,
   ArrowRight,
   ArrowUpRight,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Clipboard,
   FileDown,
   FileSearch,
   Layers2,
+  ListChecks,
   LoaderCircle,
-  Plus,
   Search,
   ShieldCheck,
   SlidersHorizontal,
@@ -23,7 +26,6 @@ import {
   buildCollection,
   getCandidateCitation,
   getCollectionDocuments,
-  getFulltext,
   requestFulltext,
 } from "@/api/collections";
 import {
@@ -38,38 +40,48 @@ import {
   normalizeCandidateLanguage,
 } from "@/features/research/candidate-language";
 import { presentCandidateRelevance } from "@/features/research/candidate-relevance";
-import { getCurrentSearchRun, getSearchCandidates, retryCandidateRelevance } from "@/api/workflow";
-import type { Candidate, CandidateLanguage, FulltextResponse } from "@/api/types";
+import {
+  admitCandidateSelection,
+  clearCandidateSelection,
+  getCurrentSearchRun,
+  getSearchCandidates,
+  prepareCandidateSelection,
+  retryCandidateRelevance,
+  updateCandidateSelection,
+} from "@/api/workflow";
+import type {
+  Candidate,
+  CandidateReviewFilter,
+  CandidateReviewItem,
+  FulltextResponse,
+} from "@/api/types";
 
-type CandidateFilter =
-  | "all"
-  | "zh"
-  | "en"
-  | "priority"
-  | "background"
-  | "needs_review"
-  | "available"
-  | "open_access"
-  | "doi";
+const PAGE_SIZE_OPTIONS = [20, 50] as const;
 
 const route = useRoute();
 const router = useRouter();
 const queryClient = useQueryClient();
 const workspaceId = computed(() => String(route.params.workspaceId));
 const runId = ref(typeof route.query.run === "string" ? route.query.run : "");
-const searchFilter = ref("");
-const selectedFilter = ref<CandidateFilter>("all");
+const searchInput = ref("");
+const searchQuery = ref("");
+const selectedFilter = ref<CandidateReviewFilter>("all");
+const pageSize = ref<(typeof PAGE_SIZE_OPTIONS)[number]>(20);
+const cursorHistory = ref<Array<string | null>>([null]);
 const selectedCandidateId = ref<string | null>(null);
 const collectionConfirmOpen = ref(false);
-const fulltextStates = reactive<Record<string, FulltextResponse>>({});
 const toast = ref<string | null>(null);
-const timers: number[] = [];
+let searchDebounceTimer: number | undefined;
+let reviewRefreshTimer: number | undefined;
 
-// 运行摘要提供处理台账。候选页从 URL 恢复时仍可通过当前运行补齐该摘要。
+const activeCursor = computed(() => cursorHistory.value.at(-1) ?? null);
+const currentPageNumber = computed(() => cursorHistory.value.length);
+
 const runQuery = useQuery({
   queryKey: computed(() => ["search-run", workspaceId.value]),
   queryFn: () => getCurrentSearchRun(workspaceId.value),
 });
+
 watch(
   () => runQuery.data.value?.id,
   (id) => {
@@ -77,46 +89,46 @@ watch(
   },
   { immediate: true },
 );
+
 const candidatesQuery = useQuery({
-  queryKey: computed(() => ["candidates", workspaceId.value, runId.value]),
-  queryFn: () => getSearchCandidates(workspaceId.value, runId.value),
+  queryKey: computed(() => [
+    "candidates",
+    workspaceId.value,
+    runId.value,
+    activeCursor.value,
+    searchQuery.value,
+    selectedFilter.value,
+    pageSize.value,
+  ]),
+  queryFn: () =>
+    getSearchCandidates(workspaceId.value, runId.value, {
+      limit: pageSize.value,
+      cursor: activeCursor.value,
+      query: searchQuery.value,
+      filter: selectedFilter.value,
+    }),
   enabled: computed(() => Boolean(runId.value)),
-  staleTime: 10_000,
+  staleTime: 5_000,
 });
+
 const collectionQuery = useQuery({
   queryKey: computed(() => ["collection-documents", workspaceId.value]),
   queryFn: () => getCollectionDocuments(workspaceId.value),
 });
 
-const allCandidates = computed(() => candidatesQuery.data.value?.candidates ?? []);
-const candidates = computed(() => {
-  const keyword = searchFilter.value.trim().toLowerCase();
-  return allCandidates.value.filter((candidate) => {
-    const matchesKeyword =
-      !keyword ||
-      candidate.title.toLowerCase().includes(keyword) ||
-      candidate.authors.some((author) => author.name.toLowerCase().includes(keyword));
-    if (!matchesKeyword) return false;
-    if (selectedFilter.value === "zh" || selectedFilter.value === "en") {
-      return normalizeCandidateLanguage(candidate.language) === selectedFilter.value;
-    }
-    if (selectedFilter.value === "priority") return isPriorityCandidate(candidate);
-    if (selectedFilter.value === "background") {
-      return candidate.relevance_assessment?.level === "background";
-    }
-    if (selectedFilter.value === "needs_review") return needsManualRelevanceReview(candidate);
-    if (selectedFilter.value === "available") {
-      return fulltextStates[candidate.candidate_id]?.status === "available";
-    }
-    if (selectedFilter.value === "open_access") return candidate.is_open_access === true;
-    if (selectedFilter.value === "doi") return Boolean(candidate.doi);
-    return true;
-  });
-});
-const selectedCandidate = computed(
+const reviewItems = computed(() => candidatesQuery.data.value?.items ?? []);
+const selection = computed(
   () =>
-    allCandidates.value.find((candidate) => candidate.candidate_id === selectedCandidateId.value) ??
-    null,
+    candidatesQuery.data.value?.selection ?? {
+      selected_count: 0,
+      needs_fulltext_count: 0,
+      fulltext_in_progress_count: 0,
+      ready_for_admission_count: 0,
+      blocked_count: 0,
+    },
+);
+const page = computed(
+  () => candidatesQuery.data.value?.page ?? { limit: pageSize.value, total: 0, next_cursor: null },
 );
 const pendingCount = computed(
   () => collectionQuery.data.value?.summary.ingestion_status_counts.pending ?? 0,
@@ -127,58 +139,141 @@ const indexedCount = computed(
 const providerCount = computed(
   () => Object.keys(runQuery.data.value?.provider_summary ?? {}).length,
 );
+const selectedReviewItem = computed(
+  () =>
+    reviewItems.value.find((item) => item.candidate.candidate_id === selectedCandidateId.value) ??
+    null,
+);
+const selectedCandidate = computed(() => selectedReviewItem.value?.candidate ?? null);
 const selectedCandidateReason = computed(() =>
   selectedCandidate.value ? presentCandidateRelevance(selectedCandidate.value) : null,
 );
+const selectablePageItems = computed(() => reviewItems.value.filter(isCandidateSelectable));
+const allCurrentPageSelected = computed(
+  () =>
+    selectablePageItems.value.length > 0 &&
+    selectablePageItems.value.every((item) => item.is_selected),
+);
+const isPreparing = computed(() =>
+  reviewItems.value.some((item) => item.fulltext && !isFulltextTerminal(item.fulltext.status)),
+);
 
-// 筛选条件改变时，检查器只跟随当前可见候选，避免仍展示已被语言标签隐藏的旧记录。
 watch(
-  candidates,
+  reviewItems,
   (items) => {
     if (!items.length) {
       selectedCandidateId.value = null;
       return;
     }
-    if (!items.some((item) => item.candidate_id === selectedCandidateId.value)) {
-      selectedCandidateId.value = items[0].candidate_id;
+    if (!items.some((item) => item.candidate.candidate_id === selectedCandidateId.value)) {
+      selectedCandidateId.value = items[0].candidate.candidate_id;
     }
   },
   { immediate: true },
 );
 
+watch(searchInput, (value) => {
+  window.clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = window.setTimeout(() => {
+    searchQuery.value = value;
+    resetPage();
+  }, 250);
+});
+
+watch([selectedFilter, pageSize], resetPage);
+watch(isPreparing, restartReviewPolling, { immediate: true });
+
+const selectionMutation = useMutation({
+  mutationFn: ({ candidateIds, selected }: { candidateIds: string[]; selected: boolean }) =>
+    updateCandidateSelection(workspaceId.value, runId.value, candidateIds, selected),
+  onSuccess: async () => {
+    await refreshCandidates();
+  },
+  onError: (error) => {
+    toast.value = error instanceof Error ? error.message : "候选选择无法同步。";
+  },
+});
+
+const clearSelectionMutation = useMutation({
+  mutationFn: () => clearCandidateSelection(workspaceId.value, runId.value),
+  onSuccess: async () => {
+    toast.value = "本次准备清单已清空。";
+    await refreshCandidates();
+  },
+  onError: (error) => {
+    toast.value = error instanceof Error ? error.message : "准备清单无法清空。";
+  },
+});
+
+const prepareMutation = useMutation({
+  mutationFn: () => prepareCandidateSelection(workspaceId.value, runId.value),
+  onSuccess: async (result) => {
+    toast.value =
+      result.queued_count > 0
+        ? `已安排 ${result.queued_count} 篇候选进行题录与全文核验。`
+        : "已同步当前准备清单的核验状态。";
+    await refreshCandidates();
+    restartReviewPolling();
+  },
+  onError: (error) => {
+    toast.value = error instanceof Error ? error.message : "批量核验无法启动。";
+  },
+});
+
+const batchAdmissionMutation = useMutation({
+  mutationFn: () => admitCandidateSelection(workspaceId.value, runId.value),
+  onSuccess: async (result) => {
+    toast.value =
+      result.admitted_count > 0
+        ? `已将 ${result.admitted_count} 篇文献加入待确认集合。`
+        : "当前准备清单中没有可立即加入集合的文献。";
+    await Promise.all([refreshCandidates(), refreshCollectionDocuments()]);
+  },
+  onError: (error) => {
+    toast.value = error instanceof Error ? error.message : "批量加入集合无法完成。";
+  },
+});
+
 const fulltextMutation = useMutation({
   mutationFn: (candidateId: string) => requestFulltext(workspaceId.value, runId.value, candidateId),
-  onSuccess: (result) => {
-    fulltextStates[result.candidate_id] = result;
-    if (!isFulltextTerminal(result.status)) pollFulltext(result.candidate_id);
+  onSuccess: async () => {
+    toast.value = "单篇题录与全文核验已安排。";
+    await refreshCandidates();
+    restartReviewPolling();
   },
   onError: (error) => {
     toast.value = error instanceof Error ? error.message : "全文任务无法启动。";
   },
 });
+
 const relevanceRetryMutation = useMutation({
   mutationFn: (candidateId: string) =>
     retryCandidateRelevance(workspaceId.value, runId.value, candidateId),
-  onSuccess: (result, candidateId) => {
-    queryClient.setQueryData(["candidates", workspaceId.value, runId.value], result);
-    const retried = result.candidates.find((candidate) => candidate.candidate_id === candidateId);
-    toast.value =
-      retried?.relevance_state === "pending" ? "候选理由正在重新分析。" : "候选理由已重新分析。";
+  onSuccess: async () => {
+    toast.value = "候选理由正在重新分析。";
+    await refreshCandidates();
   },
   onError: (error) => {
     toast.value = error instanceof Error ? error.message : "候选理由暂时无法重新分析。";
   },
 });
+
 const admissionMutation = useMutation({
   mutationFn: (candidateId: string) => admitFulltext(workspaceId.value, runId.value, candidateId),
-  onSuccess: () => {
-    toast.value = "已加入待确认研究集合。";
-    void queryClient.invalidateQueries({ queryKey: ["collection-documents", workspaceId.value] });
+  onSuccess: async (_result, candidateId) => {
+    try {
+      await updateCandidateSelection(workspaceId.value, runId.value, [candidateId], false);
+    } catch {
+      toast.value = "文献已加入待确认集合，但准备清单需要手动刷新。";
+    }
+    if (!toast.value) toast.value = "已加入待确认集合。";
+    await Promise.all([refreshCandidates(), refreshCollectionDocuments()]);
   },
   onError: (error) => {
     toast.value = error instanceof Error ? error.message : "当前文献还不能加入集合。";
   },
 });
+
 const citationMutation = useMutation({
   mutationFn: (candidateId: string) =>
     getCandidateCitation(workspaceId.value, runId.value, candidateId),
@@ -194,12 +289,13 @@ const citationMutation = useMutation({
     toast.value = error instanceof Error ? error.message : "当前题录无法生成正式引用。";
   },
 });
+
 const buildMutation = useMutation({
   mutationFn: () => buildCollection(workspaceId.value),
   onSuccess: async () => {
     collectionConfirmOpen.value = false;
     toast.value = "集合构建任务已启动。";
-    await queryClient.invalidateQueries({ queryKey: ["collection-documents", workspaceId.value] });
+    await refreshCollectionDocuments();
     await router.push({ name: "workspace-collection", params: { workspaceId: workspaceId.value } });
   },
   onError: (error) => {
@@ -207,84 +303,115 @@ const buildMutation = useMutation({
   },
 });
 
-function count(key: string): number {
-  return Number(runQuery.data.value?.candidate_counts[key] ?? 0);
+function resetPage(): void {
+  cursorHistory.value = [null];
+  selectedCandidateId.value = null;
 }
 
-/** 语言筛选按钮展示全量候选计数，不受当前关键词或其他标签影响。 */
-function languageCount(language: Extract<CandidateLanguage, "zh" | "en">): number {
-  return allCandidates.value.filter(
-    (candidate) => normalizeCandidateLanguage(candidate.language) === language,
-  ).length;
+function changeFilter(filter: CandidateReviewFilter): void {
+  selectedFilter.value = filter;
 }
 
-/** 相关性筛选只读取服务端评估状态，不以标题关键词推断候选等级。 */
-function isPriorityCandidate(candidate: Candidate): boolean {
-  const level = candidate.relevance_assessment?.level;
-  return level === "core" || level === "related";
+function goToPreviousPage(): void {
+  if (cursorHistory.value.length <= 1) return;
+  cursorHistory.value = cursorHistory.value.slice(0, -1);
+  selectedCandidateId.value = null;
 }
 
-/** 未完成、信息不足或低优先级候选保留给用户人工决定，不会被自动删除。 */
-function needsManualRelevanceReview(candidate: Candidate): boolean {
-  const level = candidate.relevance_assessment?.level;
-  return !isPriorityCandidate(candidate) && level !== "background";
+function goToNextPage(): void {
+  const nextCursor = page.value.next_cursor;
+  if (!nextCursor) return;
+  cursorHistory.value = [...cursorHistory.value, nextCursor];
+  selectedCandidateId.value = null;
 }
 
-/** 相关性筛选按钮展示全量计数，和语言筛选保持一致。 */
-function relevanceCount(
-  filter: Extract<CandidateFilter, "priority" | "background" | "needs_review">,
-): number {
-  if (filter === "priority") return allCandidates.value.filter(isPriorityCandidate).length;
-  if (filter === "background") {
-    return allCandidates.value.filter(
-      (candidate) => candidate.relevance_assessment?.level === "background",
-    ).length;
+function toggleCandidate(item: CandidateReviewItem, selected: boolean): void {
+  if (!isCandidateSelectable(item)) return;
+  selectionMutation.mutate({ candidateIds: [item.candidate.candidate_id], selected });
+}
+
+function toggleCurrentPageSelection(): void {
+  const candidateIds = selectablePageItems.value.map((item) => item.candidate.candidate_id);
+  if (!candidateIds.length) {
+    toast.value = "当前页没有可加入准备清单的候选。";
+    return;
   }
-  return allCandidates.value.filter(needsManualRelevanceReview).length;
+  selectionMutation.mutate({ candidateIds, selected: !allCurrentPageSelected.value });
 }
 
-function pollFulltext(candidateId: string): void {
-  const timer = window.setInterval(async () => {
-    try {
-      const result = await getFulltext(workspaceId.value, runId.value, candidateId);
-      fulltextStates[candidateId] = result;
-      if (isFulltextTerminal(result.status)) window.clearInterval(timer);
-    } catch {
-      window.clearInterval(timer);
-    }
-  }, 1_500);
-  timers.push(timer);
+function isCandidateSelectable(item: CandidateReviewItem): boolean {
+  return Boolean(item.candidate.doi && item.candidate.triage?.included);
 }
 
-function fulltextLabel(candidateId: string): string {
-  return fulltextStatusLabel(fulltextStates[candidateId]);
+function candidateSelectionHint(item: CandidateReviewItem): string {
+  if (!item.candidate.doi) return "缺少 DOI，只能查看和人工核对，不能进入研究集合。";
+  if (!item.candidate.triage?.included) return "未通过基础筛选，不能进入研究集合。";
+  return "加入本次准备清单。";
 }
 
-function candidateState(candidate: Candidate): string {
-  const fulltext = fulltextStates[candidate.candidate_id]?.status;
+function count(key: string): number {
+  return Number(
+    candidatesQuery.data.value?.candidate_counts[key] ??
+      runQuery.data.value?.candidate_counts[key] ??
+      0,
+  );
+}
+
+function fulltextOf(item: CandidateReviewItem | null): FulltextResponse | null {
+  return item?.fulltext ?? null;
+}
+
+function candidateState(candidate: Candidate, fulltext: FulltextResponse | null): string {
   if (!candidate.doi) return "缺少 DOI";
-  if (candidate.citation?.status !== "ready") return citationStatusLabel(candidate.citation);
-  if (fulltext === "available") return "可加入集合";
-  if (fulltext === "rejected") return "未通过全文准入";
-  if (fulltext === "failed") return "全文不可用";
-  if (["downloading", "validating", "queued"].includes(fulltext ?? "")) return "全文处理中";
-  return "需要全文核验";
+  if (fulltext?.status === "available") return "可加入集合";
+  if (fulltext?.status === "rejected") return "未通过全文准入";
+  if (fulltext?.status === "failed") return "全文不可用";
+  if (fulltext && !isFulltextTerminal(fulltext.status)) return "全文处理中";
+  return "待准备核验";
 }
 
-function candidateProcessingSummary(candidate: Candidate): string {
+function candidateProcessingSummary(
+  candidate: Candidate,
+  fulltext: FulltextResponse | null,
+): string {
   if (!candidate.doi) return "该记录缺少 DOI，不能进入后续研究集合。";
-  if (candidate.citation?.status !== "ready") return citationReadinessMessage(candidate.citation);
-  const fulltext = fulltextStates[candidate.candidate_id];
   if (fulltext?.status === "rejected") {
     return fulltext.error?.message || "该文献不满足全文准入条件，不能进入研究集合。";
   }
-  if (fulltextStates[candidate.candidate_id]?.status === "available") {
+  if (fulltext?.status === "failed") {
+    return fulltext.error?.message || "全文获取失败，可根据提示重试或改选其他文献。";
+  }
+  if (fulltext?.status === "available") {
     return "DOI、正式题录与可处理全文均已核验，可以加入待确认研究集合。";
   }
-  return "题录已通过核验。下一步需要获取并验证可处理的全文。";
+  if (fulltext && !isFulltextTerminal(fulltext.status)) {
+    return "题录与全文核验正在进行，结果会自动更新到本页。";
+  }
+  return candidate.citation?.status === "ready"
+    ? "题录已通过核验。下一步需要获取并验证可处理的全文。"
+    : `${citationReadinessMessage(candidate.citation)} 你可以开始核验，系统会先按 DOI 重新补齐题录。`;
 }
 
-onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
+async function refreshCandidates(): Promise<void> {
+  await queryClient.invalidateQueries({ queryKey: ["candidates", workspaceId.value, runId.value] });
+}
+
+async function refreshCollectionDocuments(): Promise<void> {
+  await queryClient.invalidateQueries({ queryKey: ["collection-documents", workspaceId.value] });
+}
+
+function restartReviewPolling(): void {
+  window.clearInterval(reviewRefreshTimer);
+  if (!isPreparing.value) return;
+  reviewRefreshTimer = window.setInterval(() => {
+    void refreshCandidates();
+  }, 1_500);
+}
+
+onUnmounted(() => {
+  window.clearTimeout(searchDebounceTimer);
+  window.clearInterval(reviewRefreshTimer);
+});
 </script>
 
 <template>
@@ -293,15 +420,17 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
       <div>
         <div class="eyebrow">候选文献</div>
         <h1>把候选记录收敛成可研究的文献集合。</h1>
-        <p>审核题录与全文状态。只有已加入待确认集合的文献，才会在你确认后被解析、切块和索引。</p>
+        <p>
+          先建立本次准备清单，再批量核验题录和全文。只有通过严格准入的文献，才会进入待确认集合。
+        </p>
       </div>
       <button
-        class="primary-button"
+        class="collection-entry-button"
         type="button"
         :disabled="!pendingCount"
         @click="collectionConfirmOpen = true"
       >
-        <Layers2 :size="16" /><span>确认 {{ pendingCount }} 篇入集合</span>
+        <Layers2 :size="17" /><span>待确认集合</span><strong>{{ pendingCount }} 篇</strong>
       </button>
     </div>
 
@@ -319,14 +448,15 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
         >
       </div>
       <div class="process-item current">
-        <strong>题录与全文</strong
-        ><span>{{ count("citation_enriched_count") }} 条题录补全，等待全文核验</span>
+        <strong>候选审核</strong
+        ><span>本次准备清单 {{ selection.selected_count }} 篇，等待你决定下一步</span>
       </div>
       <div class="process-item">
         <strong>向量索引</strong
         ><span>{{ pendingCount }} 篇待构建，{{ indexedCount }} 篇已可研究</span>
       </div>
     </div>
+
     <div v-if="providerCount" class="processing-detail" aria-label="来源处理明细">
       <div v-for="(provider, name) in runQuery.data.value?.provider_summary" :key="name">
         <strong>{{ name }}</strong
@@ -342,78 +472,138 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
     <div class="results-layout">
       <main class="results-main">
         <div class="results-toolbar">
-          <div class="search-input">
-            <Search :size="15" /><input v-model="searchFilter" placeholder="按标题或作者筛选" />
-          </div>
-          <span class="result-count"
-            >{{ candidates.length }} / {{ allCandidates.length }} 条候选</span
-          >
+          <label class="search-input">
+            <Search :size="15" /><span class="sr-only">按标题或作者筛选</span
+            ><input v-model="searchInput" placeholder="按标题或作者筛选" />
+          </label>
+          <span class="result-count">{{ page.total }} 条候选，第 {{ currentPageNumber }} 页</span>
         </div>
+
         <div class="filter-row" aria-label="候选文献筛选">
           <button
             :class="{ active: selectedFilter === 'all' }"
             type="button"
-            @click="selectedFilter = 'all'"
+            @click="changeFilter('all')"
           >
-            全部 {{ allCandidates.length }}
+            全部
           </button>
           <button
             :class="{ active: selectedFilter === 'zh' }"
             type="button"
-            @click="selectedFilter = 'zh'"
+            @click="changeFilter('zh')"
           >
-            中文文献 {{ languageCount("zh") }}
+            中文文献
           </button>
           <button
             :class="{ active: selectedFilter === 'en' }"
             type="button"
-            @click="selectedFilter = 'en'"
+            @click="changeFilter('en')"
           >
-            英文文献 {{ languageCount("en") }}
+            英文文献
           </button>
           <button
             :class="{ active: selectedFilter === 'priority' }"
             type="button"
-            @click="selectedFilter = 'priority'"
+            @click="changeFilter('priority')"
           >
-            优先审核 {{ relevanceCount("priority") }}
+            优先审核
           </button>
           <button
             :class="{ active: selectedFilter === 'background' }"
             type="button"
-            @click="selectedFilter = 'background'"
+            @click="changeFilter('background')"
           >
-            背景参考 {{ relevanceCount("background") }}
+            背景参考
           </button>
           <button
             :class="{ active: selectedFilter === 'needs_review' }"
             type="button"
-            @click="selectedFilter = 'needs_review'"
+            @click="changeFilter('needs_review')"
           >
-            需人工核对 {{ relevanceCount("needs_review") }}
+            需人工核对
           </button>
           <button
             :class="{ active: selectedFilter === 'available' }"
             type="button"
-            @click="selectedFilter = 'available'"
+            @click="changeFilter('available')"
           >
             全文已核验
           </button>
           <button
             :class="{ active: selectedFilter === 'open_access' }"
             type="button"
-            @click="selectedFilter = 'open_access'"
+            @click="changeFilter('open_access')"
           >
             开放获取
           </button>
           <button
             :class="{ active: selectedFilter === 'doi' }"
             type="button"
-            @click="selectedFilter = 'doi'"
+            @click="changeFilter('doi')"
           >
             有 DOI
           </button>
         </div>
+
+        <section
+          v-if="selection.selected_count"
+          class="selection-action-bar"
+          aria-label="本次准备清单操作"
+        >
+          <div class="selection-action-summary">
+            <span>本次准备清单</span><strong>已选 {{ selection.selected_count }} 篇</strong>
+            <small
+              >待核验 {{ selection.needs_fulltext_count }}，核验中
+              {{ selection.fulltext_in_progress_count }}，可入集合
+              {{ selection.ready_for_admission_count }}，暂不可用
+              {{ selection.blocked_count }}</small
+            >
+          </div>
+          <div class="selection-action-buttons">
+            <button
+              class="compact-button"
+              type="button"
+              :disabled="selectionMutation.isPending.value"
+              @click="toggleCurrentPageSelection"
+            >
+              <Check :size="14" />{{ allCurrentPageSelected ? "取消本页选择" : "本页全选" }}
+            </button>
+            <button class="compact-button" type="button" @click="changeFilter('selected')">
+              <ListChecks :size="14" />只看已选
+            </button>
+            <button
+              class="compact-button emphasis"
+              type="button"
+              :disabled="prepareMutation.isPending.value"
+              @click="prepareMutation.mutate()"
+            >
+              <LoaderCircle
+                v-if="prepareMutation.isPending.value"
+                class="spin"
+                :size="14"
+              /><FileDown v-else :size="14" />准备核验
+            </button>
+            <button
+              class="compact-button primary"
+              type="button"
+              :disabled="
+                !selection.ready_for_admission_count || batchAdmissionMutation.isPending.value
+              "
+              @click="batchAdmissionMutation.mutate()"
+            >
+              <Layers2 :size="14" />加入待确认集合
+            </button>
+            <button
+              class="compact-button danger"
+              type="button"
+              :disabled="clearSelectionMutation.isPending.value"
+              @click="clearSelectionMutation.mutate()"
+            >
+              <X :size="14" />清空选择
+            </button>
+          </div>
+        </section>
+
         <div
           v-if="candidatesQuery.isPending.value || runQuery.isPending.value"
           class="loading-state"
@@ -422,12 +612,24 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
         </div>
         <div v-else-if="candidatesQuery.isError.value" class="failure-panel">
           <strong>候选会话不可用</strong>
-          <p>候选结果可能已过期，请返回研究入口重新执行检索。</p>
+          <p>候选结果可能已过期，或分页条件已经变化。</p>
+          <button class="secondary-button" type="button" @click="resetPage">
+            <ArrowLeft :size="15" />返回第一页
+          </button>
         </div>
         <div v-else class="candidate-table-wrap">
-          <table class="candidate-table">
+          <table class="candidate-table candidate-review-table">
             <thead>
               <tr>
+                <th class="selection-column">
+                  <input
+                    aria-label="选择当前页可处理候选"
+                    type="checkbox"
+                    :checked="allCurrentPageSelected"
+                    :disabled="!selectablePageItems.length || selectionMutation.isPending.value"
+                    @change="toggleCurrentPageSelection"
+                  />
+                </th>
                 <th>文献</th>
                 <th>来源与年份</th>
                 <th>准入状态</th>
@@ -436,56 +638,71 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
             </thead>
             <tbody>
               <tr
-                v-for="candidate in candidates"
-                :key="candidate.candidate_id"
-                :class="{ selected: selectedCandidateId === candidate.candidate_id }"
+                v-for="item in reviewItems"
+                :key="item.candidate.candidate_id"
+                :class="{
+                  selected: selectedCandidateId === item.candidate.candidate_id,
+                  'review-selected': item.is_selected,
+                }"
                 tabindex="0"
-                @click="selectedCandidateId = candidate.candidate_id"
-                @keydown.enter="selectedCandidateId = candidate.candidate_id"
+                @click="selectedCandidateId = item.candidate.candidate_id"
+                @keydown.enter="selectedCandidateId = item.candidate.candidate_id"
               >
+                <td class="selection-column">
+                  <input
+                    :aria-label="`选择 ${item.candidate.title}`"
+                    type="checkbox"
+                    :checked="item.is_selected"
+                    :disabled="!isCandidateSelectable(item) || selectionMutation.isPending.value"
+                    :title="candidateSelectionHint(item)"
+                    @click.stop
+                    @change="toggleCandidate(item, !item.is_selected)"
+                  />
+                </td>
                 <td>
                   <div class="candidate-title">
-                    <strong>{{ candidate.title }}</strong>
+                    <strong>{{ item.candidate.title }}</strong>
                     <div class="candidate-title-footer">
                       <small
                         >{{
-                          candidate.authors
+                          item.candidate.authors
                             .slice(0, 3)
                             .map((author) => author.name)
                             .join("、") || "作者信息待补全"
-                        }}<span v-if="candidate.authors.length > 3"> 等</span></small
-                      ><span
+                        }}<span v-if="item.candidate.authors.length > 3"> 等</span></small
+                      >
+                      <span
                         class="candidate-language-tag"
-                        :class="`language-${normalizeCandidateLanguage(candidate.language)}`"
-                        >{{ candidateLanguageLabel(candidate.language) }}</span
+                        :class="`language-${normalizeCandidateLanguage(item.candidate.language)}`"
+                        >{{ candidateLanguageLabel(item.candidate.language) }}</span
                       >
                     </div>
                     <div class="candidate-relevance-row" aria-label="候选理由摘要">
                       <span
                         class="candidate-relevance-tier"
-                        :class="`tier-${presentCandidateRelevance(candidate).tier}`"
-                        >{{ presentCandidateRelevance(candidate).tierLabel }}</span
+                        :class="`tier-${presentCandidateRelevance(item.candidate).tier}`"
+                        >{{ presentCandidateRelevance(item.candidate).tierLabel }}</span
                       >
                       <span
                         class="candidate-relevance-summary-inline"
-                        :title="presentCandidateRelevance(candidate).relevanceSummary"
-                        >{{ presentCandidateRelevance(candidate).relevanceSummary }}</span
+                        :title="presentCandidateRelevance(item.candidate).relevanceSummary"
+                        >{{ presentCandidateRelevance(item.candidate).relevanceSummary }}</span
                       >
                     </div>
                   </div>
                 </td>
                 <td>
-                  <span>{{ candidate.venue || "未标注来源" }}</span
+                  <span>{{ item.candidate.venue || "未标注来源" }}</span
                   ><small
-                    >{{ candidate.published_year ?? "年份待补全" }} ·
-                    {{ candidate.doi ? "DOI 已有" : "无 DOI" }}</small
+                    >{{ item.candidate.published_year ?? "年份待补全" }} ·
+                    {{ item.candidate.doi ? "DOI 已有" : "无 DOI" }}</small
                   >
                 </td>
                 <td>
-                  <span
-                    class="status-text"
-                    :class="{ ok: fulltextStates[candidate.candidate_id]?.status === 'available' }"
-                    ><ShieldCheck :size="14" />{{ candidateState(candidate) }}</span
+                  <span class="status-text" :class="{ ok: item.fulltext?.status === 'available' }"
+                    ><ShieldCheck :size="14" />{{
+                      candidateState(item.candidate, item.fulltext)
+                    }}</span
                   >
                 </td>
                 <td>
@@ -497,7 +714,7 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
                       @click.stop="
                         router.push({
                           name: 'paper-detail',
-                          params: { workspaceId, candidateId: candidate.candidate_id },
+                          params: { workspaceId, candidateId: item.candidate.candidate_id },
                           query: { run: runId },
                         })
                       "
@@ -505,33 +722,65 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
                       <ArrowUpRight :size="16" />
                     </button>
                     <button
-                      v-if="candidate.citation?.status === 'ready'"
+                      v-if="item.candidate.citation?.status === 'ready'"
                       class="icon-button"
                       type="button"
                       title="复制 GB/T 7714-2015 引用"
                       :disabled="citationMutation.isPending.value"
-                      @click.stop="citationMutation.mutate(candidate.candidate_id)"
+                      @click.stop="citationMutation.mutate(item.candidate.candidate_id)"
                     >
                       <Clipboard :size="16" />
                     </button>
                   </div>
                 </td>
               </tr>
-              <tr v-if="!candidates.length">
-                <td colspan="4" class="empty-row">没有匹配的候选文献。</td>
+              <tr v-if="!reviewItems.length">
+                <td colspan="5" class="empty-row">没有匹配的候选文献。</td>
               </tr>
             </tbody>
           </table>
         </div>
+
+        <nav class="candidate-pagination" aria-label="候选文献分页">
+          <div>
+            <label
+              >每页
+              <select v-model="pageSize" aria-label="每页候选数量">
+                <option v-for="size in PAGE_SIZE_OPTIONS" :key="size" :value="size">
+                  {{ size }} 条
+                </option>
+              </select>
+            </label>
+            <span>第 {{ currentPageNumber }} 页，共 {{ page.total }} 条</span>
+          </div>
+          <div>
+            <button
+              class="compact-button"
+              type="button"
+              :disabled="cursorHistory.length <= 1"
+              @click="goToPreviousPage"
+            >
+              <ChevronLeft :size="15" />上一页
+            </button>
+            <button
+              class="compact-button"
+              type="button"
+              :disabled="!page.next_cursor"
+              @click="goToNextPage"
+            >
+              下一页<ChevronRight :size="15" />
+            </button>
+          </div>
+        </nav>
       </main>
 
       <aside class="selection-inspector" aria-label="候选文献检查器">
-        <template v-if="selectedCandidate && selectedCandidateReason">
+        <template v-if="selectedCandidate && selectedReviewItem && selectedCandidateReason">
           <div class="inspector-head">
             <strong>候选文献检查器</strong><SlidersHorizontal :size="16" />
           </div>
           <div class="inspector-body">
-            <span class="eyebrow">当前选择</span>
+            <span class="eyebrow">正在查看</span>
             <h2>{{ selectedCandidate.title }}</h2>
             <p class="inspector-meta">
               {{ selectedCandidate.authors.map((author) => author.name).join("、") || "作者待补全"
@@ -543,6 +792,7 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
                 >{{ candidateLanguageLabel(selectedCandidate.language) }}</span
               >
             </p>
+
             <section class="inspector-section candidate-reason-section">
               <div class="inspector-section-heading">
                 <h3>为什么保留这篇候选</h3>
@@ -603,73 +853,74 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
                 <LoaderCircle
                   :size="14"
                   :class="{ 'is-spinning': relevanceRetryMutation.isPending.value }"
-                />
-                <span>重新分析候选理由</span>
+                /><span>重新分析候选理由</span>
               </button>
             </section>
+
             <details class="inspector-section inspector-processing">
               <summary><span>处理记录</span><small>查看技术状态</small></summary>
-              <p>{{ candidateProcessingSummary(selectedCandidate) }}</p>
+              <p>
+                {{ candidateProcessingSummary(selectedCandidate, fulltextOf(selectedReviewItem)) }}
+              </p>
               <div class="provenance-list">
                 <div>
                   <span>身份确认</span
                   ><strong>{{ selectedCandidate.doi ? "DOI 已提供" : "缺少 DOI" }}</strong>
                 </div>
                 <div>
-                  <span>文献语言</span
-                  ><strong>{{ candidateLanguageLabel(selectedCandidate.language) }}</strong>
-                </div>
-                <div>
                   <span>题录核验</span
                   ><strong>{{
                     selectedCandidate.citation?.status === "ready"
                       ? "可生成正式引用"
-                      : selectedCandidate.citation?.status === "conflict"
-                        ? "题录存在冲突"
-                        : "尚未完成核验"
+                      : citationStatusLabel(selectedCandidate.citation)
                   }}</strong>
                 </div>
                 <div>
                   <span>全文获取</span
-                  ><strong>{{ fulltextLabel(selectedCandidate.candidate_id) }}</strong>
+                  ><strong>{{ fulltextStatusLabel(fulltextOf(selectedReviewItem)) }}</strong>
                 </div>
-                <div><span>向量索引</span><strong>确认集合后开始</strong></div>
+                <div><span>向量索引</span><strong>加入待确认集合后开始</strong></div>
               </div>
             </details>
+
             <div class="inspector-actions">
               <button
-                v-if="
-                  canRequestFulltext(
-                    selectedCandidate,
-                    fulltextStates[selectedCandidate.candidate_id],
-                  )
-                "
+                v-if="isCandidateSelectable(selectedReviewItem) && !selectedReviewItem.is_selected"
+                class="secondary-button"
+                type="button"
+                :disabled="selectionMutation.isPending.value"
+                @click="toggleCandidate(selectedReviewItem, true)"
+              >
+                <ListChecks :size="15" />加入本次准备清单
+              </button>
+              <button
+                v-if="canRequestFulltext(selectedCandidate, fulltextOf(selectedReviewItem))"
                 class="secondary-button"
                 type="button"
                 :disabled="fulltextMutation.isPending.value"
                 @click="fulltextMutation.mutate(selectedCandidate.candidate_id)"
               >
-                <FileDown :size="15" />{{ fulltextLabel(selectedCandidate.candidate_id) }}
+                <FileDown :size="15" />准备单篇核验
               </button>
               <button
                 v-else-if="
-                  fulltextStates[selectedCandidate.candidate_id] &&
-                  !isFulltextTerminal(fulltextStates[selectedCandidate.candidate_id]?.status)
+                  fulltextOf(selectedReviewItem) &&
+                  !isFulltextTerminal(fulltextOf(selectedReviewItem)?.status)
                 "
                 class="secondary-button"
                 type="button"
                 disabled
               >
-                <FileDown :size="15" />{{ fulltextLabel(selectedCandidate.candidate_id) }}
+                <FileDown :size="15" />{{ fulltextStatusLabel(fulltextOf(selectedReviewItem)) }}
               </button>
               <button
-                v-else-if="fulltextStates[selectedCandidate.candidate_id]?.status === 'available'"
+                v-else-if="fulltextOf(selectedReviewItem)?.status === 'available'"
                 class="primary-button"
                 type="button"
                 :disabled="admissionMutation.isPending.value"
                 @click="admissionMutation.mutate(selectedCandidate.candidate_id)"
               >
-                <Plus :size="15" />加入待确认集合
+                <Layers2 :size="15" />加入待确认集合
               </button>
               <button
                 class="secondary-button"
@@ -689,14 +940,15 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
         </template>
         <div v-else class="inspector-empty">
           <FileSearch :size="20" />
-          <p>选择一条候选文献，查看它的处理与准入状态。</p>
+          <p>点击一条候选文献，查看它的处理与准入状态。</p>
         </div>
       </aside>
     </div>
 
     <div class="results-note">
       <Check :size="15" /><span
-        >候选只保存在当前检索会话中，未通过 DOI、题录与正文准入前不会写入长期文献库。</span
+        >准备清单只保存在当前检索会话中。未通过
+        DOI、题录与正文准入前，候选不会写入长期文献库。</span
       >
     </div>
 
@@ -718,7 +970,7 @@ onUnmounted(() => timers.forEach((timer) => window.clearInterval(timer)));
           >
             <X :size="16" />
           </button>
-          <span class="eyebrow">确认研究集合</span>
+          <span class="eyebrow">待确认集合</span>
           <h2 id="collection-confirm-title">构建这 {{ pendingCount }} 篇文献的可问答集合？</h2>
           <p>
             系统将依次解析全文、切分可引用片段并写入当前工作区的向量索引。构建完成前，研究对话不会使用这些文献。

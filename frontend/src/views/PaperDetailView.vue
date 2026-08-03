@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useMutation, useQuery } from "@tanstack/vue-query";
 import { ArrowLeft, Clipboard, FileDown, LoaderCircle, Plus, ShieldCheck } from "@lucide/vue";
 import { RouterLink, useRoute } from "vue-router";
@@ -20,21 +20,24 @@ import {
   candidateLanguageLabel,
   normalizeCandidateLanguage,
 } from "@/features/research/candidate-language";
-import { getSearchCandidates } from "@/api/workflow";
+import { getSearchCandidate } from "@/api/workflow";
 import type { CitationFormat, FulltextResponse } from "@/api/types";
 
 const route = useRoute();
 const workspaceId = computed(() => String(route.params.workspaceId));
 const runId = computed(() => String(route.query.run ?? ""));
 const candidateId = computed(() => String(route.params.candidateId));
-const candidatesQuery = useQuery({
-  queryKey: computed(() => ["candidates", workspaceId.value, runId.value]),
-  queryFn: () => getSearchCandidates(workspaceId.value, runId.value),
-  enabled: computed(() => Boolean(runId.value)),
+const candidateQuery = useQuery({
+  queryKey: computed(() => [
+    "candidate-review-item",
+    workspaceId.value,
+    runId.value,
+    candidateId.value,
+  ]),
+  queryFn: () => getSearchCandidate(workspaceId.value, runId.value, candidateId.value),
+  enabled: computed(() => Boolean(runId.value) && Boolean(candidateId.value)),
 });
-const candidate = computed(() =>
-  candidatesQuery.data.value?.candidates.find((item) => item.candidate_id === candidateId.value),
-);
+const candidate = computed(() => candidateQuery.data.value?.candidate);
 const fulltext = ref<FulltextResponse | null>(null);
 const toast = ref<string | null>(null);
 const citationFormat = ref<CitationFormat>("gb_t_7714_2015_numeric");
@@ -46,6 +49,25 @@ const fulltextIsProcessing = computed(
   () => Boolean(fulltext.value) && !isFulltextTerminal(fulltext.value?.status),
 );
 let timer: number | undefined;
+
+/** 刷新详情页后恢复已有全文任务状态，而不是只等待本页新发起的操作。 */
+watch(
+  () => candidateQuery.data.value?.fulltext,
+  (state) => {
+    fulltext.value = state ?? null;
+  },
+  { immediate: true },
+);
+
+/** 已在后台运行的全文核验需要在详情页恢复轮询，终态则立即停止。 */
+watch(
+  fulltext,
+  (state) => {
+    if (state && !isFulltextTerminal(state.status)) poll();
+    else if (timer) window.clearInterval(timer);
+  },
+  { immediate: true },
+);
 const citationQuery = useQuery({
   queryKey: computed(() => [
     "candidate-citation",
@@ -62,7 +84,6 @@ const fulltextMutation = useMutation({
   mutationFn: () => requestFulltext(workspaceId.value, runId.value, candidateId.value),
   onSuccess: (result) => {
     fulltext.value = result;
-    if (!isFulltextTerminal(result.status)) poll();
   },
   onError: (error) => (toast.value = error instanceof Error ? error.message : "全文任务无法启动。"),
 });
@@ -108,7 +129,7 @@ onUnmounted(() => {
       :to="{ name: 'workspace-results', params: { workspaceId }, query: { run: runId } }"
       ><ArrowLeft :size="15" />返回候选文献</RouterLink
     >
-    <div v-if="candidatesQuery.isPending.value" class="loading-state">
+    <div v-if="candidateQuery.isPending.value" class="loading-state">
       <LoaderCircle class="spin" :size="18" />正在读取论文详情…
     </div>
     <div v-else-if="!candidate" class="failure-panel">
@@ -163,7 +184,7 @@ onUnmounted(() => {
           :disabled="fulltextMutation.isPending.value"
           @click="fulltextMutation.mutate()"
         >
-          <FileDown :size="15" />获取开放全文</button
+          <FileDown :size="15" />准备全文核验</button
         ><button v-else-if="fulltextIsProcessing" class="primary-button" type="button" disabled>
           <FileDown :size="15" />{{ fulltextStatusLabel(fulltext) }}</button
         ><button
@@ -213,8 +234,8 @@ onUnmounted(() => {
                     ? "未通过全文准入"
                     : !candidate.doi
                       ? "缺少 DOI"
-                      : !citationReady
-                        ? "题录未核验"
+                      : !fulltext
+                        ? "待准备全文核验"
                         : "尚未进入研究集合"
               }}</strong>
               <p>
@@ -225,8 +246,8 @@ onUnmounted(() => {
                       ? fulltext.error?.message || "该文献不满足全文准入条件。"
                       : !candidate.doi
                         ? "缺少 DOI，不能进入后续研究集合。"
-                        : !citationReady
-                          ? citationReadinessMessage(candidate.citation)
+                        : !fulltext
+                          ? `${citationReadinessMessage(candidate.citation)} 可以开始全文核验，系统会先按 DOI 尝试补齐题录。`
                           : "有 DOI 不等于系统已经拥有可研究正文。"
                 }}
               </p>

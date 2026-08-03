@@ -11,24 +11,37 @@ from app.api.deps.auth import get_current_user
 from app.core.settings import get_literature_source_settings
 from app.db.models.user import User
 from app.db.session import get_db_session
+from app.modules.fulltext import Boto3StagingObjectStorage, get_fulltext_acquisition_settings
 from app.modules.workflow.candidate_relevance_service import (
     CandidateRelevanceRetryError,
     CandidateRelevanceRetryErrorCode,
     CandidateRelevanceService,
 )
+from app.modules.workflow.candidate_review_service import (
+    CandidateReviewError,
+    CandidateReviewErrorCode,
+    CandidateReviewService,
+)
 from app.modules.workflow.contracts import (
+    CandidateAdmissionBatchResponse,
+    CandidatePreparationBatchResponse,
+    CandidateReviewFilter,
+    CandidateSelectionRequest,
+    CandidateSelectionResponse,
+    SearchCandidatePageResponse,
+    SearchCandidateReviewItem,
     SearchCandidatesResponse,
     SearchProgressEvent,
     SearchRunError,
     SearchRunErrorCode,
     SearchRunResponse,
 )
-from app.modules.workflow.job_queue import ArqSearchRunJobQueue
+from app.modules.workflow.job_queue import ArqCandidateFulltextJobQueue, ArqSearchRunJobQueue
 from app.modules.workflow.search_run_service import SearchRunService
 from app.modules.workflow.search_session import SearchSessionStore
 from app.modules.workflow.state import SearchRunStage, SearchRunStatus
 from app.workers.redis import redis_client_from_environment
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +76,22 @@ def _relevance_retry_error_response(error: CandidateRelevanceRetryError) -> HTTP
         if error.code is CandidateRelevanceRetryErrorCode.SESSION_EXPIRED
         else status.HTTP_409_CONFLICT
     )
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": error.code, "message": str(error)},
+    )
+
+
+def _candidate_review_error_response(error: CandidateReviewError) -> HTTPException:
+    """将候选审核会话、选择和游标错误映射为前端可恢复的 HTTP 状态。"""
+    if error.code is CandidateReviewErrorCode.CANDIDATE_NOT_FOUND:
+        status_code = status.HTTP_404_NOT_FOUND
+    elif error.code is CandidateReviewErrorCode.SESSION_EXPIRED:
+        status_code = status.HTTP_410_GONE
+    elif error.code is CandidateReviewErrorCode.INVALID_CURSOR:
+        status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    else:
+        status_code = status.HTTP_409_CONFLICT
     return HTTPException(
         status_code=status_code,
         detail={"code": error.code, "message": str(error)},
@@ -167,7 +196,7 @@ async def retry_search_run(
 
 @router.get(
     "/{collection_id}/search-runs/{search_run_id}/candidates",
-    response_model=SearchCandidatesResponse,
+    response_model=SearchCandidatePageResponse,
     summary="获取检索候选文献",
 )
 async def get_search_candidates(
@@ -175,47 +204,198 @@ async def get_search_candidates(
     search_run_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> SearchCandidatesResponse:
-    """从当前用户拥有的检索运行 Redis 会话读取候选详情。"""
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    cursor: Annotated[str | None, Query(max_length=500)] = None,
+    query: Annotated[str, Query(max_length=200)] = "",
+    review_filter: Annotated[
+        CandidateReviewFilter, Query(alias="filter")
+    ] = CandidateReviewFilter.ALL,
+) -> SearchCandidatePageResponse:
+    """服务端分页读取候选，并把跨页准备清单与全文状态一并返回。"""
+    settings = get_literature_source_settings()
+    redis = redis_client_from_environment()
     try:
-        run = await SearchRunService(session).get_owned_run(
+        return await CandidateReviewService(
+            session,
+            SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
+        ).page(
+            owner_user_id=current_user.id,
+            collection_id=collection_id,
+            search_run_id=search_run_id,
+            limit=limit,
+            cursor=cursor,
+            query=query,
+            review_filter=review_filter,
+        )
+    except SearchRunError as exc:
+        raise _search_error_response(exc) from exc
+    except CandidateReviewError as exc:
+        raise _candidate_review_error_response(exc) from exc
+    finally:
+        await redis.aclose()
+
+
+@router.get(
+    "/{collection_id}/search-runs/{search_run_id}/candidates/{candidate_id}",
+    response_model=SearchCandidateReviewItem,
+    summary="获取单篇候选审核详情",
+)
+async def get_search_candidate(
+    collection_id: UUID,
+    search_run_id: UUID,
+    candidate_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SearchCandidateReviewItem:
+    """按候选 ID 返回详情所需状态，避免详情页受候选分页位置影响。"""
+    settings = get_literature_source_settings()
+    redis = redis_client_from_environment()
+    try:
+        return await CandidateReviewService(
+            session,
+            SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
+        ).item(
+            owner_user_id=current_user.id,
+            collection_id=collection_id,
+            search_run_id=search_run_id,
+            candidate_id=candidate_id,
+        )
+    except SearchRunError as exc:
+        raise _search_error_response(exc) from exc
+    except CandidateReviewError as exc:
+        raise _candidate_review_error_response(exc) from exc
+    finally:
+        await redis.aclose()
+
+
+@router.patch(
+    "/{collection_id}/search-runs/{search_run_id}/candidate-selection",
+    response_model=CandidateSelectionResponse,
+    summary="更新本次候选准备清单",
+)
+async def update_candidate_selection(
+    collection_id: UUID,
+    search_run_id: UUID,
+    payload: CandidateSelectionRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> CandidateSelectionResponse:
+    """选择只保存候选 UUID；正文、DOI 与题录都继续从 Redis 会话读取。"""
+    settings = get_literature_source_settings()
+    redis = redis_client_from_environment()
+    try:
+        return await CandidateReviewService(
+            session,
+            SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
+        ).update_selection(
+            owner_user_id=current_user.id,
+            collection_id=collection_id,
+            search_run_id=search_run_id,
+            candidate_ids=payload.candidate_ids,
+            selected=payload.selected,
+        )
+    except SearchRunError as exc:
+        raise _search_error_response(exc) from exc
+    except CandidateReviewError as exc:
+        raise _candidate_review_error_response(exc) from exc
+    finally:
+        await redis.aclose()
+
+
+@router.delete(
+    "/{collection_id}/search-runs/{search_run_id}/candidate-selection",
+    response_model=CandidateSelectionResponse,
+    summary="清空本次候选准备清单",
+)
+async def clear_candidate_selection(
+    collection_id: UUID,
+    search_run_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> CandidateSelectionResponse:
+    """只清除 Redis 中本次准备选择，已加入待确认集合的文献不会受影响。"""
+    settings = get_literature_source_settings()
+    redis = redis_client_from_environment()
+    try:
+        return await CandidateReviewService(
+            session,
+            SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
+        ).clear_selection(
             owner_user_id=current_user.id,
             collection_id=collection_id,
             search_run_id=search_run_id,
         )
     except SearchRunError as exc:
         raise _search_error_response(exc) from exc
-
-    if run.redis_session_key is None:
-        raise _search_error_response(
-            SearchRunError(SearchRunErrorCode.SESSION_EXPIRED, "检索候选会话不存在。")
-        )
-
-    settings = get_literature_source_settings()
-    redis = redis_client_from_environment()
-    try:
-        snapshot = await SearchSessionStore(
-            redis,
-            ttl_seconds=settings.search_session_ttl_seconds,
-        ).read_snapshot(run.redis_session_key)
+    except CandidateReviewError as exc:
+        raise _candidate_review_error_response(exc) from exc
     finally:
         await redis.aclose()
 
-    if snapshot is None:
-        await SearchRunService(session).expire_run(run.id)
-        raise _search_error_response(
-            SearchRunError(
-                SearchRunErrorCode.SESSION_EXPIRED,
-                "检索候选已过期，请重新执行文献检索。",
-            )
-        )
 
-    return SearchCandidatesResponse(
-        run_id=run.id,
-        status=SearchRunStatus(snapshot.get("status", run.status)),
-        candidate_counts=snapshot.get("candidate_counts", {}),
-        candidates=snapshot.get("candidates", []),
-    )
+@router.post(
+    "/{collection_id}/search-runs/{search_run_id}/candidate-selection/prepare",
+    response_model=CandidatePreparationBatchResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="批量准备题录与全文核验",
+)
+async def prepare_candidate_selection(
+    collection_id: UUID,
+    search_run_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> CandidatePreparationBatchResponse:
+    """把准备清单逐篇投递到既有全文 Worker，不等待下载结果才返回 HTTP。"""
+    settings = get_literature_source_settings()
+    redis = redis_client_from_environment()
+    try:
+        return await CandidateReviewService(
+            session,
+            SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
+            fulltext_queue=ArqCandidateFulltextJobQueue(),
+        ).prepare_selected(
+            owner_user_id=current_user.id,
+            collection_id=collection_id,
+            search_run_id=search_run_id,
+        )
+    except SearchRunError as exc:
+        raise _search_error_response(exc) from exc
+    except CandidateReviewError as exc:
+        raise _candidate_review_error_response(exc) from exc
+    finally:
+        await redis.aclose()
+
+
+@router.post(
+    "/{collection_id}/search-runs/{search_run_id}/candidate-selection/admission",
+    response_model=CandidateAdmissionBatchResponse,
+    summary="批量加入待确认集合",
+)
+async def admit_candidate_selection(
+    collection_id: UUID,
+    search_run_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> CandidateAdmissionBatchResponse:
+    """仅把全文已可处理的候选逐篇加入待确认集合，失败项留在准备清单。"""
+    settings = get_literature_source_settings()
+    redis = redis_client_from_environment()
+    try:
+        return await CandidateReviewService(
+            session,
+            SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
+            admission_storage=Boto3StagingObjectStorage(get_fulltext_acquisition_settings()),
+        ).admit_selected(
+            owner_user_id=current_user.id,
+            collection_id=collection_id,
+            search_run_id=search_run_id,
+        )
+    except SearchRunError as exc:
+        raise _search_error_response(exc) from exc
+    except CandidateReviewError as exc:
+        raise _candidate_review_error_response(exc) from exc
+    finally:
+        await redis.aclose()
 
 
 @router.post(

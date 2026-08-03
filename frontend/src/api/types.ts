@@ -207,6 +207,75 @@ export interface SearchCandidatesResponse {
   candidates: Candidate[];
 }
 
+/** 候选审核页的服务端筛选值，避免分页后仍在浏览器二次筛选整份快照。 */
+export type CandidateReviewFilter =
+  | "all"
+  | "zh"
+  | "en"
+  | "priority"
+  | "background"
+  | "needs_review"
+  | "available"
+  | "open_access"
+  | "doi"
+  | "selected";
+
+/** 当前页面候选同时携带跨页准备选择和独立的全文状态。 */
+export interface CandidateReviewItem {
+  candidate: Candidate;
+  is_selected: boolean;
+  fulltext: FulltextResponse | null;
+}
+
+/** 只描述本次 Redis 准备清单，不能与 PostgreSQL 待确认集合计数混用。 */
+export interface CandidateSelectionSummary {
+  selected_count: number;
+  needs_fulltext_count: number;
+  fulltext_in_progress_count: number;
+  ready_for_admission_count: number;
+  blocked_count: number;
+}
+
+export interface SearchCandidatePageResponse {
+  run_id: string;
+  status: SearchRunStatus;
+  candidate_counts: Record<string, number>;
+  items: CandidateReviewItem[];
+  page: { limit: number; total: number; next_cursor: string | null };
+  selection: CandidateSelectionSummary;
+}
+
+export interface CandidateSelectionResponse {
+  run_id: string;
+  selected_count: number;
+}
+
+export interface CandidatePreparationBatchResponse {
+  run_id: string;
+  selected_count: number;
+  queued_count: number;
+  items: Array<{
+    candidate_id: string;
+    status: FulltextStatus | null;
+    message: string;
+    retryable: boolean;
+  }>;
+}
+
+export interface CandidateAdmissionBatchResponse {
+  run_id: string;
+  selected_count: number;
+  admitted_count: number;
+  already_joined_count: number;
+  blocked_count: number;
+  items: Array<{
+    candidate_id: string;
+    status: string;
+    message: string;
+    retryable: boolean;
+  }>;
+}
+
 export interface SearchProgressEvent {
   run_id: string;
   status: SearchRunStatus;

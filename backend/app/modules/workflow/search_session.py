@@ -36,6 +36,20 @@ def build_candidate_fulltext_key(session_key: str, candidate_id: UUID) -> str:
     return f"{session_key}:candidate:{candidate_id}:fulltext"
 
 
+def build_candidate_selection_key(session_key: str) -> str:
+    """为当前检索会话生成短期准备清单键，不与候选主快照混写。"""
+    if not session_key.startswith(f"{SEARCH_SESSION_KEY_PREFIX}:"):
+        raise ValueError("候选准备清单必须位于服务端生成的检索会话键下")
+    return f"{session_key}:candidate-selection"
+
+
+def build_candidate_selection_lock_key(session_key: str) -> str:
+    """为准备清单更新生成互斥锁，避免多标签页覆盖彼此的勾选结果。"""
+    if not session_key.startswith(f"{SEARCH_SESSION_KEY_PREFIX}:"):
+        raise ValueError("候选准备清单锁必须位于服务端生成的检索会话键下")
+    return f"{session_key}:candidate-selection-lock"
+
+
 def build_candidate_relevance_retry_lock_key(session_key: str, candidate_id: UUID) -> str:
     """为单篇候选的相关性重试建立短期互斥锁，防止重复模型调用。"""
     if not session_key.startswith(f"{SEARCH_SESSION_KEY_PREFIX}:"):
@@ -70,6 +84,28 @@ class SearchSessionStore:
         if not isinstance(value, dict):
             raise ValueError("Redis 检索会话快照必须是 JSON 对象")
         return value
+
+    async def read_many_snapshots(self, session_keys: list[str]) -> dict[str, dict[str, Any]]:
+        """一次读取多个同会话短期状态，供候选分页避免逐条 Redis 往返。"""
+        if not session_keys:
+            return {}
+
+        raw_values = await self._redis.mget(session_keys)
+        snapshots: dict[str, dict[str, Any]] = {}
+        for key, raw_value in zip(session_keys, raw_values, strict=True):
+            if raw_value is None:
+                continue
+            if not isinstance(raw_value, str):
+                raise TypeError("Redis 检索会话快照必须是字符串")
+            value = json.loads(raw_value)
+            if not isinstance(value, dict):
+                raise ValueError("Redis 检索会话快照必须是 JSON 对象")
+            snapshots[key] = value
+        return snapshots
+
+    async def refresh_ttl(self, session_key: str) -> None:
+        """刷新既有会话键的 TTL，不写回主快照以免覆盖并发的候选更新。"""
+        await self._redis.expire(session_key, self._ttl_seconds)
 
     async def append_event(self, session_key: str, event: dict[str, Any]) -> str:
         """写入一条进度事件，并让事件流与候选快照同步过期。"""

@@ -1,6 +1,6 @@
 # academic-search 开发环境
 
-状态：已配置。此环境用于本地开发和面试演示；已包含认证、工作区、研究计划、多源检索、全文准入与集合构建 API，以及意图分析、多源检索、全文获取和 RAG 入库 Worker。研究 Agent 尚未实现。
+状态：已配置。此环境用于本地开发和面试演示；已包含认证、工作区、研究计划、多源检索、候选审核、全文准入、集合构建与研究会话 API，以及意图分析、多源检索、全文获取、RAG 入库和研究 Worker。
 
 ## 1. 运行模型
 
@@ -73,6 +73,15 @@ uv run --directory backend arq app.workers.ingestion.WorkerSettings
 - `GET /api/v1/collections/{collection_id}/search-runs/{run_id}/candidates`：读取 Redis TTL 内的统一候选。
 - `GET /api/v1/collections/{collection_id}/search-runs/{run_id}/events`：通过 SSE 接收阶段、来源状态、计数和失败原因，并支持 `Last-Event-ID` 断线恢复。
 - `POST /api/v1/collections/{collection_id}/search-runs/{run_id}/retry`：为失败、部分失败或过期运行创建新的尝试。
+
+候选审核不把“正在查看”“本次准备清单”“待确认集合”和“可研究集合”混为同一状态。候选分页、跨页准备选择及全文短期状态继续属于 Redis 搜索会话；只有准备完成并满足严格准入的文献才写入 PostgreSQL 待确认集合。前端使用下列接口建立该流程：
+
+- `GET /api/v1/collections/{collection_id}/search-runs/{run_id}/candidates?limit=&cursor=&query=&filter=`：服务端分页读取候选审核行。
+- `PATCH` / `DELETE .../candidate-selection`：增加、移除或清空本次 Redis 准备清单。
+- `POST .../candidate-selection/prepare`：按清单逐篇投递题录补齐与全文核验。
+- `POST .../candidate-selection/admission`：仅将已满足题录和全文条件的候选加入 PostgreSQL 待确认集合。
+
+全文下载默认直连，并且不会继承全局 `HTTP_PROXY` 或 `HTTPS_PROXY`。若某次开放获取验收需要显式使用本地代理，可只为该进程设置 `FULLTEXT_NETWORK_MODE=proxy` 和 `LITERATURE_PROXY_URL=http://127.0.0.1:7897`；这不会改变 MinIO、PostgreSQL、Redis、Milvus 或其他 Provider 的网络路由。
 
 候选只在 Redis 中短期保存，未通过 DOI、全文和权限准入前不会写入 PostgreSQL 的 `papers`。真实多源运行验收默认关闭；需要显式设置 `RUN_LIVE_SEARCH_RUN_TESTS=1` 后运行：
 
@@ -174,6 +183,13 @@ uv run pyright
 # 显式运行一次真实 DeepSeek 候选相关性验收；不会写入数据库、Redis 或对象存储。
 $env:RUN_LIVE_CANDIDATE_RELEVANCE_TESTS = "1"
 uv run pytest tests/integration/test_live_candidate_relevance.py -m live -s
+
+# 真实 arXiv PDF 的候选审核 -> 全文 -> MinIO -> 批量准入验收。
+$env:RUN_LIVE_CANDIDATE_REVIEW_E2E_TESTS = "1"
+$env:FULLTEXT_NETWORK_MODE = "proxy"
+$env:LITERATURE_PROXY_URL = "http://127.0.0.1:7897"
+$env:FULLTEXT_DOWNLOAD_TIMEOUT_SECONDS = "45"
+uv run pytest tests/integration/test_live_candidate_review_e2e.py -m live -s
 ```
 
 停止服务：

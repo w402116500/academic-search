@@ -26,6 +26,10 @@ class FakeRedis:
     async def get(self, key: str) -> str | None:
         return self.values.get(key)
 
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        """按传入顺序返回多个值，模拟 redis-py 的批量读取行为。"""
+        return [self.values.get(key) for key in keys]
+
     async def xadd(
         self,
         key: str,
@@ -104,3 +108,19 @@ async def test_events_reject_invalid_cursor() -> None:
 
     with pytest.raises(ValueError, match="无效的 Redis Stream 事件 ID"):
         await store.read_events("search:1", last_event_id="latest")
+
+
+@pytest.mark.asyncio
+async def test_read_many_snapshots_preserves_requested_key_mapping() -> None:
+    """候选分页批量读取全文状态时，缺失键不能错位到其他候选。"""
+    redis = FakeRedis()
+    store = SearchSessionStore(redis, ttl_seconds=300)  # type: ignore[arg-type]
+    await store.write_snapshot("search:1", {"candidate_id": "first"})
+    await store.write_snapshot("search:3", {"candidate_id": "third"})
+
+    snapshots = await store.read_many_snapshots(["search:1", "search:2", "search:3"])
+
+    assert snapshots == {
+        "search:1": {"candidate_id": "first"},
+        "search:3": {"candidate_id": "third"},
+    }

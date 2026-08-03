@@ -129,12 +129,33 @@ async function fulfillWorkflowRequest(route: Route): Promise<void> {
   if (path.endsWith(`/collections/${workspaceId}/plan`)) return route.fulfill({ json: plan });
   if (path.endsWith("/search-runs/current")) return route.fulfill({ json: run });
   if (path.endsWith(`/search-runs/${runId}/candidates`)) {
+    const filter = new URL(route.request().url()).searchParams.get("filter") ?? "all";
+    const visibleItems =
+      filter === "priority"
+        ? [candidate]
+        : filter === "zh"
+          ? [chineseCandidate]
+          : filter === "en"
+            ? [candidate]
+            : [candidate, chineseCandidate];
     return route.fulfill({
       json: {
         run_id: runId,
         status: "completed",
         candidate_counts: run.candidate_counts,
-        candidates: [candidate, chineseCandidate],
+        items: visibleItems.map((currentCandidate) => ({
+          candidate: currentCandidate,
+          is_selected: false,
+          fulltext: null,
+        })),
+        page: { limit: 20, total: visibleItems.length, next_cursor: null },
+        selection: {
+          selected_count: 0,
+          needs_fulltext_count: 0,
+          fulltext_in_progress_count: 0,
+          ready_for_admission_count: 0,
+          blocked_count: 0,
+        },
       },
     });
   }
@@ -178,18 +199,18 @@ test("检索完成后在连续画布中进入候选筛选与集合确认", async
   await expect(page.getByText("英文文献").first()).toBeVisible();
   await expect(page.getByText("核心相关").first()).toBeVisible();
   await expect(page.getByLabel("候选文献检查器")).toContainText("为什么保留这篇候选");
-  await page.getByRole("button", { name: "优先审核 1" }).click();
+  await page.getByRole("button", { name: "优先审核" }).click();
   await expect(page.locator(".candidate-table tbody tr")).toHaveCount(1);
   await page.getByText("查看标题和摘要依据").click();
   await expect(page.getByText("摘要依据", { exact: true })).toBeVisible();
   await expect(page.getByText("说明")).toBeVisible();
-  await page.getByRole("button", { name: "中文文献 1" }).click();
+  await page.getByRole("button", { name: "中文文献" }).click();
   await expect(page.getByRole("table").getByText("城市绿地可达性与老年人心理健康")).toBeVisible();
   await expect(page.locator(".candidate-table tbody tr")).toHaveCount(1);
   await expect(page.getByLabel("候选文献检查器")).toContainText("城市绿地可达性与老年人心理健康");
-  await expect(page.getByRole("button", { name: "确认 1 篇入集合" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "待确认集合 1 篇" })).toBeEnabled();
 
-  await page.getByRole("button", { name: "确认 1 篇入集合" }).click();
+  await page.getByRole("button", { name: "待确认集合 1 篇" }).click();
   await expect(page.getByTestId("collection-confirm-dialog")).toBeVisible();
 });
 
@@ -199,6 +220,6 @@ test("窄屏仍可查看候选检查器与集合确认", async ({ page }) => {
 
   await page.getByRole("button", { name: "开始筛选" }).click();
   await expect(page.getByLabel("候选文献检查器")).toBeVisible();
-  await page.getByRole("button", { name: "确认 1 篇入集合" }).click();
+  await page.getByRole("button", { name: "待确认集合 1 篇" }).click();
   await expect(page.getByTestId("collection-confirm-dialog")).toBeVisible();
 });

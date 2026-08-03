@@ -1,9 +1,9 @@
 # Backend Development Environment
 
 The backend package provides local account authentication, research-workspace, research-plan,
-multi-source search, fulltext admission and collection-build APIs, an asynchronous
-SQLAlchemy/Alembic PostgreSQL foundation under `app/db/`, and intent-analysis, search, fulltext
-and RAG-ingestion workers. Research-agent APIs are not implemented yet.
+multi-source search, candidate review, fulltext admission, collection-build and research-session
+APIs, an asynchronous SQLAlchemy/Alembic PostgreSQL foundation under `app/db/`, and intent-analysis,
+search, fulltext, RAG-ingestion and research workers.
 
 ## Database Commands
 
@@ -31,7 +31,13 @@ The versioned APIs are available under `/api/v1`:
 - `GET /collections/{id}/plan`, `POST /collections/{id}/plan/regenerate`, and
   `POST /collections/{id}/plan/confirm`
 - `POST /collections/{id}/search-runs`, `GET /collections/{id}/search-runs/current`, and
-  `GET /collections/{id}/search-runs/{run_id}/candidates`
+  `GET /collections/{id}/search-runs/{run_id}/candidates?limit=&cursor=&query=&filter=`
+- `GET /collections/{id}/search-runs/{run_id}/candidates/{candidate_id}` reads one candidate
+  independently of its current result page.
+- `PATCH` / `DELETE .../candidate-selection` update or clear the Redis-backed preparation list;
+  `POST .../candidate-selection/prepare` dispatches per-candidate metadata/fulltext preparation;
+  `POST .../candidate-selection/admission` admits only eligible prepared items to the persistent
+  awaiting-confirmation collection.
 - `GET /collections/{id}/search-runs/{run_id}/events` streams resumable progress events, and
   `POST /collections/{id}/search-runs/{run_id}/retry` creates a new attempt after failure.
 - `POST /collections/{id}/search-runs/{run_id}/candidates/{candidate_id}/fulltext` starts a
@@ -78,6 +84,19 @@ uv run pytest tests/integration/test_live_api_state_recovery.py -m live -s
 ```
 
 The external embedding smoke test is separately gated by `RUN_LIVE_EMBEDDING_TESTS=1`.
+
+The complete candidate-review acceptance test uses a real arXiv open PDF, the workflow Worker,
+Redis, MinIO and the batch-admission service. It creates and precisely cleans temporary records.
+On the current local network arXiv is more reliable through the explicit fulltext proxy mode; this
+is only a test-process override and does not require changing `.env`:
+
+```powershell
+$env:RUN_LIVE_CANDIDATE_REVIEW_E2E_TESTS = "1"
+$env:FULLTEXT_NETWORK_MODE = "proxy"
+$env:LITERATURE_PROXY_URL = "http://127.0.0.1:7897"
+$env:FULLTEXT_DOWNLOAD_TIMEOUT_SECONDS = "45"
+uv run pytest tests/integration/test_live_candidate_review_e2e.py -m live -s
+```
 
 The candidate-relevance acceptance test calls the configured DeepSeek/OpenAI-compatible chat model with
 one controlled unified candidate. It validates that every user-facing evidence quote can be found in the

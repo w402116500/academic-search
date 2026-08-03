@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, datetime
+from hashlib import sha256
+from io import BytesIO
 from uuid import UUID, uuid4
 
 import httpx
@@ -17,10 +19,19 @@ from app.api.routers import search_runs as search_run_router
 from app.core.security import AuthenticationSettings, create_access_token
 from app.core.settings import get_literature_source_settings
 from app.db.models.collection import ResearchCollection
+from app.db.models.document import Document
+from app.db.models.paper import Paper
 from app.db.models.user import User
 from app.db.models.workflow import ResearchPlan, SearchRun
 from app.db.session import async_session_factory
 from app.main import app
+from app.modules.fulltext import Boto3StagingObjectStorage, get_fulltext_acquisition_settings
+from app.modules.fulltext.contracts import (
+    AcquiredFulltext,
+    CandidateFulltextState,
+    FulltextAcquisitionResult,
+    FulltextAcquisitionStatus,
+)
 from app.modules.search.citation_formatter import CitationFormat
 from app.modules.search.contracts import (
     CandidateAuthor,
@@ -36,6 +47,7 @@ from app.modules.search.contracts import (
 )
 from app.modules.workflow.search_session import (
     SearchSessionStore,
+    build_candidate_fulltext_key,
     build_search_event_stream_key,
     build_search_session_key,
 )
@@ -47,9 +59,11 @@ from app.modules.workflow.state import (
 )
 from app.workers.redis import redis_client_from_environment
 from pydantic import SecretStr
+from sqlalchemy import select
 
 _LIVE_TEST_ENVIRONMENT_FLAG = "RUN_LIVE_API_STATE_RECOVERY_TESTS"
 _TEST_JWT_SECRET = "live-api-state-recovery-test-secret-key-2026"
+_MINIMAL_PDF = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n"
 
 
 def _live_test_is_enabled() -> bool:
@@ -57,14 +71,14 @@ def _live_test_is_enabled() -> bool:
     return os.getenv(_LIVE_TEST_ENVIRONMENT_FLAG) == "1"
 
 
-def _candidate(candidate_id: UUID) -> UnifiedCandidate:
+def _candidate(candidate_id: UUID, *, doi: str) -> UnifiedCandidate:
     """构造一条由服务端 Redis 快照提供的、可展示候选。"""
     source_record = RawCandidate(
         source=SourceName.OPENALEX,
         source_record_id=f"live-api-{candidate_id}",
         title="API state recovery candidate",
         authors=(CandidateAuthor(name="Ada Lovelace"),),
-        doi="10.9999/api-state-recovery",
+        doi=doi,
     )
     return UnifiedCandidate(
         candidate_id=candidate_id,
@@ -78,13 +92,13 @@ def _candidate(candidate_id: UUID) -> UnifiedCandidate:
             venue="Journal of API State Recovery",
             volume="12",
             pages="101-115",
-            doi=source_record.doi,
-            url="https://doi.org/10.9999/api-state-recovery",
+            doi=doi,
+            url=f"https://doi.org/{doi}",
         ),
         title=source_record.title,
         title_key="api state recovery candidate",
         authors=source_record.authors,
-        links=CandidateLinks(landing_url="https://doi.org/10.9999/api-state-recovery"),
+        links=CandidateLinks(landing_url=f"https://doi.org/{doi}"),
         source_records=(source_record,),
         triage=TriageDecision(included=True),
     )
@@ -115,14 +129,21 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
     plan_id = uuid4()
     run_id = uuid4()
     candidate_id = uuid4()
+    candidate_doi = f"10.9999/api-state-recovery-{uuid4().hex}"
     event_plan_id = uuid4()
     event_run_id = uuid4()
     session_key = build_search_session_key(run_id)
     event_key = build_search_event_stream_key(run_id)
     event_session_key = build_search_session_key(event_run_id)
     event_stream_key = build_search_event_stream_key(event_run_id)
+    fulltext_state_key = build_candidate_fulltext_key(session_key, candidate_id)
     redis = redis_client_from_environment()
     settings = get_literature_source_settings()
+    fulltext_settings = get_fulltext_acquisition_settings()
+    storage = Boto3StagingObjectStorage(fulltext_settings)
+    staging_object_key: str | None = None
+    document_object_key: str | None = None
+    paper_id: UUID | None = None
 
     try:
         async with async_session_factory() as session:
@@ -191,7 +212,7 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                 "status": SearchRunStatus.PARTIAL_FAILED.value,
                 "stage": SearchRunStage.COMPLETED.value,
                 "candidate_counts": {"raw_candidate_count": 1, "included_candidate_count": 1},
-                "candidates": [_candidate(candidate_id).model_dump(mode="json")],
+                "candidates": [_candidate(candidate_id, doi=candidate_doi).model_dump(mode="json")],
             },
         )
         await store.append_event(
@@ -238,7 +259,151 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                 headers=owner_headers,
             )
             assert candidates_response.status_code == 200
-            assert candidates_response.json()["candidates"][0]["candidate_id"] == str(candidate_id)
+            assert candidates_response.json()["items"][0]["candidate"]["candidate_id"] == str(
+                candidate_id
+            )
+            assert candidates_response.json()["selection"]["selected_count"] == 0
+
+            selection_response = await client.patch(
+                f"/api/v1/collections/{collection_id}/search-runs/{run_id}/candidate-selection",
+                headers=owner_headers,
+                json={"candidate_ids": [str(candidate_id)], "selected": True},
+            )
+            assert selection_response.status_code == 200
+            assert selection_response.json()["selected_count"] == 1
+
+            selected_response = await client.get(
+                (
+                    f"/api/v1/collections/{collection_id}/search-runs/{run_id}/candidates"
+                    "?filter=selected"
+                ),
+                headers=owner_headers,
+            )
+            assert selected_response.status_code == 200
+            assert selected_response.json()["page"]["total"] == 1
+            assert selected_response.json()["items"][0]["is_selected"] is True
+
+            candidate_detail_response = await client.get(
+                (
+                    f"/api/v1/collections/{collection_id}/search-runs/{run_id}/candidates/"
+                    f"{candidate_id}"
+                ),
+                headers=owner_headers,
+            )
+            assert candidate_detail_response.status_code == 200
+            assert candidate_detail_response.json()["is_selected"] is True
+
+            class FakeCandidateFulltextQueue:
+                """验证批量 API 只投递既有全文任务，不调用外部网络。"""
+
+                def __init__(self) -> None:
+                    self.calls: list[tuple[UUID, UUID, int]] = []
+
+                async def enqueue_fulltext(
+                    self,
+                    *,
+                    search_run_id: UUID,
+                    candidate_id: UUID,
+                    attempt_no: int,
+                ) -> str:
+                    self.calls.append((search_run_id, candidate_id, attempt_no))
+                    return f"live-api-fulltext-{candidate_id}-{attempt_no}"
+
+            fulltext_queue = FakeCandidateFulltextQueue()
+            monkeypatch.setattr(
+                search_run_router,
+                "ArqCandidateFulltextJobQueue",
+                lambda: fulltext_queue,
+            )
+            preparation_response = await client.post(
+                (
+                    f"/api/v1/collections/{collection_id}/search-runs/{run_id}/"
+                    "candidate-selection/prepare"
+                ),
+                headers=owner_headers,
+            )
+            assert preparation_response.status_code == 202
+            assert preparation_response.json()["queued_count"] == 1
+            assert fulltext_queue.calls == [(run_id, candidate_id, 1)]
+
+            # 模拟全文 Worker 已把一个经过校验的 PDF 写入暂存区，随后让真实批量准入
+            # 路由完成对象转正和 PostgreSQL 持久化。这里不伪造对象存储或准入结果。
+            checksum = sha256(_MINIMAL_PDF).hexdigest()
+            staging_object_key = (
+                f"{fulltext_settings.fulltext_staging_prefix}/live-api-review/{candidate_id}.pdf"
+            )
+            await storage.upload_pdf(
+                object_key=staging_object_key,
+                file=BytesIO(_MINIMAL_PDF),
+                sha256=checksum,
+            )
+            now = datetime.now(UTC)
+            await store.write_snapshot(
+                fulltext_state_key,
+                CandidateFulltextState(
+                    search_run_id=run_id,
+                    candidate=_candidate(candidate_id, doi=candidate_doi),
+                    attempt_no=1,
+                    result=FulltextAcquisitionResult(
+                        candidate_id=candidate_id,
+                        status=FulltextAcquisitionStatus.AVAILABLE,
+                        document=AcquiredFulltext(
+                            candidate_id=candidate_id,
+                            doi=candidate_doi,
+                            source_url="https://downloads.example.test/live-api-review.pdf",
+                            staging_object_key=staging_object_key,
+                            original_filename="live-api-review.pdf",
+                            byte_size=len(_MINIMAL_PDF),
+                            sha256=checksum,
+                            acquired_at=now,
+                        ),
+                    ),
+                    requested_at=now,
+                    updated_at=now,
+                ).model_dump(mode="json"),
+            )
+            admission_response = await client.post(
+                (
+                    f"/api/v1/collections/{collection_id}/search-runs/{run_id}/"
+                    "candidate-selection/admission"
+                ),
+                headers=owner_headers,
+            )
+            assert admission_response.status_code == 200
+            assert admission_response.json()["admitted_count"] == 1
+            assert admission_response.json()["blocked_count"] == 0
+
+            documents_response = await client.get(
+                f"/api/v1/collections/{collection_id}/documents",
+                headers=owner_headers,
+            )
+            assert documents_response.status_code == 200
+            assert documents_response.json()["summary"]["ingestion_status_counts"]["pending"] == 1
+
+            async with async_session_factory() as session:
+                document = await session.scalar(
+                    select(Document).where(Document.collection_id == collection_id)
+                )
+                assert document is not None
+                document_object_key = document.object_key
+                paper_id = document.paper_id
+
+            selection_after_admission = await client.get(
+                f"/api/v1/collections/{collection_id}/search-runs/{run_id}/candidates",
+                headers=owner_headers,
+            )
+            assert selection_after_admission.status_code == 200
+            assert selection_after_admission.json()["selection"]["selected_count"] == 0
+
+            malformed_cursor_response = await client.get(
+                (f"/api/v1/collections/{collection_id}/search-runs/{run_id}/candidates?cursor=%%%"),
+                headers=owner_headers,
+            )
+            assert malformed_cursor_response.status_code == 422
+            assert (
+                malformed_cursor_response.json()["detail"]["code"]
+                == "candidate_review_invalid_cursor"
+            )
 
             citation_response = await client.get(
                 (
@@ -365,7 +530,7 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                 headers=owner_headers,
             )
             assert expired_response.status_code == 410
-            assert expired_response.json()["detail"]["code"] == "search_run_session_expired"
+            assert expired_response.json()["detail"]["code"] == "candidate_review_session_expired"
 
         async with async_session_factory() as session:
             run = await session.get(SearchRun, run_id)
@@ -387,11 +552,27 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
             )
         )
     finally:
-        await redis.delete(session_key, event_key, event_session_key, event_stream_key)
+        if document_object_key is not None:
+            await storage.delete_object(object_key=document_object_key)
+        if staging_object_key is not None:
+            await storage.delete_object(object_key=staging_object_key)
+        await redis.delete(
+            session_key,
+            event_key,
+            event_session_key,
+            event_stream_key,
+            fulltext_state_key,
+        )
         async with async_session_factory() as cleanup_session:
             for user_id in (owner_user_id, other_user_id):
                 user = await cleanup_session.get(User, user_id)
                 if user is not None:
                     await cleanup_session.delete(user)
+            # 集合关联随用户删除后，再删除本测试唯一 DOI 创建的全局论文记录。
+            await cleanup_session.flush()
+            if paper_id is not None:
+                paper = await cleanup_session.get(Paper, paper_id)
+                if paper is not None:
+                    await cleanup_session.delete(paper)
             await cleanup_session.commit()
         await redis.aclose()

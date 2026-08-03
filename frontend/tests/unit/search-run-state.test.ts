@@ -57,9 +57,11 @@ describe("检索与全文状态", () => {
     expect(isFulltextTerminal("validating")).toBe(false);
   });
 
-  it("仅为题录已核验且尚未创建任务的候选开放全文请求", () => {
+  it("为带 DOI 且尚未创建任务的候选开放全文核验", () => {
     expect(canRequestFulltext(createCandidate("ready"), null)).toBe(true);
-    expect(canRequestFulltext(createCandidate("conflict"), null)).toBe(false);
+    // 全文 Worker 会先重新补齐题录，题录冲突不能让浏览器提前阻断核验尝试。
+    expect(canRequestFulltext(createCandidate("conflict"), null)).toBe(true);
+    expect(canRequestFulltext({ ...createCandidate("ready"), doi: null }, null)).toBe(false);
     expect(
       canRequestFulltext(createCandidate("ready"), {
         status: "rejected",
