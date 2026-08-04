@@ -34,12 +34,16 @@ class WorkflowSettings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_chat_model: str = "gpt-4.1-mini"
     workflow_intent_timeout_seconds: float = Field(default=45, gt=0, le=180)
-    workflow_relevance_timeout_seconds: float = Field(default=45, gt=0, le=180)
-    workflow_relevance_batch_size: int = Field(default=6, ge=1, le=12)
-    # 单篇摘要发送给相关性 Agent 前的字符上限，防止少数超长摘要挤占整批上下文。
-    workflow_relevance_abstract_max_characters: int = Field(default=3_000, ge=500, le=10_000)
-    # 限制一批结构化评估的最大生成量；服务端仍会校验字段数量和证据原文。
-    workflow_relevance_max_output_tokens: int = Field(default=2_400, ge=256, le=8_000)
+    # 候选相关性使用流式 JSON；只有连续一段时间没有收到任何流活动才判定失败。
+    # 这不是整次调用总时长，也不限制候选数量、摘要长度或是否拆批。
+    workflow_relevance_stream_idle_timeout_seconds: float = Field(default=120, gt=0, le=900)
+    # 完整集合保持一次共享上下文。模型输出预算按实际候选数线性计算，避免用候选数量
+    # 作为阻断条件，也避免全量结构化结果被固定的小 completion 上限截断。
+    workflow_relevance_output_tokens_per_candidate: int = Field(default=700, ge=64)
+    workflow_relevance_verification_output_tokens_per_candidate: int = Field(default=128, ge=32)
+    # 搜索运行是一次用户主动提交，重试同样消耗一天内的受控检索预算。
+    workflow_user_daily_search_run_limit: int = Field(default=20, ge=1, le=1_000)
+    workflow_global_daily_search_run_limit: int = Field(default=500, ge=1, le=10_000)
 
     @field_validator("deepseek_api_key", "openai_api_key", mode="before")
     @classmethod

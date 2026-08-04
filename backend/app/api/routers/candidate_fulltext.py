@@ -15,7 +15,11 @@ from app.modules.collections import (
     CollectionAdmissionResult,
     ResearchCollectionAdmissionService,
 )
-from app.modules.fulltext import Boto3StagingObjectStorage, get_fulltext_acquisition_settings
+from app.modules.fulltext import (
+    AuthorizedPdfUploader,
+    Boto3StagingObjectStorage,
+    get_fulltext_acquisition_settings,
+)
 from app.modules.workflow.contracts import (
     CandidateFulltextError,
     CandidateFulltextErrorCode,
@@ -30,7 +34,7 @@ from app.modules.workflow.fulltext_service import (
 from app.modules.workflow.job_queue import ArqCandidateFulltextJobQueue
 from app.modules.workflow.search_session import SearchSessionStore
 from app.workers.redis import redis_client_from_environment
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,6 +50,8 @@ def _fulltext_error_response(error: CandidateFulltextError) -> HTTPException:
         status_code = status.HTTP_404_NOT_FOUND
     elif error.code is CandidateFulltextErrorCode.SESSION_EXPIRED:
         status_code = status.HTTP_410_GONE
+    elif error.code is CandidateFulltextErrorCode.UPLOAD_NOT_AUTHORIZED:
+        status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
     else:
         status_code = status.HTTP_409_CONFLICT
     return HTTPException(
@@ -102,6 +108,8 @@ def _response(submission: CandidateFulltextSubmission) -> CandidateFulltextRespo
 
 async def _service_with_redis(
     session: AsyncSession,
+    *,
+    uploader: AuthorizedPdfUploader | None = None,
 ) -> tuple[CandidateFulltextService, Redis]:
     """创建一次请求范围的 Redis 会话存储，并把连接交给路由 finally 关闭。"""
     settings = get_literature_source_settings()
@@ -111,6 +119,7 @@ async def _service_with_redis(
             session,
             SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
             ArqCandidateFulltextJobQueue(),
+            uploader=uploader,
         ),
         redis,
     )
@@ -169,6 +178,48 @@ async def retry_candidate_fulltext(
             search_run_id=search_run_id,
             candidate_id=candidate_id,
             retry=True,
+        )
+    except CandidateFulltextError as exc:
+        raise _fulltext_error_response(exc) from exc
+    except SearchRunError as exc:
+        raise _search_run_error_response(exc) from exc
+    finally:
+        await redis.aclose()
+    return _response(submission)
+
+
+@router.post(
+    "/{collection_id}/search-runs/{search_run_id}/candidates/{candidate_id}/fulltext/upload",
+    response_model=CandidateFulltextResponse,
+    summary="上传有权处理的候选 PDF",
+)
+async def upload_candidate_fulltext(
+    collection_id: UUID,
+    search_run_id: UUID,
+    candidate_id: UUID,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    x_upload_authorized: Annotated[str | None, Header()] = None,
+) -> CandidateFulltextResponse:
+    """只接收二进制 PDF 流；授权、候选、DOI 和暂存对象键都由服务端控制。"""
+    acquisition_settings = get_fulltext_acquisition_settings()
+    service, redis = await _service_with_redis(
+        session,
+        uploader=AuthorizedPdfUploader(
+            acquisition_settings,
+            Boto3StagingObjectStorage(acquisition_settings),
+        ),
+    )
+    try:
+        submission = await service.upload(
+            owner_user_id=current_user.id,
+            collection_id=collection_id,
+            search_run_id=search_run_id,
+            candidate_id=candidate_id,
+            authorized_to_process=x_upload_authorized == "true",
+            chunks=request.stream(),
+            media_type=request.headers.get("content-type"),
         )
     except CandidateFulltextError as exc:
         raise _fulltext_error_response(exc) from exc

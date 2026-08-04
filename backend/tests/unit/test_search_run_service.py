@@ -13,6 +13,7 @@ from app.db.models.workflow import ResearchPlan, SearchRun
 from app.modules.workflow.contracts import SearchRunError, SearchRunErrorCode
 from app.modules.workflow.job_queue import SearchRunQueueError
 from app.modules.workflow.search_run_service import SearchRunService
+from app.modules.workflow.settings import WorkflowSettings
 from app.modules.workflow.state import ResearchPlanStatus, SearchRunStatus, WorkspaceWorkflowStage
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,15 +95,25 @@ def _plan(*, status: str = ResearchPlanStatus.CONFIRMED.value) -> ResearchPlan:
     )
 
 
+def _workflow_settings(*, user_limit: int = 20, global_limit: int = 500) -> WorkflowSettings:
+    """仅构造本服务读取的配额字段，避免单元测试依赖本地模型凭据。"""
+    return WorkflowSettings.model_construct(
+        workflow_user_daily_search_run_limit=user_limit,
+        workflow_global_daily_search_run_limit=global_limit,
+    )
+
+
 @pytest.mark.asyncio
 async def test_start_search_requires_confirmed_plan_and_queues_once() -> None:
     """只有确认计划才能创建运行，成功后使用服务端生成的运行 UUID 投递。"""
     collection = _collection()
     plan = _plan()
-    session = FakeSession([collection, plan, None])
+    session = FakeSession([collection, plan, None, 0, 0])
     queue = FakeQueue()
 
-    submission = await SearchRunService(cast(AsyncSession, session), queue).start_search(
+    submission = await SearchRunService(
+        cast(AsyncSession, session), queue, settings=_workflow_settings()
+    ).start_search(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
     )
@@ -114,7 +125,9 @@ async def test_start_search_requires_confirmed_plan_and_queues_once() -> None:
 
     not_confirmed = FakeSession([collection, None])
     with pytest.raises(SearchRunError) as error:
-        await SearchRunService(cast(AsyncSession, not_confirmed), FakeQueue()).start_search(
+        await SearchRunService(
+            cast(AsyncSession, not_confirmed), FakeQueue(), settings=_workflow_settings()
+        ).start_search(
             owner_user_id=_OWNER_ID,
             collection_id=_COLLECTION_ID,
         )
@@ -159,10 +172,12 @@ async def test_retry_creates_a_new_attempt_without_overwriting_history() -> None
         provider_summary={},
         candidate_counts={},
     )
-    session = FakeSession([_collection(stage="screening"), previous, _plan(), None])
+    session = FakeSession([_collection(stage="screening"), previous, _plan(), None, 0, 0])
     queue = FakeQueue()
 
-    submission = await SearchRunService(cast(AsyncSession, session), queue).retry_search(
+    submission = await SearchRunService(
+        cast(AsyncSession, session), queue, settings=_workflow_settings()
+    ).retry_search(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
         previous_run_id=_RUN_ID,
@@ -178,10 +193,12 @@ async def test_retry_creates_a_new_attempt_without_overwriting_history() -> None
 async def test_queue_failure_marks_run_and_workspace_failed() -> None:
     """Redis 不可用时保留失败运行，不返回伪成功。"""
     collection = _collection()
-    session = FakeSession([collection, _plan(), None])
+    session = FakeSession([collection, _plan(), None, 0, 0])
 
     with pytest.raises(SearchRunError) as error:
-        await SearchRunService(cast(AsyncSession, session), FakeQueue(fail=True)).start_search(
+        await SearchRunService(
+            cast(AsyncSession, session), FakeQueue(fail=True), settings=_workflow_settings()
+        ).start_search(
             owner_user_id=_OWNER_ID,
             collection_id=_COLLECTION_ID,
         )
@@ -191,3 +208,59 @@ async def test_queue_failure_marks_run_and_workspace_failed() -> None:
     assert run.status == SearchRunStatus.FAILED.value
     assert collection.workflow_stage == WorkspaceWorkflowStage.FAILED.value
     assert error.value.code is SearchRunErrorCode.QUEUE_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_start_search_rejects_user_and_global_daily_submission_limits() -> None:
+    """检索运行在落库前检查用户与全局 UTC 自然日预算。"""
+    user_limited = FakeSession([_collection(), _plan(), None, 1])
+    with pytest.raises(SearchRunError) as user_error:
+        await SearchRunService(
+            cast(AsyncSession, user_limited),
+            FakeQueue(),
+            settings=_workflow_settings(user_limit=1),
+        ).start_search(owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID)
+
+    assert user_error.value.code is SearchRunErrorCode.USER_QUOTA_EXCEEDED
+    assert user_limited.added == []
+
+    global_limited = FakeSession([_collection(), _plan(), None, 0, 1])
+    with pytest.raises(SearchRunError) as global_error:
+        await SearchRunService(
+            cast(AsyncSession, global_limited),
+            FakeQueue(),
+            settings=_workflow_settings(global_limit=1),
+        ).start_search(owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID)
+
+    assert global_error.value.code is SearchRunErrorCode.GLOBAL_BUDGET_EXHAUSTED
+    assert global_limited.added == []
+
+
+@pytest.mark.asyncio
+async def test_retry_search_consumes_the_same_daily_submission_budget() -> None:
+    """失败检索的重试同样在创建新运行前受配额保护。"""
+    previous = SearchRun(
+        id=_RUN_ID,
+        collection_id=_COLLECTION_ID,
+        research_plan_id=_PLAN_ID,
+        status=SearchRunStatus.FAILED.value,
+        stage="completed",
+        attempt_no=1,
+        provider_summary={},
+        candidate_counts={},
+    )
+    session = FakeSession([_collection(stage="failed"), previous, _plan(), None, 1])
+
+    with pytest.raises(SearchRunError) as error:
+        await SearchRunService(
+            cast(AsyncSession, session),
+            FakeQueue(),
+            settings=_workflow_settings(user_limit=1),
+        ).retry_search(
+            owner_user_id=_OWNER_ID,
+            collection_id=_COLLECTION_ID,
+            previous_run_id=_RUN_ID,
+        )
+
+    assert error.value.code is SearchRunErrorCode.USER_QUOTA_EXCEEDED
+    assert session.added == []

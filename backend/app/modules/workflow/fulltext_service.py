@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.db.models.workflow import SearchRun
+from app.modules.fulltext.acquisition import AuthorizedPdfUploader
 from app.modules.fulltext.contracts import (
     CandidateFulltextState,
     FulltextAcquisitionError,
@@ -32,6 +34,7 @@ from app.modules.workflow.search_run_service import SearchRunService
 from app.modules.workflow.search_session import (
     SearchSessionStore,
     build_candidate_fulltext_key,
+    build_candidate_fulltext_upload_lock_key,
 )
 from app.modules.workflow.state import SearchRunStatus
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,11 +56,14 @@ class CandidateFulltextService:
         session: AsyncSession,
         session_store: SearchSessionStore,
         queue: CandidateFulltextJobQueue | None = None,
+        *,
+        uploader: AuthorizedPdfUploader | None = None,
     ) -> None:
         """注入请求范围的数据库、Redis 会话和可替换队列适配器。"""
         self._session = session
         self._session_store = session_store
         self._queue = queue
+        self._uploader = uploader
 
     async def request(
         self,
@@ -180,6 +186,96 @@ class CandidateFulltextService:
             )
         return CandidateFulltextSubmission(search_run=run, state=state)
 
+    async def upload(
+        self,
+        *,
+        owner_user_id: UUID,
+        collection_id: UUID,
+        search_run_id: UUID,
+        candidate_id: UUID,
+        authorized_to_process: bool,
+        chunks: AsyncIterable[bytes],
+        media_type: str | None,
+    ) -> CandidateFulltextSubmission:
+        """暂存当前用户明确授权的候选 PDF，并写回既有全文状态。"""
+        if self._uploader is None:
+            raise RuntimeError("上传候选 PDF 时必须提供暂存校验器")
+
+        run = await SearchRunService(self._session).get_owned_run(
+            owner_user_id=owner_user_id,
+            collection_id=collection_id,
+            search_run_id=search_run_id,
+        )
+        self._require_finished_search(run)
+        candidate = await self._load_candidate(
+            owner_user_id=owner_user_id,
+            collection_id=collection_id,
+            run=run,
+            candidate_id=candidate_id,
+        )
+        if not authorized_to_process:
+            raise CandidateFulltextError(
+                CandidateFulltextErrorCode.UPLOAD_NOT_AUTHORIZED,
+                "请先明确确认你有权处理并上传这篇候选的 PDF。",
+            )
+
+        state_key = self._state_key(run, candidate_id)
+        session_key = self._session_key(run)
+        lock_key = build_candidate_fulltext_upload_lock_key(session_key, candidate_id)
+        lock_token = uuid4().hex
+        if not await self._session_store.try_acquire_lock(
+            lock_key,
+            token=lock_token,
+            ttl_seconds=600,
+        ):
+            raise CandidateFulltextError(
+                CandidateFulltextErrorCode.UPLOAD_IN_PROGRESS,
+                "该候选的 PDF 正在上传或校验，请等待当前结果。",
+            )
+        try:
+            current = await self._read_state(state_key)
+            if current is not None:
+                if current.result.status is FulltextAcquisitionStatus.AVAILABLE:
+                    return CandidateFulltextSubmission(search_run=run, state=current)
+                if current.result.status in {
+                    FulltextAcquisitionStatus.QUEUED,
+                    FulltextAcquisitionStatus.DOWNLOADING,
+                    FulltextAcquisitionStatus.VALIDATING,
+                }:
+                    raise CandidateFulltextError(
+                        CandidateFulltextErrorCode.UPLOAD_IN_PROGRESS,
+                        "该候选正在进行全文处理，当前不能覆盖其结果。",
+                    )
+                attempt_no = current.attempt_no + 1
+            else:
+                attempt_no = 1
+
+            now = datetime.now(UTC)
+            validating = CandidateFulltextState(
+                search_run_id=run.id,
+                candidate=candidate,
+                attempt_no=attempt_no,
+                result=FulltextAcquisitionResult(
+                    candidate_id=candidate.candidate_id,
+                    status=FulltextAcquisitionStatus.VALIDATING,
+                ),
+                requested_at=now,
+                updated_at=now,
+            )
+            await self._write_state(state_key, validating)
+            result = await self._uploader.acquire(
+                candidate=candidate,
+                chunks=chunks,
+                media_type=media_type,
+            )
+            completed = validating.model_copy(
+                update={"result": result, "updated_at": datetime.now(UTC)}
+            )
+            await self._write_state(state_key, completed)
+            return CandidateFulltextSubmission(search_run=run, state=completed)
+        finally:
+            await self._session_store.release_lock(lock_key, token=lock_token)
+
     async def _load_candidate(
         self,
         *,
@@ -233,6 +329,16 @@ class CandidateFulltextService:
                 "检索候选会话不存在，请重新执行文献检索。",
             )
         return build_candidate_fulltext_key(run.redis_session_key, candidate_id)
+
+    @staticmethod
+    def _session_key(run: SearchRun) -> str:
+        """上传锁也只能使用持久化运行提供的服务器端 Redis 会话键。"""
+        if run.redis_session_key is None:
+            raise CandidateFulltextError(
+                CandidateFulltextErrorCode.SESSION_EXPIRED,
+                "检索候选会话不存在，请重新执行文献检索。",
+            )
+        return run.redis_session_key
 
     async def _read_state(self, state_key: str) -> CandidateFulltextState | None:
         """读取并校验 Redis 中的短期全文状态。"""

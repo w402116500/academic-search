@@ -55,16 +55,17 @@ uv run --directory backend python -c "import secrets; print(secrets.token_urlsaf
 
 访问 `http://127.0.0.1:8000/docs` 可查看 OpenAPI 文档；`GET /healthz` 仅用于确认 API 进程存活，不检查外部服务。
 
-另开两个终端分别启动研究意图分析和 RAG 文献入库 Worker：
+另开三个终端分别启动工作流、相关性分析和 RAG 文献入库 Worker：
 
 ```powershell
 uv run --directory backend arq app.workers.workflow.WorkerSettings
+uv run --directory backend arq app.workers.relevance.WorkerSettings
 uv run --directory backend arq app.workers.ingestion.WorkerSettings
 ```
 
-两个 Worker 都会从 `REDIS_URL` 连接 arq，但绝不共享任务队列：工作流 Worker 只消费 `arq:queue:workflow` 中的意图分析、检索和候选全文任务；入库 Worker 只消费 `arq:queue:ingestion` 中的 PDF 解析、嵌入和 Milvus 写入任务。工作流 Worker 在用户调用 `POST /api/v1/collections/research` 后访问聊天模型，返回经过 Pydantic 校验的 2-3 个研究方向和方向对应检索表达式；检索运行与候选全文获取也由同一个 Worker 消费。它只在用户确认计划后调用 OpenAlex、Crossref、arXiv 和 Semantic Scholar，并将候选放入 Redis 短期会话；基础初筛后先发布候选快照，再按 `WORKFLOW_RELEVANCE_BATCH_SIZE` 批量调用相关性 Agent 并将核验后的结果写回同一会话。候选全文仅可使用该会话中服务端已发现的直接 PDF URL。入库 Worker 只在用户确认构建集合后接收 `queued` 文献，随后访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。
+三个 Worker 都会从 `REDIS_URL` 连接 arq，但绝不共享任务队列：工作流 Worker 只消费 `arq:queue:workflow` 中的意图分析、检索和候选全文任务；相关性 Worker 只消费 `arq:queue:relevance` 中的完整候选集合流式分析任务；入库 Worker 只消费 `arq:queue:ingestion` 中的 PDF 解析、嵌入和 Milvus 写入任务。工作流 Worker 在用户调用 `POST /api/v1/collections/research` 后访问聊天模型，返回经过 Pydantic 校验的 2-3 个研究方向和方向对应检索表达式；检索运行与候选全文获取也由同一个 Worker 消费。它只在用户确认计划后调用 OpenAlex、Crossref、arXiv 和 Semantic Scholar，并将候选放入 Redis 短期会话；基础初筛后先发布候选快照并投递相关性 Worker。相关性 Worker 以完整已初筛候选集合分别执行一次流式相关性判断和一次流式独立主张核验，再以字段级合并写回同一会话。候选数量不会阻断这次完整集合判断，也不会被隐式拆成串行批次；两次集合级调用的输出预算按实际有摘要候选数计算。候选全文仅可使用该会话中服务端已发现的直接 PDF URL。入库 Worker 只在用户确认构建集合后接收 `queued` 文献，随后访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。
 
-意图分析、候选相关性评估和后续研究对话使用 `WORKFLOW_CHAT_PROVIDER` 选择聊天后端，当前默认值为 `deepseek`，对应 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_CHAT_MODEL`。如需切换到其他 OpenAI 兼容聊天服务，将其改为 `openai_compatible` 并配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_CHAT_MODEL`。`WORKFLOW_RELEVANCE_TIMEOUT_SECONDS` 限制单批相关性调用，`WORKFLOW_RELEVANCE_BATCH_SIZE` 控制每批候选数，`WORKFLOW_RELEVANCE_ABSTRACT_MAX_CHARACTERS` 与 `WORKFLOW_RELEVANCE_MAX_OUTPUT_TOKENS` 分别限制单篇输入摘要和一批输出长度；批次按顺序执行，因此并发数固定为 1。`OPENAI_*` 也继续用于 RAG embedding 配置。模型输出不符合计划结构时，工作区会进入 `failed`，用户可修改原始要求并调用重新生成接口；候选相关性输出异常则只标记当前候选失败，用户可单项重试，系统不会把自由文本直接作为检索词执行。
+意图分析、候选相关性评估和后续研究对话使用 `WORKFLOW_CHAT_PROVIDER` 选择聊天后端，当前默认值为 `deepseek`，对应 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_CHAT_MODEL`。如需切换到其他 OpenAI 兼容聊天服务，将其改为 `openai_compatible` 并配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_CHAT_MODEL`。`WORKFLOW_RELEVANCE_STREAM_IDLE_TIMEOUT_SECONDS=120` 只在完整集合流连续 120 秒没有任何模型活动时失败；它不是整次调用总时长，也不限制候选数量、摘要长度或是否拆批。`WORKFLOW_RELEVANCE_OUTPUT_TOKENS_PER_CANDIDATE` 与 `WORKFLOW_RELEVANCE_VERIFICATION_OUTPUT_TOKENS_PER_CANDIDATE` 分别让相关性判断和独立核验的输出预算随完整集合规模增加。完整摘要和候选数量都不是截断或失败条件；`OPENAI_*` 也继续用于 RAG embedding 配置。模型输出不符合计划结构时，工作区会进入 `failed`，用户可修改原始要求并调用重新生成接口；可重试的相关性异常由运行级“重新分析全部候选理由”复用当前候选快照处理，不重新请求文献来源，也不公开模型流正文。
 
 确认研究计划后，前端调用 `POST /api/v1/collections/{collection_id}/search-runs` 显式启动多源检索。检索 Worker 由同一个 `app.workers.workflow.WorkerSettings` 消费，按已确认查询并发调用已启用来源，并通过下列接口恢复状态：
 

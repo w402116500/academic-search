@@ -16,6 +16,11 @@ from app.modules.fulltext.contracts import (
 from app.modules.search.contracts import (
     CandidateAuthor,
     CandidateLinks,
+    CandidateRelevanceAssessment,
+    CandidateRelevanceError,
+    CandidateRelevanceEvidence,
+    CandidateRelevanceLevel,
+    CandidateRelevanceState,
     RawCandidate,
     SourceName,
     TriageDecision,
@@ -161,6 +166,27 @@ def _store(*candidates: UnifiedCandidate) -> FakeSessionStore:
     )
 
 
+def _with_relevance(
+    candidate: UnifiedCandidate,
+    level: CandidateRelevanceLevel,
+) -> UnifiedCandidate:
+    """为排序测试附加已验证的服务端相关性结果。"""
+    return candidate.model_copy(
+        update={
+            "relevance_state": CandidateRelevanceState.COMPLETED,
+            "relevance_assessment": CandidateRelevanceAssessment(
+                level=level,
+                study_focus="排序测试候选。",
+                reason="用于验证相关性优先顺序。",
+                helpful_aspect="用于验证相关性优先顺序。",
+                recommendation="测试用。",
+                evidence=(CandidateRelevanceEvidence(source_field="title", quote=candidate.title),),
+            ),
+            "relevance_error": None,
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_page_keeps_selection_across_cursor_pages_and_uses_fulltext_state() -> None:
     """审核页的“正在查看”分页不影响 Redis 中跨页保存的准备选择。"""
@@ -230,6 +256,153 @@ async def test_page_keeps_selection_across_cursor_pages_and_uses_fulltext_state(
     assert second_page.items[0].candidate.candidate_id == _SECOND_ID
     assert second_page.items[0].is_selected is False
     assert store.refreshed_keys == [_SESSION_KEY]
+
+
+@pytest.mark.asyncio
+async def test_completed_review_orders_by_relevance_and_places_incomplete_last() -> None:
+    """终态审核优先展示核心候选，待评估/失败/跳过记录不能抢占语义层级。"""
+    core = _with_relevance(
+        _candidate(
+            UUID("00000000-0000-0000-0000-000000001211"), title="Core", year=2010, doi="10.1/core"
+        ),
+        CandidateRelevanceLevel.CORE,
+    )
+    related = _with_relevance(
+        _candidate(
+            UUID("00000000-0000-0000-0000-000000001212"),
+            title="Related",
+            year=2026,
+            doi="10.1/related",
+        ),
+        CandidateRelevanceLevel.RELATED,
+    )
+    background = _with_relevance(
+        _candidate(
+            UUID("00000000-0000-0000-0000-000000001213"),
+            title="Background",
+            year=2026,
+            doi="10.1/background",
+        ),
+        CandidateRelevanceLevel.BACKGROUND,
+    )
+    not_recommended = _with_relevance(
+        _candidate(
+            UUID("00000000-0000-0000-0000-000000001214"),
+            title="Not recommended",
+            year=2026,
+            doi="10.1/not-recommended",
+        ),
+        CandidateRelevanceLevel.NOT_RECOMMENDED,
+    )
+    insufficient = _with_relevance(
+        _candidate(
+            UUID("00000000-0000-0000-0000-000000001215"),
+            title="Insufficient",
+            year=2026,
+            doi="10.1/insufficient",
+        ),
+        CandidateRelevanceLevel.INSUFFICIENT_INFORMATION,
+    )
+    pending = _candidate(
+        UUID("00000000-0000-0000-0000-000000001216"),
+        title="Pending",
+        year=2027,
+        doi="10.1/pending",
+    )
+    failed = _candidate(
+        UUID("00000000-0000-0000-0000-000000001217"),
+        title="Failed",
+        year=2027,
+        doi="10.1/failed",
+    ).model_copy(
+        update={
+            "relevance_state": CandidateRelevanceState.FAILED,
+            "relevance_error": CandidateRelevanceError(
+                code="candidate_relevance_output_invalid",
+                message="测试失败。",
+                retryable=True,
+            ),
+        }
+    )
+    skipped = _candidate(
+        UUID("00000000-0000-0000-0000-000000001218"),
+        title="Skipped",
+        year=2027,
+        doi="10.1/skipped",
+    ).model_copy(
+        update={
+            "triage": TriageDecision(included=False),
+            "relevance_state": CandidateRelevanceState.SKIPPED,
+        }
+    )
+    service = CandidateReviewService(
+        cast(AsyncSession, FakeSession(_run())),
+        cast(
+            SearchSessionStore,
+            _store(
+                skipped, failed, pending, insufficient, not_recommended, background, related, core
+            ),
+        ),
+    )
+
+    page = await service.page(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+        limit=20,
+        cursor=None,
+        query="",
+        review_filter=CandidateReviewFilter.ALL,
+    )
+
+    assert [item.candidate.candidate_id for item in page.items] == [
+        core.candidate_id,
+        related.candidate_id,
+        background.candidate_id,
+        not_recommended.candidate_id,
+        insufficient.candidate_id,
+        pending.candidate_id,
+        failed.candidate_id,
+        skipped.candidate_id,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cursor_is_rejected_when_a_running_snapshot_switches_to_final_relevance_sort() -> (
+    None
+):
+    """排序语义变化后旧游标不能继续翻页，避免重复或漏掉候选。"""
+    run = _run()
+    run.status = "running"
+    first = _candidate(_FIRST_ID, title="Newest", year=2025, doi="10.1/newest")
+    second = _candidate(_SECOND_ID, title="Older", year=2024, doi="10.1/older")
+    service = CandidateReviewService(
+        cast(AsyncSession, FakeSession(run)),
+        cast(SearchSessionStore, _store(first, second)),
+    )
+    running_page = await service.page(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+        limit=1,
+        cursor=None,
+        query="",
+        review_filter=CandidateReviewFilter.ALL,
+    )
+    run.status = "completed"
+
+    with pytest.raises(CandidateReviewError) as raised:
+        await service.page(
+            owner_user_id=_OWNER_ID,
+            collection_id=_COLLECTION_ID,
+            search_run_id=_RUN_ID,
+            limit=1,
+            cursor=running_page.page.next_cursor,
+            query="",
+            review_filter=CandidateReviewFilter.ALL,
+        )
+
+    assert raised.value.code is CandidateReviewErrorCode.INVALID_CURSOR
 
 
 @pytest.mark.asyncio

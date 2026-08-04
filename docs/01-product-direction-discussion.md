@@ -1,6 +1,6 @@
 # academic-search 产品方向讨论稿
 
-状态：产品方向已确定；“研究要求 -> 可研究文献集合”的后端闭环已实现，Vue 页面、RAG 研究检索与研究对话仍待实施。本稿记录 2026-07-28 的方向共识与仍未决的问题。
+状态：产品方向已确定；从研究要求到证据研究对话的主链路已有实现，候选全局语义判断与相关性优先排序已完成整改。当前仍存在 PDF 上传、RAG 证据核验、真实重排和运行治理等关键差距，统一整改范围见 [`11-implementation-alignment-discussion.md`](11-implementation-alignment-discussion.md)。本稿记录 2026-07-28 的方向共识与仍未决的问题。
 来源：从 `E:\myproject\course\workflow_bundle` 的文献子系统中抽取可复用资产，重新定义产品目标。
 
 ---
@@ -14,6 +14,8 @@
 3. [`05-rag-research-workspace-discussion.md`](05-rag-research-workspace-discussion.md) - 研究集合、文献索引与证据问答
 4. [`06-session-reliability-and-governance-discussion.md`](06-session-reliability-and-governance-discussion.md) - 会话、任务状态、限流、预算、隐私与审计
 5. [`07-frontend-experience-discussion.md`](07-frontend-experience-discussion.md) - 搜索、结果与研究流程的前端体验
+
+当前实现与上述目标之间的审计结论和后续整改顺序见 [`11-implementation-alignment-discussion.md`](11-implementation-alignment-discussion.md)。该稿是讨论和实施验收的共同基线，不能以任务计划中的“完成”标记替代实际链路验收。
 
 [`02-frontend-design-system.md`](02-frontend-design-system.md) 仍作为第五份讨论稿的视觉与组件设计依据，不重复记录功能流程。
 

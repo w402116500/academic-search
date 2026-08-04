@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from app.core.settings import LiteratureSourceSettings, get_literature_source_settings
 from app.db.models.workflow import ResearchPlan, SearchRun
@@ -27,15 +28,19 @@ from app.modules.search.providers.doi_resolver import DoiMetadataResolver
 from app.modules.search.providers.registry import ProviderRegistry, build_provider_registry
 from app.modules.workflow.candidate_relevance import (
     OpenAICompatibleCandidateRelevanceEvaluator,
-    build_candidate_relevance_context,
     mark_candidate_relevance_failed,
+    mark_candidate_relevance_insufficient,
     skip_candidate_relevance,
 )
 from app.modules.workflow.contracts import ProviderSearchQuery, ResearchScope, SearchProgressEvent
+from app.modules.workflow.job_queue import (
+    ArqCandidateRelevanceJobQueue,
+    CandidateRelevanceJobQueue,
+    CandidateRelevanceQueueError,
+)
 from app.modules.workflow.query_plan import read_confirmed_query_plan
 from app.modules.workflow.search_run_service import SearchRunService
 from app.modules.workflow.search_session import SearchSessionStore
-from app.modules.workflow.settings import get_workflow_settings
 from app.modules.workflow.state import SearchRunStage, SearchRunStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,6 +68,7 @@ class SearchRunExecutor:
         registry: ProviderRegistry | None = None,
         citation_enricher: CitationMetadataEnricher | None = None,
         relevance_evaluator: OpenAICompatibleCandidateRelevanceEvaluator | None = None,
+        relevance_queue: CandidateRelevanceJobQueue | None = None,
     ) -> None:
         self._session = session
         self._search_run = search_run
@@ -71,6 +77,7 @@ class SearchRunExecutor:
         self._registry = registry or build_provider_registry(self._literature_settings)
         self._citation_enricher = citation_enricher
         self._relevance_evaluator = relevance_evaluator
+        self._relevance_queue = relevance_queue or ArqCandidateRelevanceJobQueue()
         self._workflow_service = SearchRunService(session)
 
     async def execute(self) -> dict[str, str]:
@@ -183,77 +190,54 @@ class SearchRunExecutor:
             message="候选已完成规整、去重和基础筛选。",
         )
 
-        candidates = await self._assess_relevance(
-            plan=plan,
-            query_specs=query_specs,
-            scope=scope,
+        candidates = await self._prepare_relevance(
             candidates=processed.candidates,
             provider_summary=provider_summary,
             candidate_counts=candidate_counts,
         )
+        try:
+            await self._relevance_queue.enqueue_relevance(
+                search_run_id=self._search_run.id,
+                attempt_id=uuid4().hex,
+            )
+        except CandidateRelevanceQueueError:
+            unavailable_candidates = tuple(
+                mark_candidate_relevance_failed(
+                    candidate,
+                    "候选相关性任务暂时无法启动，请稍后重新分析。",
+                    code="candidate_relevance_queue_unavailable",
+                )
+                if candidate.relevance_state is CandidateRelevanceState.PENDING
+                else candidate
+                for candidate in candidates
+            )
+            candidate_counts.update(self._relevance_counts(unavailable_candidates))
+            final_status = (
+                SearchRunStatus.FAILED
+                if successful_provider_count == 0
+                else SearchRunStatus.PARTIAL_FAILED
+            )
+            message = "候选已展示，但相关性任务无法启动。"
+            await self._workflow_service.complete_run(
+                search_run_id=self._search_run.id,
+                status=final_status,
+                provider_summary=provider_summary,
+                candidate_counts=candidate_counts,
+                error_code="candidate_relevance_queue_unavailable",
+                error_message=message,
+            )
+            await self._publish(
+                status=final_status,
+                stage=SearchRunStage.COMPLETED,
+                provider_summary=provider_summary,
+                candidate_counts=candidate_counts,
+                candidates=unavailable_candidates,
+                message=message,
+            )
+            return self._result(final_status)
 
-        # 题录补全是独立的可观测阶段；即使配置为 0，也发布阶段事件让前端知道
-        # 候选已经通过基础筛选，正在准备最终展示结果。
-        await self._workflow_service.update_progress(
-            search_run_id=self._search_run.id,
-            stage=SearchRunStage.CITATION_ENRICHMENT,
-            provider_summary=provider_summary,
-            candidate_counts=candidate_counts,
-        )
-        await self._publish(
-            status=SearchRunStatus.RUNNING,
-            stage=SearchRunStage.CITATION_ENRICHMENT,
-            provider_summary=provider_summary,
-            candidate_counts=candidate_counts,
-            candidates=candidates,
-            message="正在补全可复制的正式题录。",
-        )
-        candidates = await self._enrich_citations(candidates)
-        final_status = (
-            SearchRunStatus.FAILED
-            if successful_provider_count == 0
-            else SearchRunStatus.PARTIAL_FAILED
-            if failed_provider_count
-            else SearchRunStatus.COMPLETED
-        )
-        candidate_counts["citation_enriched_count"] = sum(
-            candidate.citation is not None for candidate in candidates
-        )
-        error_message = (
-            "部分文献来源请求失败，结果仍可供审核。"
-            if final_status is SearchRunStatus.PARTIAL_FAILED
-            else "所有已启用文献来源均请求失败。"
-            if final_status is SearchRunStatus.FAILED
-            else None
-        )
-        error_code = (
-            "provider_partial_failed"
-            if final_status is SearchRunStatus.PARTIAL_FAILED
-            else "all_providers_failed"
-            if final_status is SearchRunStatus.FAILED
-            else None
-        )
-        await self._workflow_service.complete_run(
-            search_run_id=self._search_run.id,
-            status=final_status,
-            provider_summary=provider_summary,
-            candidate_counts=candidate_counts,
-            error_code=error_code,
-            error_message=error_message,
-        )
-        await self._publish(
-            status=final_status,
-            stage=SearchRunStage.COMPLETED,
-            provider_summary=provider_summary,
-            candidate_counts=candidate_counts,
-            candidates=candidates,
-            message=(
-                "检索完成，候选文献已准备好。"
-                if final_status is SearchRunStatus.COMPLETED
-                else error_message
-            ),
-        )
-        return self._result(final_status)
+        _ = failed_provider_count
+        return {"search_run_id": str(self._search_run.id), "status": "relevance_queued"}
 
     async def _load_plan(self) -> ResearchPlan | None:
         """读取检索运行绑定的计划，Worker 不能自行寻找其他版本。"""
@@ -373,38 +357,29 @@ class SearchRunExecutor:
 
         return tuple(await asyncio.gather(*(enrich(candidate) for candidate in candidates)))
 
-    async def _assess_relevance(
+    async def _prepare_relevance(
         self,
         *,
-        plan: ResearchPlan,
-        query_specs: list[ProviderSearchQuery],
-        scope: ResearchScope,
         candidates: tuple[UnifiedCandidate, ...],
         provider_summary: dict[str, Any],
         candidate_counts: dict[str, Any],
     ) -> tuple[UnifiedCandidate, ...]:
-        """先发布统一候选，再按批次写回可核对的语义判断。"""
-        context = build_candidate_relevance_context(
-            research_question=plan.raw_request,
-            direction_options=plan.direction_options,
-            selected_direction_id=plan.selected_direction_id,
-            query_specs=query_specs,
-            scope=scope,
-        )
+        """发布候选快照并标记待流式分析项，不在 Provider Worker 内等待模型。"""
         prepared_candidates = tuple(
-            candidate
+            candidate.model_copy(
+                update={
+                    "relevance_state": CandidateRelevanceState.PENDING,
+                    "relevance_assessment": None,
+                    "relevance_error": None,
+                }
+            )
+            if candidate.triage and candidate.triage.included and candidate.abstract
+            else mark_candidate_relevance_insufficient(candidate)
             if candidate.triage and candidate.triage.included
             else skip_candidate_relevance(candidate)
             for candidate in candidates
         )
-        eligible = [
-            candidate
-            for candidate in prepared_candidates
-            if candidate.triage and candidate.triage.included
-        ]
-        candidate_counts["relevance_total_count"] = len(eligible)
-        candidate_counts["relevance_completed_count"] = 0
-        candidate_counts["relevance_failed_count"] = 0
+        candidate_counts.update(self._relevance_counts(prepared_candidates))
         await self._workflow_service.update_progress(
             search_run_id=self._search_run.id,
             stage=SearchRunStage.RELEVANCE_ASSESSMENT,
@@ -419,62 +394,35 @@ class SearchRunExecutor:
             candidates=prepared_candidates,
             message="候选已展示，正在依据标题和摘要分析相关性。",
         )
-        if not eligible:
-            return prepared_candidates
+        return prepared_candidates
 
-        try:
-            settings = get_workflow_settings()
-            evaluator = self._relevance_evaluator or OpenAICompatibleCandidateRelevanceEvaluator(
-                settings
-            )
-        except Exception:
-            unavailable_candidates = tuple(
-                mark_candidate_relevance_failed(
-                    candidate,
-                    "候选相关性模型尚未配置或暂时不可用，请稍后重试。",
-                    code="candidate_relevance_model_unavailable",
-                )
-                if candidate.triage and candidate.triage.included
-                else candidate
-                for candidate in prepared_candidates
-            )
-            candidate_counts["relevance_failed_count"] = len(eligible)
-            await self._publish(
-                status=SearchRunStatus.RUNNING,
-                stage=SearchRunStage.RELEVANCE_ASSESSMENT,
-                provider_summary=provider_summary,
-                candidate_counts=candidate_counts,
-                candidates=unavailable_candidates,
-                message="候选已展示，但相关性模型当前不可用。",
-            )
-            return unavailable_candidates
-
-        by_id = {candidate.candidate_id: candidate for candidate in prepared_candidates}
-        for index in range(0, len(eligible), settings.workflow_relevance_batch_size):
-            assessed = await evaluator.assess(
-                context=context,
-                candidates=eligible[index : index + settings.workflow_relevance_batch_size],
-            )
-            by_id.update({candidate.candidate_id: candidate for candidate in assessed})
-            current = tuple(by_id[candidate.candidate_id] for candidate in prepared_candidates)
-            candidate_counts["relevance_completed_count"] = sum(
+    @staticmethod
+    def _relevance_counts(candidates: tuple[UnifiedCandidate, ...]) -> dict[str, int]:
+        """统一计算相关性阶段统计，区分待流式分析、完成、信息不足和失败。"""
+        return {
+            "relevance_total_count": sum(
+                candidate.triage is not None and candidate.triage.included
+                for candidate in candidates
+            ),
+            "relevance_pending_count": sum(
+                candidate.relevance_state is CandidateRelevanceState.PENDING
+                for candidate in candidates
+            ),
+            "relevance_completed_count": sum(
                 candidate.relevance_state is CandidateRelevanceState.COMPLETED
-                for candidate in current
-            )
-            candidate_counts["relevance_failed_count"] = sum(
-                candidate.relevance_state is CandidateRelevanceState.FAILED for candidate in current
-            )
-            await self._publish(
-                status=SearchRunStatus.RUNNING,
-                stage=SearchRunStage.RELEVANCE_ASSESSMENT,
-                provider_summary=provider_summary,
-                candidate_counts=candidate_counts,
-                candidates=current,
-                message=(
-                    f"已完成 {candidate_counts['relevance_completed_count']} 条候选的相关性分析。"
-                ),
-            )
-        return tuple(by_id[candidate.candidate_id] for candidate in prepared_candidates)
+                for candidate in candidates
+            ),
+            "relevance_insufficient_count": sum(
+                candidate.relevance_assessment is not None
+                and candidate.relevance_assessment.level
+                is CandidateRelevanceLevel.INSUFFICIENT_INFORMATION
+                for candidate in candidates
+            ),
+            "relevance_failed_count": sum(
+                candidate.relevance_state is CandidateRelevanceState.FAILED
+                for candidate in candidates
+            ),
+        }
 
     async def _publish(
         self,

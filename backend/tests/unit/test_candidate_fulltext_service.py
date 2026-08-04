@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterable
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
@@ -9,6 +10,7 @@ from uuid import UUID
 import pytest
 from app.db.models.workflow import SearchRun
 from app.modules.fulltext.contracts import (
+    AcquiredFulltext,
     CandidateFulltextState,
     FulltextAcquisitionError,
     FulltextAcquisitionErrorCode,
@@ -61,6 +63,14 @@ class FakeSessionStore:
         self.snapshots[session_key] = snapshot
         self.writes.append((session_key, snapshot))
 
+    async def try_acquire_lock(self, _key: str, *, token: str, ttl_seconds: int) -> bool:
+        assert token
+        assert ttl_seconds > 0
+        return True
+
+    async def release_lock(self, _key: str, *, token: str) -> None:
+        assert token
+
 
 class FakeQueue:
     """记录任务投递参数，并可模拟队列连接失败。"""
@@ -80,6 +90,40 @@ class FakeQueue:
             raise CandidateFulltextQueueError("test queue unavailable")
         self.calls.append((search_run_id, candidate_id, attempt_no))
         return f"fulltext-{search_run_id}-{candidate_id}-{attempt_no}"
+
+
+class FakeUploader:
+    """避免服务层测试触碰对象存储，同时记录授权后的真实候选输入。"""
+
+    def __init__(self) -> None:
+        self.candidate_ids: list[UUID] = []
+
+    async def acquire(
+        self,
+        *,
+        candidate: UnifiedCandidate,
+        chunks: AsyncIterable[bytes],
+        media_type: str | None,
+    ) -> FulltextAcquisitionResult:
+        self.candidate_ids.append(candidate.candidate_id)
+        async for _chunk in chunks:
+            pass
+        return FulltextAcquisitionResult(
+            candidate_id=candidate.candidate_id,
+            status=FulltextAcquisitionStatus.AVAILABLE,
+            document=AcquiredFulltext(
+                candidate_id=candidate.candidate_id,
+                doi=candidate.doi or "10.1000/fulltext.example",
+                source_url="user-upload://candidate/test",
+                staging_object_key="staging/fulltext/test.pdf",
+                original_filename="authorized-upload.pdf",
+                byte_size=24,
+                sha256="0" * 64,
+                origin_kind="user_upload",
+                access_rights="user_upload",
+                acquired_at=datetime.now(UTC),
+            ),
+        )
 
 
 def _run() -> SearchRun:
@@ -248,3 +292,62 @@ async def test_queue_failure_is_returned_as_retryable_failed_state() -> None:
     assert submission.state.result.error is not None
     assert submission.state.result.error.code is FulltextAcquisitionErrorCode.TASK_ERROR
     assert submission.state.result.error.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_upload_requires_an_explicit_authorization_statement() -> None:
+    """客户端知道候选 UUID 也不能在未确认权限时写入私有暂存区。"""
+    candidate = _candidate()
+    uploader = FakeUploader()
+    service = CandidateFulltextService(
+        cast(AsyncSession, FakeSession(_run())),
+        cast(SearchSessionStore, _store(candidate)),
+        uploader=cast(Any, uploader),
+    )
+
+    async def chunks() -> AsyncIterable[bytes]:
+        yield b"%PDF-1.7\n"
+
+    with pytest.raises(CandidateFulltextError) as raised:
+        await service.upload(
+            owner_user_id=_OWNER_ID,
+            collection_id=_COLLECTION_ID,
+            search_run_id=_RUN_ID,
+            candidate_id=_CANDIDATE_ID,
+            authorized_to_process=False,
+            chunks=chunks(),
+            media_type="application/pdf",
+        )
+
+    assert raised.value.code is CandidateFulltextErrorCode.UPLOAD_NOT_AUTHORIZED
+    assert uploader.candidate_ids == []
+
+
+@pytest.mark.asyncio
+async def test_upload_uses_the_server_side_candidate_and_writes_available_state() -> None:
+    """上传只消费服务端快照中的候选，成功后沿用既有可准入全文状态。"""
+    candidate = _candidate()
+    store = _store(candidate)
+    uploader = FakeUploader()
+    service = CandidateFulltextService(
+        cast(AsyncSession, FakeSession(_run())),
+        cast(SearchSessionStore, store),
+        uploader=cast(Any, uploader),
+    )
+
+    async def chunks() -> AsyncIterable[bytes]:
+        yield b"%PDF-1.7\n"
+
+    submission = await service.upload(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+        candidate_id=_CANDIDATE_ID,
+        authorized_to_process=True,
+        chunks=chunks(),
+        media_type="application/pdf",
+    )
+
+    assert submission.state.attempt_no == 1
+    assert submission.state.result.status is FulltextAcquisitionStatus.AVAILABLE
+    assert uploader.candidate_ids == [_CANDIDATE_ID]

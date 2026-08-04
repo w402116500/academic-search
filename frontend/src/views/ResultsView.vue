@@ -22,7 +22,6 @@ import {
 import { useRoute, useRouter } from "vue-router";
 
 import {
-  admitFulltext,
   buildCollection,
   getCandidateCitation,
   getCollectionDocuments,
@@ -41,11 +40,10 @@ import {
 } from "@/features/research/candidate-language";
 import { presentCandidateRelevance } from "@/features/research/candidate-relevance";
 import {
-  admitCandidateSelection,
   clearCandidateSelection,
+  cancelCandidateRelevance,
   getCurrentSearchRun,
   getSearchCandidates,
-  prepareCandidateSelection,
   retryCandidateRelevance,
   updateCandidateSelection,
 } from "@/api/workflow";
@@ -157,6 +155,20 @@ const allCurrentPageSelected = computed(
 const isPreparing = computed(() =>
   reviewItems.value.some((item) => item.fulltext && !isFulltextTerminal(item.fulltext.status)),
 );
+const isRelevanceAnalyzing = computed(
+  () =>
+    runQuery.data.value?.status === "running" &&
+    runQuery.data.value.stage === "relevance_assessment",
+);
+const isSearchRunActive = computed(() =>
+  ["queued", "running"].includes(runQuery.data.value?.status ?? ""),
+);
+const canRetryRelevanceRun = computed(
+  () =>
+    !isSearchRunActive.value &&
+    (Number(candidatesQuery.data.value?.candidate_counts.relevance_failed_count ?? 0) > 0 ||
+      runQuery.data.value?.status === "cancelled"),
+);
 
 watch(
   reviewItems,
@@ -181,7 +193,12 @@ watch(searchInput, (value) => {
 });
 
 watch([selectedFilter, pageSize], resetPage);
-watch(isPreparing, restartReviewPolling, { immediate: true });
+watch([isPreparing, isSearchRunActive], restartReviewPolling, { immediate: true });
+watch(isSearchRunActive, (active, wasActive) => {
+  if (!active && wasActive && toast.value === "正在重新分析当前完整候选集合。") {
+    toast.value = null;
+  }
+});
 
 const selectionMutation = useMutation({
   mutationFn: ({ candidateIds, selected }: { candidateIds: string[]; selected: boolean }) =>
@@ -205,35 +222,6 @@ const clearSelectionMutation = useMutation({
   },
 });
 
-const prepareMutation = useMutation({
-  mutationFn: () => prepareCandidateSelection(workspaceId.value, runId.value),
-  onSuccess: async (result) => {
-    toast.value =
-      result.queued_count > 0
-        ? `已安排 ${result.queued_count} 篇候选进行题录与全文核验。`
-        : "已同步当前准备清单的核验状态。";
-    await refreshCandidates();
-    restartReviewPolling();
-  },
-  onError: (error) => {
-    toast.value = error instanceof Error ? error.message : "批量核验无法启动。";
-  },
-});
-
-const batchAdmissionMutation = useMutation({
-  mutationFn: () => admitCandidateSelection(workspaceId.value, runId.value),
-  onSuccess: async (result) => {
-    toast.value =
-      result.admitted_count > 0
-        ? `已将 ${result.admitted_count} 篇文献加入待确认集合。`
-        : "当前准备清单中没有可立即加入集合的文献。";
-    await Promise.all([refreshCandidates(), refreshCollectionDocuments()]);
-  },
-  onError: (error) => {
-    toast.value = error instanceof Error ? error.message : "批量加入集合无法完成。";
-  },
-});
-
 const fulltextMutation = useMutation({
   mutationFn: (candidateId: string) => requestFulltext(workspaceId.value, runId.value, candidateId),
   onSuccess: async () => {
@@ -247,30 +235,26 @@ const fulltextMutation = useMutation({
 });
 
 const relevanceRetryMutation = useMutation({
-  mutationFn: (candidateId: string) =>
-    retryCandidateRelevance(workspaceId.value, runId.value, candidateId),
+  mutationFn: () => retryCandidateRelevance(workspaceId.value, runId.value),
   onSuccess: async () => {
-    toast.value = "候选理由正在重新分析。";
+    toast.value = "正在重新分析当前完整候选集合。";
     await refreshCandidates();
+    restartReviewPolling();
   },
   onError: (error) => {
     toast.value = error instanceof Error ? error.message : "候选理由暂时无法重新分析。";
   },
 });
 
-const admissionMutation = useMutation({
-  mutationFn: (candidateId: string) => admitFulltext(workspaceId.value, runId.value, candidateId),
-  onSuccess: async (_result, candidateId) => {
-    try {
-      await updateCandidateSelection(workspaceId.value, runId.value, [candidateId], false);
-    } catch {
-      toast.value = "文献已加入待确认集合，但准备清单需要手动刷新。";
-    }
-    if (!toast.value) toast.value = "已加入待确认集合。";
-    await Promise.all([refreshCandidates(), refreshCollectionDocuments()]);
+const relevanceCancelMutation = useMutation({
+  mutationFn: () => cancelCandidateRelevance(workspaceId.value, runId.value),
+  onSuccess: async () => {
+    toast.value = "候选相关性分析已取消。";
+    await refreshCandidates();
+    await queryClient.invalidateQueries({ queryKey: ["search-run", workspaceId.value] });
   },
   onError: (error) => {
-    toast.value = error instanceof Error ? error.message : "当前文献还不能加入集合。";
+    toast.value = error instanceof Error ? error.message : "候选相关性分析暂时无法取消。";
   },
 });
 
@@ -339,6 +323,14 @@ function toggleCurrentPageSelection(): void {
   selectionMutation.mutate({ candidateIds, selected: !allCurrentPageSelected.value });
 }
 
+function openVerificationTask(): void {
+  void router.push({
+    name: "workspace-verification",
+    params: { workspaceId: workspaceId.value },
+    query: { run: runId.value },
+  });
+}
+
 function isCandidateSelectable(item: CandidateReviewItem): boolean {
   return Boolean(item.candidate.doi && item.candidate.triage?.included);
 }
@@ -366,6 +358,7 @@ function candidateState(candidate: Candidate, fulltext: FulltextResponse | null)
   if (fulltext?.status === "available") return "可加入集合";
   if (fulltext?.status === "rejected") return "未通过全文准入";
   if (fulltext?.status === "failed") return "全文不可用";
+  if (fulltext?.status === "requires_upload") return "需要上传已授权 PDF";
   if (fulltext && !isFulltextTerminal(fulltext.status)) return "全文处理中";
   return "待准备核验";
 }
@@ -381,6 +374,11 @@ function candidateProcessingSummary(
   if (fulltext?.status === "failed") {
     return fulltext.error?.message || "全文获取失败，可根据提示重试或改选其他文献。";
   }
+  if (fulltext?.status === "requires_upload") {
+    return (
+      fulltext.error?.message || "没有可处理的开放获取 PDF。请在完整记录中确认有权处理后上传文件。"
+    );
+  }
   if (fulltext?.status === "available") {
     return "DOI、正式题录与可处理全文均已核验，可以加入待确认研究集合。";
   }
@@ -394,6 +392,7 @@ function candidateProcessingSummary(
 
 async function refreshCandidates(): Promise<void> {
   await queryClient.invalidateQueries({ queryKey: ["candidates", workspaceId.value, runId.value] });
+  await queryClient.invalidateQueries({ queryKey: ["search-run", workspaceId.value] });
 }
 
 async function refreshCollectionDocuments(): Promise<void> {
@@ -402,7 +401,7 @@ async function refreshCollectionDocuments(): Promise<void> {
 
 function restartReviewPolling(): void {
   window.clearInterval(reviewRefreshTimer);
-  if (!isPreparing.value) return;
+  if (!isPreparing.value && !isSearchRunActive.value) return;
   reviewRefreshTimer = window.setInterval(() => {
     void refreshCandidates();
   }, 1_500);
@@ -571,27 +570,8 @@ onUnmounted(() => {
             <button class="compact-button" type="button" @click="changeFilter('selected')">
               <ListChecks :size="14" />只看已选
             </button>
-            <button
-              class="compact-button emphasis"
-              type="button"
-              :disabled="prepareMutation.isPending.value"
-              @click="prepareMutation.mutate()"
-            >
-              <LoaderCircle
-                v-if="prepareMutation.isPending.value"
-                class="spin"
-                :size="14"
-              /><FileDown v-else :size="14" />准备核验
-            </button>
-            <button
-              class="compact-button primary"
-              type="button"
-              :disabled="
-                !selection.ready_for_admission_count || batchAdmissionMutation.isPending.value
-              "
-              @click="batchAdmissionMutation.mutate()"
-            >
-              <Layers2 :size="14" />加入待确认集合
+            <button class="compact-button" type="button" @click="openVerificationTask">
+              <FileDown :size="14" />核验任务
             </button>
             <button
               class="compact-button danger"
@@ -844,16 +824,28 @@ onUnmounted(() => {
                 <strong>说明</strong>{{ selectedCandidateReason.evidenceBoundary }}
               </p>
               <button
-                v-if="selectedCandidateReason.canRetry"
+                v-if="isRelevanceAnalyzing"
+                class="candidate-retry-button"
+                type="button"
+                :disabled="relevanceCancelMutation.isPending.value"
+                @click="relevanceCancelMutation.mutate()"
+              >
+                <LoaderCircle
+                  :size="14"
+                  :class="{ 'is-spinning': relevanceCancelMutation.isPending.value }"
+                /><span>取消相关性分析</span>
+              </button>
+              <button
+                v-else-if="canRetryRelevanceRun"
                 class="candidate-retry-button"
                 type="button"
                 :disabled="relevanceRetryMutation.isPending.value"
-                @click="relevanceRetryMutation.mutate(selectedCandidate.candidate_id)"
+                @click="relevanceRetryMutation.mutate()"
               >
                 <LoaderCircle
                   :size="14"
                   :class="{ 'is-spinning': relevanceRetryMutation.isPending.value }"
-                /><span>重新分析候选理由</span>
+                /><span>重新分析全部候选理由</span>
               </button>
             </section>
 
@@ -917,10 +909,9 @@ onUnmounted(() => {
                 v-else-if="fulltextOf(selectedReviewItem)?.status === 'available'"
                 class="primary-button"
                 type="button"
-                :disabled="admissionMutation.isPending.value"
-                @click="admissionMutation.mutate(selectedCandidate.candidate_id)"
+                @click="openVerificationTask"
               >
-                <Layers2 :size="15" />加入待确认集合
+                <Layers2 :size="15" />前往核验任务加入集合
               </button>
               <button
                 class="secondary-button"

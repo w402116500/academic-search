@@ -7,7 +7,8 @@ from uuid import UUID
 
 from app.core.settings import get_literature_source_settings
 from app.db.session import async_session_factory
-from app.modules.workflow.search_execution import SearchRunExecutor, build_citation_enricher
+from app.modules.workflow.job_queue import ArqCandidateRelevanceJobQueue
+from app.modules.workflow.search_execution import SearchRunExecutor
 from app.modules.workflow.search_run_service import SearchRunService
 from app.modules.workflow.search_session import SearchSessionStore
 from app.modules.workflow.state import SearchRunStatus
@@ -38,7 +39,7 @@ async def run_search(_ctx: dict[str, Any], search_run_id: str) -> dict[str, str]
                     ttl_seconds=settings.search_session_ttl_seconds,
                 ),
                 literature_settings=settings,
-                citation_enricher=build_citation_enricher(settings),
+                relevance_queue=ArqCandidateRelevanceJobQueue(),
             )
             return await executor.execute()
         except Exception as exc:

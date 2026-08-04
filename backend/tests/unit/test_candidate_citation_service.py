@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
 from app.db.models.workflow import SearchRun
+from app.modules.fulltext.contracts import (
+    CandidateFulltextState,
+    FulltextAcquisitionError,
+    FulltextAcquisitionErrorCode,
+    FulltextAcquisitionResult,
+    FulltextAcquisitionStatus,
+)
 from app.modules.search.citation_formatter import CitationFormat
 from app.modules.search.contracts import (
     CandidateAuthor,
@@ -21,7 +29,7 @@ from app.modules.search.contracts import (
 )
 from app.modules.workflow.citation_service import CandidateCitationService
 from app.modules.workflow.contracts import CandidateCitationError, CandidateCitationErrorCode
-from app.modules.workflow.search_session import SearchSessionStore
+from app.modules.workflow.search_session import SearchSessionStore, build_candidate_fulltext_key
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000000901")
@@ -45,11 +53,11 @@ class FakeSession:
 class FakeSessionStore:
     """用内存快照替代 Redis，保持候选只能从服务端会话读取。"""
 
-    def __init__(self, snapshot: dict[str, Any]) -> None:
-        self._snapshot = snapshot
+    def __init__(self, snapshots: dict[str, dict[str, Any]]) -> None:
+        self._snapshots = snapshots
 
     async def read_snapshot(self, session_key: str) -> dict[str, Any] | None:
-        return self._snapshot if session_key == _SESSION_KEY else None
+        return self._snapshots.get(session_key)
 
 
 def _run() -> SearchRun:
@@ -87,7 +95,7 @@ def _citation(*, status: CitationMetadataStatus = CitationMetadataStatus.READY) 
     return metadata.model_copy(update={"status": status, "missing_fields": ("volume",)})
 
 
-def _candidate(citation: CitationMetadata) -> UnifiedCandidate:
+def _candidate(citation: CitationMetadata | None) -> UnifiedCandidate:
     """构造带有服务端题录的候选，不从调用方输入接收书目信息。"""
     source_record = RawCandidate(
         source=SourceName.OPENALEX,
@@ -108,6 +116,27 @@ def _candidate(citation: CitationMetadata) -> UnifiedCandidate:
     )
 
 
+def _fulltext_state(citation: CitationMetadata) -> CandidateFulltextState:
+    """模拟全文任务已补齐题录，但不会回写主候选快照的中间状态。"""
+    return CandidateFulltextState(
+        search_run_id=_RUN_ID,
+        candidate=_candidate(citation),
+        attempt_no=1,
+        result=FulltextAcquisitionResult(
+            candidate_id=_CANDIDATE_ID,
+            status=FulltextAcquisitionStatus.FAILED,
+            error=FulltextAcquisitionError(
+                code=FulltextAcquisitionErrorCode.REMOTE_ERROR,
+                message="全文来源返回 HTTP 403。",
+                retryable=False,
+                http_status_code=403,
+            ),
+        ),
+        requested_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+
 @pytest.mark.asyncio
 async def test_render_uses_the_server_side_ready_metadata_for_the_requested_style() -> None:
     """前端仅传递格式枚举，引用文本必须由会话内 `ready` 题录生成。"""
@@ -116,7 +145,7 @@ async def test_render_uses_the_server_side_ready_metadata_for_the_requested_styl
         cast(AsyncSession, FakeSession(_run())),
         cast(
             SearchSessionStore,
-            FakeSessionStore({"candidates": [candidate.model_dump(mode="json")]}),
+            FakeSessionStore({_SESSION_KEY: {"candidates": [candidate.model_dump(mode="json")]}}),
         ),
     )
 
@@ -142,7 +171,7 @@ async def test_render_rejects_incomplete_metadata_instead_of_returning_a_fake_ci
         cast(AsyncSession, FakeSession(_run())),
         cast(
             SearchSessionStore,
-            FakeSessionStore({"candidates": [candidate.model_dump(mode="json")]}),
+            FakeSessionStore({_SESSION_KEY: {"candidates": [candidate.model_dump(mode="json")]}}),
         ),
     )
 
@@ -156,3 +185,35 @@ async def test_render_rejects_incomplete_metadata_instead_of_returning_a_fake_ci
         )
 
     assert raised.value.code is CandidateCitationErrorCode.CITATION_NOT_READY
+
+
+@pytest.mark.asyncio
+async def test_render_uses_ready_metadata_from_the_candidate_fulltext_state() -> None:
+    """全文 Worker 补齐题录后，详情页和引用接口必须读取同一份服务端事实。"""
+    candidate = _candidate(None)
+    state = _fulltext_state(_citation())
+    service = CandidateCitationService(
+        cast(AsyncSession, FakeSession(_run())),
+        cast(
+            SearchSessionStore,
+            FakeSessionStore(
+                {
+                    _SESSION_KEY: {"candidates": [candidate.model_dump(mode="json")]},
+                    build_candidate_fulltext_key(_SESSION_KEY, _CANDIDATE_ID): state.model_dump(
+                        mode="json"
+                    ),
+                }
+            ),
+        ),
+    )
+
+    rendered = await service.render(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+        candidate_id=_CANDIDATE_ID,
+        citation_format=CitationFormat.GB_T_7714_2015_NUMERIC,
+    )
+
+    assert rendered.candidate_id == _CANDIDATE_ID
+    assert "evidence for sleep and student wellbeing" in rendered.text.casefold()

@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+import type { ResearchPlan, SearchProgressEvent, SearchRun } from "@/api/types";
+
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const runId = "22222222-2222-4222-8222-222222222222";
 
@@ -20,7 +22,7 @@ const workspace = {
   created_at: "2026-08-01T00:00:00Z",
   updated_at: "2026-08-01T00:00:00Z",
 };
-const run = {
+const run: SearchRun = {
   id: runId,
   collection_id: workspaceId,
   research_plan_id: "44444444-4444-4444-8444-444444444444",
@@ -41,7 +43,35 @@ const run = {
   created_at: "2026-08-01T00:00:00Z",
   updated_at: "2026-08-01T00:01:00Z",
 };
-const plan = {
+const runningRun: SearchRun = {
+  ...run,
+  status: "running",
+  stage: "relevance_assessment",
+  provider_summary: {
+    openalex: { status: "completed", candidate_count: 28 },
+    crossref: { status: "completed", candidate_count: 22 },
+    arxiv: { status: "failed", error: "arXiv 本次暂未返回。" },
+  },
+  candidate_counts: {
+    raw_candidate_count: 56,
+    deduplicated_candidate_count: 52,
+    included_candidate_count: 50,
+    relevance_total_count: 50,
+    relevance_completed_count: 18,
+    relevance_failed_count: 0,
+  },
+  finished_at: null,
+  updated_at: "2026-08-01T00:00:18Z",
+};
+const relevanceProgressEvent: SearchProgressEvent = {
+  run_id: runId,
+  status: "running",
+  stage: "relevance_assessment",
+  provider_summary: runningRun.provider_summary,
+  candidate_counts: runningRun.candidate_counts,
+  message: "已完成 18 条候选的统一相关性分析。",
+};
+const plan: ResearchPlan = {
   id: run.research_plan_id,
   collection_id: workspaceId,
   revision: 1,
@@ -119,15 +149,20 @@ const chineseCandidate = {
   },
 };
 
-async function fulfillWorkflowRequest(route: Route): Promise<void> {
+async function fulfillWorkflowRequest(
+  route: Route,
+  activeRun: SearchRun = run,
+  activeWorkspace = workspace,
+  activePlan = plan,
+): Promise<void> {
   const path = new URL(route.request().url()).pathname;
   if (path.endsWith("/auth/me")) return route.fulfill({ json: user });
   if (path.endsWith("/collections")) {
-    return route.fulfill({ json: { items: [workspace], next_cursor: null } });
+    return route.fulfill({ json: { items: [activeWorkspace], next_cursor: null } });
   }
-  if (path.endsWith(`/collections/${workspaceId}`)) return route.fulfill({ json: workspace });
-  if (path.endsWith(`/collections/${workspaceId}/plan`)) return route.fulfill({ json: plan });
-  if (path.endsWith("/search-runs/current")) return route.fulfill({ json: run });
+  if (path.endsWith(`/collections/${workspaceId}`)) return route.fulfill({ json: activeWorkspace });
+  if (path.endsWith(`/collections/${workspaceId}/plan`)) return route.fulfill({ json: activePlan });
+  if (path.endsWith("/search-runs/current")) return route.fulfill({ json: activeRun });
   if (path.endsWith(`/search-runs/${runId}/candidates`)) {
     const filter = new URL(route.request().url()).searchParams.get("filter") ?? "all";
     const visibleItems =
@@ -141,8 +176,8 @@ async function fulfillWorkflowRequest(route: Route): Promise<void> {
     return route.fulfill({
       json: {
         run_id: runId,
-        status: "completed",
-        candidate_counts: run.candidate_counts,
+        status: activeRun.status,
+        candidate_counts: activeRun.candidate_counts,
         items: visibleItems.map((currentCandidate) => ({
           candidate: currentCandidate,
           is_selected: false,
@@ -179,16 +214,46 @@ async function openCompletedRun(page: Page): Promise<void> {
   await page.addInitScript(() =>
     localStorage.setItem("academic-search.access-token", "mock-token"),
   );
-  await page.route("http://127.0.0.1:8000/api/v1/**", fulfillWorkflowRequest);
+  await page.route("http://127.0.0.1:8000/api/v1/**", (route) => fulfillWorkflowRequest(route));
   await page.goto(`/workspace/${workspaceId}/run?run=${runId}`);
 }
+
+async function openRunningRun(page: Page): Promise<void> {
+  await page.addInitScript(() =>
+    localStorage.setItem("academic-search.access-token", "mock-token"),
+  );
+  await page.route("http://127.0.0.1:8000/api/v1/**", (route) =>
+    fulfillWorkflowRequest(route, runningRun),
+  );
+  await page.route(
+    `http://127.0.0.1:8000/api/v1/collections/${workspaceId}/search-runs/${runId}/events`,
+    (route) =>
+      route.fulfill({
+        contentType: "text/event-stream",
+        body: `data: ${JSON.stringify(relevanceProgressEvent)}\n\n`,
+      }),
+  );
+  await page.goto(`/workspace/${workspaceId}/run?run=${runId}`);
+}
+
+test("检索运行中展示真实的相关性计数和来源失败说明", async ({ page }) => {
+  await openRunningRun(page);
+
+  await expect(
+    page.getByRole("heading", { name: "已找到 50 篇候选，正在统一判断相关性。" }),
+  ).toBeVisible();
+  await expect(page.getByText("已分析 18 / 50 篇", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("已完成 18 条候选的统一相关性分析。")).toBeVisible();
+  await expect(page.getByText("刚刚收到进度更新")).toBeVisible();
+  await expect(
+    page.getByText("1 个来源暂未返回，系统仍会继续处理其他来源已返回的候选。"),
+  ).toBeVisible();
+});
 
 test("检索完成后在连续画布中进入候选筛选与集合确认", async ({ page }) => {
   await openCompletedRun(page);
 
-  await expect(
-    page.getByRole("heading", { name: "检索已经完成，可以查看候选结果。" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "6 篇候选文献，已经准备好。" })).toBeVisible();
   await page.getByRole("button", { name: "开始筛选" }).click();
 
   await expect(page).toHaveURL(new RegExp(`/workspace/${workspaceId}/results\\?run=${runId}`));
@@ -222,4 +287,163 @@ test("窄屏仍可查看候选检查器与集合确认", async ({ page }) => {
   await expect(page.getByLabel("候选文献检查器")).toBeVisible();
   await page.getByRole("button", { name: "待确认集合 1 篇" }).click();
   await expect(page.getByTestId("collection-confirm-dialog")).toBeVisible();
+});
+
+test("候选相关性只支持运行级取消与整批重试", async ({ page }) => {
+  let activeRun = runningRun;
+  let cancelRequests = 0;
+  let retryRequests = 0;
+  const citationEnrichingRun = {
+    ...runningRun,
+    stage: "citation_enrichment" as const,
+  };
+
+  await page.addInitScript(() =>
+    localStorage.setItem("academic-search.access-token", "mock-token"),
+  );
+  await page.route("http://127.0.0.1:8000/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith(`/search-runs/${runId}/relevance/cancel`)) {
+      expect(route.request().method()).toBe("POST");
+      cancelRequests += 1;
+      activeRun = {
+        ...runningRun,
+        status: "cancelled",
+        stage: "completed",
+        candidate_counts: { ...runningRun.candidate_counts, relevance_failed_count: 32 },
+      };
+      return route.fulfill({ json: activeRun });
+    }
+    if (path.endsWith(`/search-runs/${runId}/relevance/retry`)) {
+      expect(route.request().method()).toBe("POST");
+      retryRequests += 1;
+      activeRun = runningRun;
+      return route.fulfill({
+        status: 202,
+        json: {
+          run_id: runId,
+          status: "running",
+          candidate_counts: runningRun.candidate_counts,
+          candidates: [candidate, chineseCandidate],
+        },
+      });
+    }
+    return fulfillWorkflowRequest(route, activeRun);
+  });
+
+  await page.goto(`/workspace/${workspaceId}/results?run=${runId}`);
+  await expect(page.getByRole("button", { name: "取消相关性分析" })).toBeVisible();
+  await page.getByRole("button", { name: "取消相关性分析" }).click();
+  await expect.poll(() => cancelRequests).toBe(1);
+  await expect(page.getByRole("button", { name: "重新分析全部候选理由" })).toBeVisible();
+
+  await page.getByRole("button", { name: "重新分析全部候选理由" }).click();
+  await expect.poll(() => retryRequests).toBe(1);
+  await expect(page.getByRole("button", { name: "取消相关性分析" })).toBeVisible();
+  await expect(page.getByText("正在重新分析当前完整候选集合。")).toBeVisible();
+
+  activeRun = citationEnrichingRun;
+  await page.reload();
+  await expect(page.getByRole("button", { name: "取消相关性分析" })).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "重新分析全部候选理由" })).not.toBeVisible();
+});
+
+test("详情页为不可重试的全文失败提供授权上传恢复路径", async ({ page }) => {
+  const failedFulltext = {
+    search_run_id: runId,
+    candidate_id: candidate.candidate_id,
+    attempt_no: 1,
+    status: "failed" as const,
+    document: null,
+    error: {
+      code: "remote_error",
+      message: "全文来源返回 HTTP 403。",
+      retryable: false,
+    },
+    requested_at: "2026-08-04T00:00:00Z",
+    updated_at: "2026-08-04T00:00:03Z",
+  };
+
+  await page.addInitScript(() =>
+    localStorage.setItem("academic-search.access-token", "mock-token"),
+  );
+  await page.route("http://127.0.0.1:8000/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith(`/search-runs/${runId}/candidates/${candidate.candidate_id}/citation`)) {
+      return route.fulfill({
+        json: {
+          candidate_id: candidate.candidate_id,
+          format: "gb_t_7714_2015_numeric",
+          text: "[1] Urban green space exposure and mental well-being in later life.",
+        },
+      });
+    }
+    if (path.endsWith(`/search-runs/${runId}/candidates/${candidate.candidate_id}`)) {
+      return route.fulfill({
+        json: { candidate, is_selected: true, fulltext: failedFulltext },
+      });
+    }
+    return fulfillWorkflowRequest(route);
+  });
+
+  await page.goto(`/workspace/${workspaceId}/paper/${candidate.candidate_id}?run=${runId}`);
+
+  await expect(page.getByText("全文暂不可用", { exact: true })).toBeVisible();
+  await expect(page.getByText("全文来源返回 HTTP 403。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "选择有权处理的 PDF" })).toBeVisible();
+  await expect(page.getByLabel("上传有权处理的 PDF")).toBeVisible();
+  await expect(page.locator(".citation-preview pre")).toContainText("Urban green space exposure");
+});
+
+test("失败的意图分析会重新生成计划而非重复读取历史失败", async ({ page }) => {
+  const failedWorkspace = {
+    ...workspace,
+    workflow_stage: "failed",
+    workflow_stage_display: { label: "任务解析失败", description: "可以重新生成研究计划" },
+  };
+  const failedPlan: ResearchPlan = {
+    ...plan,
+    status: "failed",
+    direction_options: [],
+    selected_direction_id: null,
+    scope: {},
+    query_plan: {},
+    error_code: "intent_model_request_failed",
+    error_message: "研究意图分析模型暂时不可用，未生成检索计划。",
+    confirmed_at: null,
+  };
+  const regeneratingPlan: ResearchPlan = {
+    ...failedPlan,
+    id: "55555555-5555-4555-8555-555555555555",
+    revision: 2,
+    status: "generating",
+    error_code: null,
+    error_message: null,
+    created_at: "2026-08-04T00:00:00Z",
+    updated_at: "2026-08-04T00:00:00Z",
+  };
+  let activePlan: ResearchPlan = failedPlan;
+  let regenerateRequestCount = 0;
+
+  await page.addInitScript(() =>
+    localStorage.setItem("academic-search.access-token", "mock-token"),
+  );
+  await page.route("http://127.0.0.1:8000/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith(`/collections/${workspaceId}/plan/regenerate`)) {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().postDataJSON()).toEqual({ raw_request: failedPlan.raw_request });
+      regenerateRequestCount += 1;
+      activePlan = regeneratingPlan;
+      return route.fulfill({ status: 202, json: regeneratingPlan });
+    }
+    return fulfillWorkflowRequest(route, run, failedWorkspace, activePlan);
+  });
+
+  await page.goto(`/workspace/${workspaceId}/run`);
+
+  await expect(page.getByText("这次解析没有完成", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "重新生成计划" }).click();
+  await expect.poll(() => regenerateRequestCount).toBe(1);
+  await expect(page.getByRole("heading", { name: "正在理解这项研究。" })).toBeVisible();
 });

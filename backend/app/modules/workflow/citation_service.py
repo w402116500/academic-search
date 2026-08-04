@@ -5,18 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
+from app.db.models.workflow import SearchRun
+from app.modules.fulltext.contracts import CandidateFulltextState
 from app.modules.search.citation_formatter import (
     CitationFormat,
     CitationFormattingError,
     format_citation,
 )
+from app.modules.search.contracts import CitationMetadataStatus, UnifiedCandidate
 from app.modules.workflow.candidate_lookup import (
     SearchCandidateLookupError,
     SearchCandidateLookupErrorCode,
     SearchCandidateLookupService,
 )
 from app.modules.workflow.contracts import CandidateCitationError, CandidateCitationErrorCode
-from app.modules.workflow.search_session import SearchSessionStore
+from app.modules.workflow.search_session import SearchSessionStore, build_candidate_fulltext_key
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -33,6 +36,7 @@ class CandidateCitationService:
     """只允许从当前用户拥有的候选会话生成格式化引用。"""
 
     def __init__(self, session: AsyncSession, session_store: SearchSessionStore) -> None:
+        self._session_store = session_store
         self._lookup = SearchCandidateLookupService(session, session_store)
 
     async def render(
@@ -66,14 +70,15 @@ class CandidateCitationService:
             }[exc.code]
             raise CandidateCitationError(code, str(exc)) from exc
 
-        if lookup.candidate.citation is None:
+        candidate = await self._candidate_with_ready_citation(lookup.search_run, lookup.candidate)
+        if candidate.citation is None:
             raise CandidateCitationError(
                 CandidateCitationErrorCode.CITATION_NOT_READY,
                 "该候选尚未取得可核验题录，暂时不能生成正式引用。",
             )
 
         try:
-            text = format_citation(lookup.candidate.citation, citation_format)
+            text = format_citation(candidate.citation, citation_format)
         except CitationFormattingError as exc:
             raise CandidateCitationError(
                 CandidateCitationErrorCode.CITATION_NOT_READY,
@@ -81,7 +86,37 @@ class CandidateCitationService:
             ) from exc
 
         return CandidateCitationRender(
-            candidate_id=lookup.candidate.candidate_id,
+            candidate_id=candidate.candidate_id,
             format=citation_format,
             text=text,
         )
+
+    async def _candidate_with_ready_citation(
+        self,
+        search_run: SearchRun,
+        candidate: UnifiedCandidate,
+    ) -> UnifiedCandidate:
+        """全文 Worker 已补全题录时，优先使用同一候选的受控短期状态。"""
+        if (
+            candidate.citation is not None
+            and candidate.citation.status is CitationMetadataStatus.READY
+        ):
+            return candidate
+        if search_run.redis_session_key is None:
+            return candidate
+
+        raw_state = await self._session_store.read_snapshot(
+            build_candidate_fulltext_key(search_run.redis_session_key, candidate.candidate_id)
+        )
+        if raw_state is None:
+            return candidate
+
+        state = CandidateFulltextState.model_validate(raw_state)
+        if (
+            state.search_run_id != search_run.id
+            or state.candidate.candidate_id != candidate.candidate_id
+            or state.candidate.citation is None
+            or state.candidate.citation.status is not CitationMetadataStatus.READY
+        ):
+            return candidate
+        return state.candidate

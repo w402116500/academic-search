@@ -15,7 +15,7 @@ import {
 } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
 
-import { confirmPlan, getPlan, startSearch } from "@/api/workflow";
+import { confirmPlan, getPlan, regeneratePlan, startSearch } from "@/api/workflow";
 import type { ResearchPlanScope, ResearchScope } from "@/api/types";
 import { buildResearchScope, type ResearchTimePreset } from "@/features/research/scope";
 
@@ -132,6 +132,22 @@ const confirmMutation = useMutation({
   },
 });
 
+const regenerateMutation = useMutation({
+  mutationFn: async () => {
+    const plan = planQuery.data.value;
+    if (!plan) throw new Error("当前研究计划尚未加载，无法重新生成。");
+    return regeneratePlan(workspaceId.value, plan.raw_request);
+  },
+  onSuccess: (plan) => {
+    localError.value = null;
+    queryClient.setQueryData(["plan", workspaceId.value], plan);
+    void queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId.value] });
+  },
+  onError: (error) => {
+    localError.value = error instanceof Error ? error.message : "计划重新生成失败，请稍后重试。";
+  },
+});
+
 function buildScope() {
   return buildResearchScope({
     timePreset: timePreset.value,
@@ -206,8 +222,15 @@ function toggleLanguage(language: "zh" | "en"): void {
       <div v-else-if="planQuery.data.value.status === 'failed'" class="failure-panel">
         <strong>这次解析没有完成</strong>
         <p>{{ planQuery.data.value.error_message ?? "模型没有返回可用的研究计划。" }}</p>
-        <button class="secondary-button" type="button" @click="planQuery.refetch()">
-          <RotateCcw :size="15" />重新读取
+        <p v-if="localError" class="form-error">{{ localError }}</p>
+        <button
+          class="secondary-button"
+          type="button"
+          :disabled="regenerateMutation.isPending.value"
+          @click="regenerateMutation.mutate()"
+        >
+          <RotateCcw :class="{ spin: regenerateMutation.isPending.value }" :size="15" />
+          {{ regenerateMutation.isPending.value ? "正在重新生成计划…" : "重新生成计划" }}
         </button>
       </div>
       <form v-else class="plan-form" @submit.prevent="confirmMutation.mutate()">

@@ -1,6 +1,6 @@
 # academic-search RAG 文献研究讨论稿
 
-状态：进行中；研究集合准入、开放获取直链 PDF 下载暂存、准入与集合构建 API、PDF 入库 Worker 及 Milvus L3 向量写入已实现；RAG 检索、证据组装与研究对话 Agent 尚未实现。
+状态：已实现研究集合准入、开放获取与授权上传 PDF、准入与集合构建 API、PDF 入库 Worker、Milvus L3 向量写入、受限混合检索、回答原子主张核验、结构化复杂问题路由、受限 ReAct、研究会话与协作停止。HTTP Reranker 已以 `Qwen/Qwen3-Reranker-4B` 完成真实服务与完整 RAG Worker 验收：Qwen embedding、Milvus 召回、2/2 精排、DeepSeek 回答、4 条回答主张核验与 Redis 事件均通过，临时资源已精确清理；详细证据见 [`11-implementation-alignment-discussion.md`](11-implementation-alignment-discussion.md)。
 定位：定义用户获得文献后，如何将选定文献变成可检索、可引用、可比较的研究集合。
 关联：检索结果入口见 [`03-literature-search-and-discovery-discussion.md`](03-literature-search-and-discovery-discussion.md)；运行治理见 [`06-session-reliability-and-governance-discussion.md`](06-session-reliability-and-governance-discussion.md)。
 
@@ -17,7 +17,7 @@ RAG 不是一个脱离文献来源的普通聊天框。它的职责是从用户�
 ```text
 用户从检索结果中选择文献
   -> DOI 题录核验通过
-  -> 系统取得并校验允许处理的全文，或接收用户上传文件
+  -> 系统取得并校验允许处理的全文，或由当前用户明确授权上传 PDF
   -> 原子创建研究集合关联、文献文件与入库任务
   -> 异步解析、结构化切块、嵌入与建立索引
   -> 用户提出研究问题
@@ -43,6 +43,8 @@ RAG 的准入条件是“已核验 DOI + 已实际取得的合法正文”，两
 自动下载必须是后端受控任务：只使用搜索会话中已发现的 URL，限制协议、重定向、下载大小和超时；阻断本地/私有网络目标；同时校验 HTTP `Content-Type` 与 PDF 魔数；流式计算 SHA-256。对象先以临时键上传；准入服务通过服务端复制将其转为正式对象，再创建数据库记录。对象存储与数据库之间使用补偿清理：任一步失败都删除本次可能遗留的正式键和暂存键。
 
 下载校验通过后，系统在一个事务中写入 `papers`、`collection_papers`、`documents` 和初始 `ingestion_runs`；随后由 Worker 开始解析。这样数据库中的论文不是“有一条题录”，而是“已经拥有可追溯研究正文”的文献。当前 `ResearchCollectionAdmissionService` 已实现这一准入事务、工作区权限校验、同 DOI 幂等处理和对象补偿清理；`POST .../fulltext/admission` 会创建 `pending / parse` 入库运行。用户确认集合构建后，`POST /collections/{collection_id}/build` 才将活动运行转为 `queued` 并逐篇投递 arq；`app.workers.ingestion` 消费这些任务并完成 PDF 解析、切块、embedding 与 Milvus 写入。
+
+确认构建和失败重试都受 UTC 自然日用户额度与全局预算保护。`ingestion_runs.submitted_at` 只在实际进入 Worker 队列时写入，批量构建会以“本日已提交数 + 本批 pending 文献数”预检；超额时 API 返回稳定的 HTTP 429 错误，不会改变待确认运行。
 
 解析失败、扫描件质量过低、页码无法定位等情况必须显式标注，不能让用户误以为该文献已经具备可靠问答能力。`documents` 创建成功不等于可被 RAG 回答，只有当前入库运行完成并且向量索引写入成功后才可检索。
 
@@ -164,7 +166,7 @@ HyDE 和 Step-back 只用于改善查询，不构成回答证据，也不能出�
 
 MVP 只实现两个显式 Agent 角色：研究规划 Agent 与证据核验 Agent。证据检索、事实提取和最终回答暂由确定性工作流加受限模型调用实现，并保留结构化输入输出，后续再根据质量和延迟数据拆分为独立 Agent。
 
-每个多 Agent 请求必须设置最大子问题数、最大并发数、每角色超时和总 token/模型预算。任何一个子问题失败时，综合结果应标记缺口并继续返回已核验证据，不能由其他 Agent 静默猜测补齐。
+每个多 Agent 请求必须设置最大子问题数、最大并发数、每角色超时和总 token/模型预算。当前实现使用结构化路由与受限 ReAct 控制器逐轮记录动作、工具观察和剩余预算；任何一个子问题失败时，综合结果会标记缺口并继续返回已核验证据，不能由其他子问题静默猜测补齐。
 
 ## 7. 回答契约
 

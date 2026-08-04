@@ -24,7 +24,11 @@ from app.modules.fulltext.contracts import (
     FulltextAcquisitionStatus,
 )
 from app.modules.fulltext.storage import ResearchDocumentObjectStorage
-from app.modules.search.contracts import CandidateRelevanceLevel, UnifiedCandidate
+from app.modules.search.contracts import (
+    CandidateRelevanceLevel,
+    CandidateRelevanceState,
+    UnifiedCandidate,
+)
 from app.modules.workflow.contracts import (
     CandidateAdmissionBatchResponse,
     CandidateAdmissionItem,
@@ -53,6 +57,20 @@ from app.modules.workflow.state import SearchRunStatus
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _SELECTION_LOCK_TTL_SECONDS = 15
+_DISCOVERY_SORT_VERSION = "discovery-v1"
+_RELEVANCE_SORT_VERSION = "relevance-v1"
+_RELEVANCE_LEVEL_RANK = {
+    CandidateRelevanceLevel.CORE: 0,
+    CandidateRelevanceLevel.RELATED: 1,
+    CandidateRelevanceLevel.BACKGROUND: 2,
+    CandidateRelevanceLevel.NOT_RECOMMENDED: 3,
+    CandidateRelevanceLevel.INSUFFICIENT_INFORMATION: 4,
+}
+_INCOMPLETE_RELEVANCE_STATE_RANK = {
+    CandidateRelevanceState.PENDING: 5,
+    CandidateRelevanceState.FAILED: 6,
+    CandidateRelevanceState.SKIPPED: 7,
+}
 
 
 class CandidateReviewErrorCode(StrEnum):
@@ -112,15 +130,21 @@ class CandidateReviewService:
         states = await self._fulltext_states(run, candidates)
 
         normalized_query = " ".join(query.split()).casefold()
+        final_relevance_order = self._uses_final_relevance_order(run)
+        sort_version = _RELEVANCE_SORT_VERSION if final_relevance_order else _DISCOVERY_SORT_VERSION
         fingerprint = self._filter_fingerprint(
             query=normalized_query,
             review_filter=review_filter,
             limit=limit,
+            sort_version=sort_version,
         )
         offset = self._decode_cursor(cursor, expected_fingerprint=fingerprint)
         filtered = [
             candidate
-            for candidate in self._stable_sorted(candidates)
+            for candidate in self._stable_sorted(
+                candidates,
+                final_relevance_order=final_relevance_order,
+            )
             if self._matches_filter(
                 candidate,
                 state=states.get(candidate.candidate_id),
@@ -273,6 +297,9 @@ class CandidateReviewService:
             raise RuntimeError("批量全文准备必须提供全文任务队列")
 
         run = await self._owned_finished_run(owner_user_id, collection_id, search_run_id)
+        # Per-candidate rollbacks expire ORM instances. Preserve the scalar needed by the
+        # response before entering the independently settled admission loop.
+        run_id = run.id
         selected_ids = await self._require_nonempty_selection(run)
         fulltext_service = CandidateFulltextService(
             self._session,
@@ -320,7 +347,7 @@ class CandidateReviewService:
                 )
 
         return CandidatePreparationBatchResponse(
-            run_id=run.id,
+            run_id=run_id,
             selected_count=len(selected_ids),
             queued_count=queued_count,
             items=items,
@@ -338,6 +365,9 @@ class CandidateReviewService:
             raise RuntimeError("批量加入集合必须提供对象存储")
 
         run = await self._owned_finished_run(owner_user_id, collection_id, search_run_id)
+        # Per-candidate rollbacks expire ORM instances. Preserve the scalar needed by the
+        # response before entering the independently settled admission loop.
+        run_id = run.id
         selected_ids = await self._require_nonempty_selection(run)
         fulltext_service = CandidateFulltextService(self._session, self._session_store)
         admission_service = ResearchCollectionAdmissionService(
@@ -405,7 +435,7 @@ class CandidateReviewService:
             )
 
         return CandidateAdmissionBatchResponse(
-            run_id=run.id,
+            run_id=run_id,
             selected_count=len(selected_ids),
             admitted_count=admitted_count,
             already_joined_count=already_joined_count,
@@ -530,16 +560,50 @@ class CandidateReviewService:
         return run.redis_session_key
 
     @staticmethod
-    def _stable_sorted(candidates: tuple[UnifiedCandidate, ...]) -> list[UnifiedCandidate]:
-        """分页不按异步评估结果重排，避免审核过程中出现候选跳页或重复。"""
+    def _stable_sorted(
+        candidates: tuple[UnifiedCandidate, ...],
+        *,
+        final_relevance_order: bool,
+    ) -> list[UnifiedCandidate]:
+        """运行中保持发现顺序；终态按相关性优先且使用稳定辅助信号。"""
+        if not final_relevance_order:
+            return sorted(
+                candidates,
+                key=lambda candidate: (
+                    -(candidate.published_year or 0),
+                    candidate.title_key.casefold(),
+                    str(candidate.candidate_id),
+                ),
+            )
         return sorted(
             candidates,
             key=lambda candidate: (
+                CandidateReviewService._final_relevance_rank(candidate),
+                -len(candidate.source_records),
+                candidate.is_open_access is not True,
                 -(candidate.published_year or 0),
                 candidate.title_key.casefold(),
                 str(candidate.candidate_id),
             ),
         )
+
+    @staticmethod
+    def _final_relevance_rank(candidate: UnifiedCandidate) -> int:
+        """终态将语义层级置顶；待评估、失败、跳过记录明确放在所有层级之后。"""
+        if (
+            candidate.relevance_state is CandidateRelevanceState.COMPLETED
+            and candidate.relevance_assessment is not None
+        ):
+            return _RELEVANCE_LEVEL_RANK[candidate.relevance_assessment.level]
+        return _INCOMPLETE_RELEVANCE_STATE_RANK.get(candidate.relevance_state, 6)
+
+    @staticmethod
+    def _uses_final_relevance_order(run: SearchRun) -> bool:
+        """只有可审核终态切换为相关性排序，运行中游标继续使用发现顺序。"""
+        return run.status in {
+            SearchRunStatus.COMPLETED.value,
+            SearchRunStatus.PARTIAL_FAILED.value,
+        }
 
     @staticmethod
     def _matches_filter(
@@ -701,10 +765,16 @@ class CandidateReviewService:
         query: str,
         review_filter: CandidateReviewFilter,
         limit: int,
+        sort_version: str,
     ) -> str:
-        """把游标绑定到筛选条件，防止旧游标穿透到不同结果集。"""
+        """把游标绑定到筛选与排序语义，防止旧游标穿透到不同结果集。"""
         value = json.dumps(
-            {"query": query, "filter": review_filter.value, "limit": limit},
+            {
+                "query": query,
+                "filter": review_filter.value,
+                "limit": limit,
+                "sort_version": sort_version,
+            },
             ensure_ascii=False,
             sort_keys=True,
         )

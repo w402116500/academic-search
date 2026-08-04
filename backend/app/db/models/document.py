@@ -203,11 +203,17 @@ class IngestionRun(UUIDPrimaryKeyMixin, Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="运行结束时间"
     )
+    submitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+        comment="确认构建后实际投递到 Worker 的时间",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("CURRENT_TIMESTAMP"),
-        comment="任务投递时间",
+        comment="运行记录创建时间",
     )
 
     document: Mapped[Document] = relationship(back_populates="ingestion_runs")

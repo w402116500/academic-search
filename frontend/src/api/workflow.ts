@@ -121,9 +121,13 @@ export const retrySearch = (workspaceId: string, runId: string): Promise<SearchR
 export const retryCandidateRelevance = (
   workspaceId: string,
   runId: string,
-  candidateId: string,
 ): Promise<SearchCandidatesResponse> =>
   apiFetch<SearchCandidatesResponse>(
-    `/api/v1/collections/${workspaceId}/search-runs/${runId}/candidates/${candidateId}/relevance/retry`,
+    `/api/v1/collections/${workspaceId}/search-runs/${runId}/relevance/retry`,
     { method: "POST" },
   );
+
+export const cancelCandidateRelevance = (workspaceId: string, runId: string): Promise<SearchRun> =>
+  apiFetch<SearchRun>(`/api/v1/collections/${workspaceId}/search-runs/${runId}/relevance/cancel`, {
+    method: "POST",
+  });

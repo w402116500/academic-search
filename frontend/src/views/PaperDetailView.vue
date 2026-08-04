@@ -1,20 +1,22 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { useMutation, useQuery } from "@tanstack/vue-query";
-import { ArrowLeft, Clipboard, FileDown, LoaderCircle, Plus, ShieldCheck } from "@lucide/vue";
-import { RouterLink, useRoute } from "vue-router";
+import { ArrowLeft, Clipboard, FileDown, LoaderCircle, ShieldCheck, Upload } from "@lucide/vue";
+import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import {
-  admitFulltext,
   getCandidateCitation,
   getFulltext,
   requestFulltext,
+  uploadAuthorizedFulltext,
 } from "@/api/collections";
+import { updateCandidateSelection } from "@/api/workflow";
 import {
   canRequestFulltext,
   citationReadinessMessage,
   fulltextStatusLabel,
   isFulltextTerminal,
+  presentFulltextVerification,
 } from "@/features/research/search-run-state";
 import {
   candidateLanguageLabel,
@@ -24,6 +26,7 @@ import { getSearchCandidate } from "@/api/workflow";
 import type { CitationFormat, FulltextResponse } from "@/api/types";
 
 const route = useRoute();
+const router = useRouter();
 const workspaceId = computed(() => String(route.params.workspaceId));
 const runId = computed(() => String(route.query.run ?? ""));
 const candidateId = computed(() => String(route.params.candidateId));
@@ -40,6 +43,9 @@ const candidateQuery = useQuery({
 const candidate = computed(() => candidateQuery.data.value?.candidate);
 const fulltext = ref<FulltextResponse | null>(null);
 const toast = ref<string | null>(null);
+const uploadInput = ref<HTMLInputElement | null>(null);
+const uploadFile = ref<File | null>(null);
+const uploadAuthorized = ref(false);
 const citationFormat = ref<CitationFormat>("gb_t_7714_2015_numeric");
 const citationReady = computed(() => candidate.value?.citation?.status === "ready");
 const canStartFulltext = computed(
@@ -48,6 +54,16 @@ const canStartFulltext = computed(
 const fulltextIsProcessing = computed(
   () => Boolean(fulltext.value) && !isFulltextTerminal(fulltext.value?.status),
 );
+const canUploadAuthorizedPdf = computed(() => {
+  const state = fulltext.value;
+  return Boolean(
+    state &&
+    (state.status === "requires_upload" ||
+      state.status === "rejected" ||
+      (state.status === "failed" && state.error?.retryable === false)),
+  );
+});
+const fulltextPresentation = computed(() => presentFulltextVerification(fulltext.value));
 let timer: number | undefined;
 
 /** 刷新详情页后恢复已有全文任务状态，而不是只等待本页新发起的操作。 */
@@ -81,18 +97,53 @@ const citationQuery = useQuery({
   enabled: computed(() => Boolean(runId.value) && citationReady.value),
 });
 const fulltextMutation = useMutation({
-  mutationFn: () => requestFulltext(workspaceId.value, runId.value, candidateId.value),
+  mutationFn: async () => {
+    // 详情页发起的单篇核验也必须进入本次准备清单，避免核验完成后脱离批量交接页面。
+    await updateCandidateSelection(workspaceId.value, runId.value, [candidateId.value], true);
+    return requestFulltext(workspaceId.value, runId.value, candidateId.value);
+  },
   onSuccess: (result) => {
     fulltext.value = result;
   },
   onError: (error) => (toast.value = error instanceof Error ? error.message : "全文任务无法启动。"),
 });
-const admissionMutation = useMutation({
-  mutationFn: () => admitFulltext(workspaceId.value, runId.value, candidateId.value),
-  onSuccess: () => (toast.value = "已加入待确认研究集合。"),
-  onError: (error) =>
-    (toast.value = error instanceof Error ? error.message : "当前文献还不能加入集合。"),
+const uploadMutation = useMutation({
+  mutationFn: () => {
+    if (!uploadFile.value) throw new Error("请先选择要上传的 PDF。");
+    return uploadAuthorizedFulltext(
+      workspaceId.value,
+      runId.value,
+      candidateId.value,
+      uploadFile.value,
+    );
+  },
+  onSuccess: (result) => {
+    fulltext.value = result;
+    uploadFile.value = null;
+    uploadAuthorized.value = false;
+    if (uploadInput.value) uploadInput.value.value = "";
+  },
+  onError: (error) => {
+    toast.value = error instanceof Error ? error.message : "PDF 上传或校验无法完成。";
+  },
 });
+
+function openVerificationTask(): void {
+  void router.push({
+    name: "workspace-verification",
+    params: { workspaceId: workspaceId.value },
+    query: { run: runId.value },
+  });
+}
+
+function chooseUpload(): void {
+  uploadInput.value?.click();
+}
+
+function selectUpload(event: Event): void {
+  const target = event.target as HTMLInputElement;
+  uploadFile.value = target.files?.[0] ?? null;
+}
 
 function poll(): void {
   if (timer) window.clearInterval(timer);
@@ -191,12 +242,55 @@ onUnmounted(() => {
           v-else-if="fulltext?.status === 'available'"
           class="primary-button"
           type="button"
-          :disabled="admissionMutation.isPending.value"
-          @click="admissionMutation.mutate()"
+          @click="openVerificationTask"
         >
-          <Plus :size="15" />加入研究集合
+          <ShieldCheck :size="15" />前往核验任务加入集合
+        </button>
+        <button
+          v-else-if="canUploadAuthorizedPdf"
+          class="primary-button"
+          type="button"
+          @click="chooseUpload"
+        >
+          <Upload :size="15" />选择有权处理的 PDF
         </button>
       </div>
+      <section
+        v-if="canUploadAuthorizedPdf"
+        class="upload-authorization-panel"
+        aria-label="上传有权处理的 PDF"
+      >
+        <input
+          ref="uploadInput"
+          class="visually-hidden"
+          type="file"
+          accept="application/pdf,.pdf"
+          @change="selectUpload"
+        />
+        <div>
+          <strong>上传有权处理的 PDF</strong>
+          <p>文件会先校验类型、PDF 签名、大小和哈希，再进入本次核验任务。</p>
+        </div>
+        <p v-if="uploadFile" class="upload-selected-file">{{ uploadFile.name }}</p>
+        <label class="upload-authorization-check">
+          <input v-model="uploadAuthorized" type="checkbox" />
+          <span>我确认有权处理并上传这篇文献的 PDF。</span>
+        </label>
+        <div class="upload-authorization-actions">
+          <button class="secondary-button" type="button" @click="chooseUpload">
+            <Upload :size="15" />{{ uploadFile ? "更换 PDF" : "选择 PDF" }}
+          </button>
+          <button
+            class="primary-button"
+            type="button"
+            :disabled="!uploadFile || !uploadAuthorized || uploadMutation.isPending.value"
+            @click="uploadMutation.mutate()"
+          >
+            <LoaderCircle v-if="uploadMutation.isPending.value" class="spin" :size="15" />
+            <Upload v-else :size="15" />上传并核验
+          </button>
+        </div>
+      </section>
       <div class="paper-grid">
         <div class="paper-main">
           <section>
@@ -228,27 +322,19 @@ onUnmounted(() => {
             <ShieldCheck :size="17" />
             <div>
               <strong>{{
-                fulltext?.status === "available"
-                  ? "全文已核验"
-                  : fulltext?.status === "rejected"
-                    ? "未通过全文准入"
-                    : !candidate.doi
-                      ? "缺少 DOI"
-                      : !fulltext
-                        ? "待准备全文核验"
-                        : "尚未进入研究集合"
+                fulltext
+                  ? fulltextPresentation.label
+                  : !candidate.doi
+                    ? "缺少 DOI"
+                    : "待准备全文核验"
               }}</strong>
               <p>
                 {{
-                  fulltext?.status === "available"
-                    ? "可以加入待确认集合。"
-                    : fulltext?.status === "rejected"
-                      ? fulltext.error?.message || "该文献不满足全文准入条件。"
-                      : !candidate.doi
-                        ? "缺少 DOI，不能进入后续研究集合。"
-                        : !fulltext
-                          ? `${citationReadinessMessage(candidate.citation)} 可以开始全文核验，系统会先按 DOI 尝试补齐题录。`
-                          : "有 DOI 不等于系统已经拥有可研究正文。"
+                  fulltext
+                    ? fulltextPresentation.detail
+                    : !candidate.doi
+                      ? "缺少 DOI，不能进入后续研究集合。"
+                      : `${citationReadinessMessage(candidate.citation)} 可以开始全文核验，系统会先按 DOI 尝试补齐题录。`
                 }}
               </p>
             </div>

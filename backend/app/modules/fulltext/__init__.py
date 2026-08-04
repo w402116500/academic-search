@@ -1,6 +1,6 @@
 """受控全文获取、校验与暂存能力。"""
 
-from app.modules.fulltext.acquisition import OpenAccessPdfAcquirer
+from app.modules.fulltext.acquisition import AuthorizedPdfUploader, OpenAccessPdfAcquirer
 from app.modules.fulltext.contracts import (
     AcquiredFulltext,
     CandidateFulltextState,
@@ -17,6 +17,7 @@ from app.modules.fulltext.storage import Boto3StagingObjectStorage, FulltextStor
 
 __all__ = [
     "AcquiredFulltext",
+    "AuthorizedPdfUploader",
     "CandidateFulltextState",
     "Boto3StagingObjectStorage",
     "FulltextAcquisitionError",

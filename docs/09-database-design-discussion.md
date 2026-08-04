@@ -1,6 +1,6 @@
 # academic-search 数据库设计讨论稿
 
-状态：SQLAlchemy 模型、严格准入 Alembic 迁移、开放获取直链 PDF 的受控下载暂存、研究集合入库事务、准入与集合构建 API，以及 RAG 入库 Worker 已实现；RAG 检索、研究对话、回答 trace 与治理 API 尚未实现。
+状态：SQLAlchemy 模型、严格准入 Alembic 迁移、开放获取直链 PDF 的受控下载暂存、研究集合入库事务、准入与集合构建 API、RAG 入库 Worker、研究会话、研究运行、回答证据与检索 trace 均已实现。当前仍需补齐用户上传文件接入、运行中取消、预算与指标等治理能力；实施对齐情况见 [`11-implementation-alignment-discussion.md`](11-implementation-alignment-discussion.md)。
 
 定位：定义 PostgreSQL 的业务数据模型，以及它与对象存储、Milvus、Redis 的数据边界。首版遵循一个明确前提：**检索结果只是临时候选；只有 DOI 题录核验完成、用户主动选择并且合法正文已实际取得的文献，才写入 PostgreSQL。**
 

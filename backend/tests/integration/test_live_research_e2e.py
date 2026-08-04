@@ -51,9 +51,10 @@ class CapturingResearchQueue:
     def __init__(self) -> None:
         self.enqueued_run_ids: list[UUID] = []
 
-    async def enqueue_research(self, research_run_id: UUID) -> str:
+    async def enqueue_research(self, research_run_id: UUID, *, retry: bool = False) -> str:
         self.enqueued_run_ids.append(research_run_id)
-        return f"live-research-{research_run_id}"
+        suffix = "-retry" if retry else ""
+        return f"live-research-{research_run_id}{suffix}"
 
 
 def _live_test_is_enabled() -> bool:
@@ -69,6 +70,8 @@ async def test_live_research_worker_returns_citable_answer() -> None:
         pytest.skip(f"仅在 {_LIVE_TEST_ENVIRONMENT_FLAG}=1 时运行真实 RAG 验收")
 
     ingestion_settings = get_ingestion_settings()
+    research_settings = get_research_settings()
+    assert research_settings.reranker_enabled
     embedder = OpenAICompatibleTextEmbedder(ingestion_settings)
     vector_index = MilvusDocumentChunkIndex(ingestion_settings)
     owner_user_id, collection_id, paper_id, document_id, ingestion_run_id = (
@@ -235,6 +238,20 @@ async def test_live_research_worker_returns_citable_answer() -> None:
             assert {evidence.chunk_id for evidence in run.evidences}.issubset(set(chunk_ids))
             assert all(evidence.citation_excerpt for evidence in run.evidences)
             assert all(evidence.locator_snapshot for evidence in run.evidences)
+            claim_verification = run.retrieval_trace["answer_claim_verification"]
+            assert claim_verification["status"] == "supported"
+            assert claim_verification["claim_count"] > 0
+            assert claim_verification["unsupported_claim_count"] == 0
+            reranker_trace = run.retrieval_trace["reranker"]
+            assert isinstance(reranker_trace, dict)
+            assert reranker_trace["enabled"] is True
+            assert reranker_trace["status"] == "completed"
+            assert reranker_trace["adapter"] == "http_reranker"
+            candidate_count = reranker_trace["candidate_count"]
+            returned_count = reranker_trace["returned_count"]
+            assert isinstance(candidate_count, int)
+            assert isinstance(returned_count, int)
+            assert candidate_count >= returned_count >= 1
             langgraph_thread_id = f"research-{research_run_id}"
 
         redis = redis_client_from_environment()

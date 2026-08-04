@@ -20,7 +20,7 @@ export type SearchRunStage =
   | "citation_enrichment"
   | "completed";
 export type FulltextStatus =
-  "queued" | "downloading" | "validating" | "available" | "failed" | "rejected";
+  "queued" | "downloading" | "validating" | "available" | "failed" | "rejected" | "requires_upload";
 export type CitationFormat =
   "gb_t_7714_2015_numeric" | "apa_7" | "mla_9" | "chicago_author_date" | "bibtex";
 /** 候选阶段按来源声明或文本规则识别出的主语言。 */
@@ -310,6 +310,7 @@ export interface IngestionRun {
   is_current: boolean;
   started_at: string | null;
   finished_at: string | null;
+  submitted_at: string | null;
   created_at: string;
 }
 
@@ -425,7 +426,9 @@ export interface ResearchRun {
   retrieval_trace: Record<string, unknown>;
   error_code: string | null;
   error_message: string | null;
+  cancel_requested_at: string | null;
   started_at: string | null;
+  stage_started_at: string | null;
   finished_at: string | null;
   created_at: string;
   evidences: ResearchEvidence[];

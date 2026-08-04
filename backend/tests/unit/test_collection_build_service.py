@@ -11,9 +11,14 @@ import pytest
 from app.db.models.collection import CollectionPaper, ResearchCollection
 from app.db.models.document import Document, IngestionRun
 from app.db.models.paper import Paper
-from app.modules.collections.build_contracts import IngestionRunStatus
+from app.modules.collections.build_contracts import (
+    CollectionBuildError,
+    CollectionBuildErrorCode,
+    IngestionRunStatus,
+)
 from app.modules.collections.build_service import ResearchCollectionBuildService
 from app.modules.ingestion.job_queue import IngestionQueueError
+from app.modules.ingestion.settings import IngestionSettings
 from app.modules.workflow.state import WorkspaceWorkflowStage
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -148,19 +153,29 @@ def _run(*, status: str = "pending", attempt_no: int = 1) -> IngestionRun:
     return run
 
 
+def _ingestion_settings(*, user_limit: int = 40, global_limit: int = 1_000) -> IngestionSettings:
+    """仅构造集合构建服务读取的配额字段，避免单元测试依赖本地基础设施配置。"""
+    return IngestionSettings.model_construct(
+        rag_user_daily_ingestion_run_limit=user_limit,
+        rag_global_daily_ingestion_run_limit=global_limit,
+    )
+
+
 @pytest.mark.asyncio
 async def test_build_promotes_all_pending_runs_before_dispatching_workers() -> None:
     """构建确认必须先让 pending 变为 queued，避免 Worker 读取旧状态后直接退出。"""
     collection = _collection()
     run = _run()
     session = FakeSession(
-        scalar_values=[collection, run, collection],
+        scalar_values=[collection, 0, 0, run, collection],
         scalars_values=[[run]],
         execute_values=[[(IngestionRunStatus.QUEUED.value, False)]],
     )
     queue = FakeQueue()
 
-    result = await ResearchCollectionBuildService(cast(AsyncSession, session), queue).build(
+    result = await ResearchCollectionBuildService(
+        cast(AsyncSession, session), queue, settings=_ingestion_settings()
+    ).build(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
     )
@@ -170,6 +185,7 @@ async def test_build_promotes_all_pending_runs_before_dispatching_workers() -> N
     assert queue.enqueued_run_ids == [_RUN_ID]
     assert collection.workflow_stage == WorkspaceWorkflowStage.COLLECTION_BUILDING.value
     assert result.runs[0].status is IngestionRunStatus.QUEUED
+    assert run.submitted_at is not None
 
 
 @pytest.mark.asyncio
@@ -178,13 +194,13 @@ async def test_build_marks_only_the_unavailable_queue_run_as_failed() -> None:
     collection = _collection()
     run = _run()
     session = FakeSession(
-        scalar_values=[collection, run, collection],
+        scalar_values=[collection, 0, 0, run, collection],
         scalars_values=[[run]],
         execute_values=[[(IngestionRunStatus.FAILED.value, False)]],
     )
 
     result = await ResearchCollectionBuildService(
-        cast(AsyncSession, session), FakeQueue(fail=True)
+        cast(AsyncSession, session), FakeQueue(fail=True), settings=_ingestion_settings()
     ).build(owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID)
 
     assert run.status == IngestionRunStatus.FAILED.value
@@ -201,7 +217,7 @@ async def test_retry_creates_new_queued_run_without_overwriting_failure() -> Non
     previous = _run(status="failed", attempt_no=2)
     previous.error_code = "embedding_failed"
     session = FakeSession(
-        scalar_values=[_LATEST_ADDED_RUN, collection],
+        scalar_values=[0, 0, _LATEST_ADDED_RUN, collection],
         execute_values=[
             [FakeRow((collection, previous))],
             [(IngestionRunStatus.QUEUED.value, False)],
@@ -209,7 +225,9 @@ async def test_retry_creates_new_queued_run_without_overwriting_failure() -> Non
     )
     queue = FakeQueue()
 
-    result = await ResearchCollectionBuildService(cast(AsyncSession, session), queue).retry_run(
+    result = await ResearchCollectionBuildService(
+        cast(AsyncSession, session), queue, settings=_ingestion_settings()
+    ).retry_run(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
         ingestion_run_id=_RUN_ID,
@@ -222,6 +240,57 @@ async def test_retry_creates_new_queued_run_without_overwriting_failure() -> Non
     assert previous.error_code == "embedding_failed"
     assert queue.enqueued_run_ids == [new_run.id]
     assert result.runs[0].ingestion_run_id == new_run.id
+    assert new_run.submitted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_build_rejects_a_batch_that_exceeds_the_user_daily_submission_limit() -> None:
+    """一次批量确认不能通过只限制请求数绕过文献运行额度。"""
+    collection = _collection()
+    first, second = _run(), _run()
+    second.id = UUID("00000000-0000-0000-0000-000000000706")
+    session = FakeSession(
+        scalar_values=[collection, 0],
+        scalars_values=[[first, second]],
+    )
+
+    with pytest.raises(CollectionBuildError) as error:
+        await ResearchCollectionBuildService(
+            cast(AsyncSession, session),
+            FakeQueue(),
+            settings=_ingestion_settings(user_limit=1),
+        ).build(owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID)
+
+    assert error.value.code is CollectionBuildErrorCode.USER_QUOTA_EXCEEDED
+    assert first.status == IngestionRunStatus.PENDING.value
+    assert second.status == IngestionRunStatus.PENDING.value
+    assert first.submitted_at is None
+    assert second.submitted_at is None
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_the_global_daily_submission_limit_before_creating_a_run() -> None:
+    """失败入库重试须与首次构建共用全局预算，且不生成半成品运行记录。"""
+    collection = _collection(stage="failed")
+    previous = _run(status="failed")
+    session = FakeSession(
+        scalar_values=[0, 1],
+        execute_values=[[FakeRow((collection, previous))]],
+    )
+
+    with pytest.raises(CollectionBuildError) as error:
+        await ResearchCollectionBuildService(
+            cast(AsyncSession, session),
+            FakeQueue(),
+            settings=_ingestion_settings(global_limit=1),
+        ).retry_run(
+            owner_user_id=_OWNER_ID,
+            collection_id=_COLLECTION_ID,
+            ingestion_run_id=_RUN_ID,
+        )
+
+    assert error.value.code is CollectionBuildErrorCode.GLOBAL_BUDGET_EXHAUSTED
+    assert session.added == []
 
 
 @pytest.mark.asyncio

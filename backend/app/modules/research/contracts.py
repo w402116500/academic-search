@@ -34,7 +34,7 @@ class ResearchRunStatus(StrEnum):
     AWAITING_CLARIFICATION = "awaiting_clarification"  # 当前集合证据不足，需要用户补充。
     COMPLETED = "completed"  # 已生成可追溯回答。
     FAILED = "failed"  # 基础设施或模型失败，可重试。
-    CANCELLED = "cancelled"  # 在 Worker 领取前被用户取消。
+    CANCELLED = "cancelled"  # 用户取消请求已在安全边界确认，不会生成回答。
 
 
 class ResearchRunStage(StrEnum):
@@ -92,7 +92,7 @@ RESEARCH_RUN_STAGE_DISPLAYS: dict[ResearchRunStage, ResearchRunStageDisplay] = {
         label="研究任务失败", description="执行失败，可查看原因后重试。"
     ),
     ResearchRunStage.CANCELLED: ResearchRunStageDisplay(
-        label="研究任务已取消", description="任务在执行前被取消，不会生成回答。"
+        label="研究任务已取消", description="已在安全执行边界停止，不会生成回答或新的引用证据。"
     ),
 }
 
@@ -108,6 +108,8 @@ class ResearchErrorCode(StrEnum):
     RUN_NOT_RETRYABLE = "research_run_not_retryable"
     RUN_NOT_CANCELLABLE = "research_run_not_cancellable"
     QUEUE_UNAVAILABLE = "research_queue_unavailable"
+    USER_QUOTA_EXCEEDED = "research_user_quota_exceeded"
+    GLOBAL_BUDGET_EXHAUSTED = "research_global_budget_exhausted"
 
 
 class ResearchError(RuntimeError):
@@ -213,7 +215,9 @@ class ResearchRunResponse(BaseModel):
     retrieval_trace: dict[str, Any]
     error_code: str | None
     error_message: str | None
+    cancel_requested_at: datetime | None
     started_at: datetime | None
+    stage_started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
     evidences: list[ResearchEvidenceResponse] = Field(default_factory=list)

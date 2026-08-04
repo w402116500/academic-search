@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import ipaddress
 import socket
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, Awaitable, Callable
 from datetime import UTC, datetime
 from tempfile import SpooledTemporaryFile
 from typing import BinaryIO, cast
@@ -55,6 +55,40 @@ class _AcquisitionFailure(Exception):
             retryable=retryable,
             http_status_code=http_status_code,
         )
+
+
+def validate_candidate_identity(candidate: UnifiedCandidate) -> str:
+    """确认候选和正式题录的 DOI 一致，供下载与有权上传共同复用。"""
+    citation = candidate.citation
+
+    if citation is None or citation.status is not CitationMetadataStatus.READY:
+        raise _AcquisitionFailure(
+            status=FulltextAcquisitionStatus.REJECTED,
+            code=FulltextAcquisitionErrorCode.CITATION_NOT_READY,
+            message="题录尚未完成 DOI 核验，不能处理全文。",
+            retryable=False,
+        )
+
+    doi = normalize_doi(candidate.doi)
+    citation_doi = normalize_doi(citation.doi)
+
+    if doi is None or citation_doi is None:
+        raise _AcquisitionFailure(
+            status=FulltextAcquisitionStatus.REJECTED,
+            code=FulltextAcquisitionErrorCode.MISSING_DOI,
+            message="候选缺少已核验 DOI，不能进入文献研究库。",
+            retryable=False,
+        )
+
+    if doi != citation_doi:
+        raise _AcquisitionFailure(
+            status=FulltextAcquisitionStatus.REJECTED,
+            code=FulltextAcquisitionErrorCode.DOI_MISMATCH,
+            message="候选 DOI 与核验题录不一致，不能处理全文。",
+            retryable=False,
+        )
+
+    return doi
 
 
 class OpenAccessPdfAcquirer:
@@ -130,34 +164,7 @@ class OpenAccessPdfAcquirer:
 
     def _validate_candidate(self, candidate: UnifiedCandidate) -> str:
         """在发起网络请求前落实 DOI、题录和开放获取三项准入条件。"""
-        citation = candidate.citation
-
-        if citation is None or citation.status is not CitationMetadataStatus.READY:
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.REJECTED,
-                code=FulltextAcquisitionErrorCode.CITATION_NOT_READY,
-                message="题录尚未完成 DOI 核验，不能获取全文。",
-                retryable=False,
-            )
-
-        doi = normalize_doi(candidate.doi)
-        citation_doi = normalize_doi(citation.doi)
-
-        if doi is None or citation_doi is None:
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.REJECTED,
-                code=FulltextAcquisitionErrorCode.MISSING_DOI,
-                message="候选缺少已核验 DOI，不能进入文献研究库。",
-                retryable=False,
-            )
-
-        if doi != citation_doi:
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.REJECTED,
-                code=FulltextAcquisitionErrorCode.DOI_MISMATCH,
-                message="候选 DOI 与核验题录不一致，不能自动获取全文。",
-                retryable=False,
-            )
+        doi = validate_candidate_identity(candidate)
 
         if candidate.is_open_access is not True:
             raise _AcquisitionFailure(
@@ -420,6 +427,147 @@ class OpenAccessPdfAcquirer:
         retryable: bool,
     ) -> FulltextAcquisitionResult:
         """统一构造网络和存储边界的运行时失败结果。"""
+        return FulltextAcquisitionResult(
+            candidate_id=candidate.candidate_id,
+            status=FulltextAcquisitionStatus.FAILED,
+            error=FulltextAcquisitionError(code=code, message=message, retryable=retryable),
+        )
+
+
+class AuthorizedPdfUploader:
+    """暂存用户明确授权处理的 PDF，不接受 URL、DOI 或对象键等客户端输入。"""
+
+    def __init__(
+        self, settings: FulltextAcquisitionSettings, storage: StagingObjectStorage
+    ) -> None:
+        self._settings = settings
+        self._storage = storage
+
+    async def acquire(
+        self,
+        *,
+        candidate: UnifiedCandidate,
+        chunks: AsyncIterable[bytes],
+        media_type: str | None,
+    ) -> FulltextAcquisitionResult:
+        """流式校验并暂存上传文件，候选身份和 DOI 只从服务端会话读取。"""
+        try:
+            doi = validate_candidate_identity(candidate)
+            content_type = (media_type or "").split(";", maxsplit=1)[0].strip().lower()
+            if content_type != _PDF_MEDIA_TYPE:
+                raise _AcquisitionFailure(
+                    status=FulltextAcquisitionStatus.REJECTED,
+                    code=FulltextAcquisitionErrorCode.INVALID_CONTENT_TYPE,
+                    message="上传文件必须声明为 application/pdf。",
+                    retryable=False,
+                )
+            document = await self._stream_validate_and_store(
+                candidate=candidate,
+                doi=doi,
+                chunks=chunks,
+            )
+            return FulltextAcquisitionResult(
+                candidate_id=candidate.candidate_id,
+                status=FulltextAcquisitionStatus.AVAILABLE,
+                document=document,
+            )
+        except _AcquisitionFailure as exc:
+            return FulltextAcquisitionResult(
+                candidate_id=candidate.candidate_id,
+                status=exc.status,
+                error=exc.error,
+            )
+        except FulltextStorageError:
+            return self._failure(
+                candidate,
+                FulltextAcquisitionErrorCode.STORAGE_ERROR,
+                "PDF 已通过校验，但暂时无法写入私有对象存储。",
+                retryable=True,
+            )
+        except (OSError, RuntimeError):
+            return self._failure(
+                candidate,
+                FulltextAcquisitionErrorCode.TASK_ERROR,
+                "上传内容读取失败，请重新选择 PDF 后重试。",
+                retryable=True,
+            )
+
+    async def _stream_validate_and_store(
+        self,
+        *,
+        candidate: UnifiedCandidate,
+        doi: str,
+        chunks: AsyncIterable[bytes],
+    ) -> AcquiredFulltext:
+        """在写入对象存储前完成大小、签名与哈希核验，避免请求体直接落盘。"""
+        sha256 = hashlib.sha256()
+        byte_size = 0
+        signature_prefix = bytearray()
+
+        with SpooledTemporaryFile(max_size=_MEMORY_SPOOL_LIMIT, mode="w+b") as temporary_file:
+            async for chunk in chunks:
+                if not isinstance(chunk, bytes):
+                    raise _AcquisitionFailure(
+                        status=FulltextAcquisitionStatus.REJECTED,
+                        code=FulltextAcquisitionErrorCode.INVALID_PDF,
+                        message="上传内容不是可验证的 PDF 二进制流。",
+                        retryable=False,
+                    )
+                byte_size += len(chunk)
+                if byte_size > self._settings.fulltext_max_file_size_bytes:
+                    raise _AcquisitionFailure(
+                        status=FulltextAcquisitionStatus.REJECTED,
+                        code=FulltextAcquisitionErrorCode.FILE_TOO_LARGE,
+                        message="上传 PDF 超过允许的最大大小。",
+                        retryable=False,
+                    )
+                if len(signature_prefix) < _PDF_SIGNATURE_SEARCH_LIMIT:
+                    remaining = _PDF_SIGNATURE_SEARCH_LIMIT - len(signature_prefix)
+                    signature_prefix.extend(chunk[:remaining])
+                sha256.update(chunk)
+                temporary_file.write(chunk)
+
+            if not byte_size or _PDF_SIGNATURE not in signature_prefix:
+                raise _AcquisitionFailure(
+                    status=FulltextAcquisitionStatus.REJECTED,
+                    code=FulltextAcquisitionErrorCode.INVALID_PDF,
+                    message="上传内容未通过 PDF 文件签名校验。",
+                    retryable=False,
+                )
+
+            digest = sha256.hexdigest()
+            object_key = (
+                f"{self._settings.fulltext_staging_prefix}/{candidate.candidate_id}/{digest}.pdf"
+            )
+            await self._storage.upload_pdf(
+                object_key=object_key,
+                file=cast(BinaryIO, temporary_file),
+                sha256=digest,
+            )
+
+        return AcquiredFulltext(
+            candidate_id=candidate.candidate_id,
+            doi=doi,
+            source_url=f"user-upload://candidate/{candidate.candidate_id}",
+            staging_object_key=object_key,
+            original_filename="authorized-upload.pdf",
+            media_type=_PDF_MEDIA_TYPE,
+            byte_size=byte_size,
+            sha256=digest,
+            origin_kind="user_upload",
+            access_rights="user_upload",
+            acquired_at=datetime.now(UTC),
+        )
+
+    @staticmethod
+    def _failure(
+        candidate: UnifiedCandidate,
+        code: FulltextAcquisitionErrorCode,
+        message: str,
+        *,
+        retryable: bool,
+    ) -> FulltextAcquisitionResult:
+        """保持上传异常与下载异常相同的可恢复状态语义。"""
         return FulltextAcquisitionResult(
             candidate_id=candidate.candidate_id,
             status=FulltextAcquisitionStatus.FAILED,

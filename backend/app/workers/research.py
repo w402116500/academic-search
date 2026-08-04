@@ -23,8 +23,14 @@ from app.modules.research.graph import (
     OpenAICompatibleResearchModel,
     ResearchGraphRunner,
     ResearchModelError,
+    ResearchRunCancelled,
 )
-from app.modules.research.retrieval import MilvusResearchVectorSearch, ResearchRetriever
+from app.modules.research.retrieval import (
+    HttpResearchReranker,
+    MilvusResearchVectorSearch,
+    ResearchReranker,
+    ResearchRetriever,
+)
 from app.modules.research.settings import ResearchSettings, get_research_settings
 from app.modules.workflow.settings import WorkflowSettings, get_workflow_settings
 from app.workers.queues import RESEARCH_QUEUE_NAME
@@ -47,6 +53,7 @@ class ResearchWorkerDependencies:
     workflow_settings: WorkflowSettings
     embedder: OpenAICompatibleTextEmbedder
     vector_search: MilvusResearchVectorSearch
+    reranker: ResearchReranker | None
     model: OpenAICompatibleResearchModel
 
 
@@ -61,6 +68,9 @@ async def startup(ctx: dict[str, Any]) -> None:
         workflow_settings=workflow_settings,
         embedder=OpenAICompatibleTextEmbedder(ingestion_settings),
         vector_search=MilvusResearchVectorSearch(ingestion_settings),
+        reranker=(
+            HttpResearchReranker(research_settings) if research_settings.reranker_enabled else None
+        ),
         model=OpenAICompatibleResearchModel(workflow_settings, research_settings),
     )
 
@@ -83,8 +93,15 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
     ) -> None:
         """每次图节点进入公开阶段时更新 PostgreSQL，再写入短期 Redis 事件。"""
         async with async_session_factory() as stage_session:
-            updated = await ResearchExecutionService(stage_session).set_stage(run_id, stage)
+            execution = ResearchExecutionService(stage_session)
+            updated = await execution.set_stage(run_id, stage)
         if not updated:
+            async with async_session_factory() as cancellation_session:
+                cancelled = await ResearchExecutionService(
+                    cancellation_session
+                ).is_cancel_requested(run_id)
+            if cancelled:
+                raise ResearchRunCancelled("研究运行已在阶段边界请求停止。")
             return
         redis = redis_client_from_environment()
         try:
@@ -102,6 +119,11 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
         finally:
             await redis.aclose()
 
+    async def cancellation_requested() -> bool:
+        """让图在每个模型/检索调用边界读取 PostgreSQL 中的协作取消标记。"""
+        async with async_session_factory() as cancellation_session:
+            return await ResearchExecutionService(cancellation_session).is_cancel_requested(run_id)
+
     try:
         async with async_session_factory() as retrieval_session:
             retriever = ResearchRetriever(
@@ -109,6 +131,7 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
                 embedder=dependencies.embedder,
                 vector_search=dependencies.vector_search,
                 settings=dependencies.research_settings,
+                reranker=dependencies.reranker,
             )
             outcome = await ResearchGraphRunner(
                 retriever=retriever,
@@ -116,7 +139,23 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
                 settings=dependencies.research_settings,
                 checkpoint_database_url=dependencies.research_settings.checkpoint_database_url,
                 stage_callback=publish_stage,
+                cancellation_checker=cancellation_requested,
             ).run(context)
+    except ResearchRunCancelled:
+        async with async_session_factory() as cancellation_session:
+            cancelled = await ResearchExecutionService(cancellation_session).finalize_cancellation(
+                run_id
+            )
+        if cancelled:
+            await _publish_terminal_event(
+                run_id=run_id,
+                settings=dependencies.research_settings,
+                status=ResearchRunStatus.CANCELLED,
+                stage=ResearchRunStage.CANCELLED,
+                message="研究任务已在安全执行边界停止。",
+                evidence_count=0,
+            )
+        return {"research_run_id": str(run_id), "status": "cancelled", "evidence_count": 0}
     except ResearchModelError:
         logger.exception("研究模型未生成可核验的结构化回答：research_run_id=%s", run_id)
         error_code = "research_model_failed"
@@ -128,7 +167,21 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
         error_message = "研究任务执行失败，请稍后重试。"
     else:
         async with async_session_factory() as completion_session:
-            await ResearchExecutionService(completion_session).complete(run_id, outcome)
+            persisted_status = await ResearchExecutionService(completion_session).complete(
+                run_id, outcome
+            )
+        if persisted_status is None:
+            return {"research_run_id": str(run_id), "status": "ignored", "evidence_count": 0}
+        if persisted_status is ResearchRunStatus.CANCELLED:
+            await _publish_terminal_event(
+                run_id=run_id,
+                settings=dependencies.research_settings,
+                status=ResearchRunStatus.CANCELLED,
+                stage=ResearchRunStage.CANCELLED,
+                message="研究任务已在安全执行边界停止。",
+                evidence_count=0,
+            )
+            return {"research_run_id": str(run_id), "status": "cancelled", "evidence_count": 0}
         await _publish_terminal_event(
             run_id=run_id,
             settings=dependencies.research_settings,
@@ -146,10 +199,20 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
         }
 
     async with async_session_factory() as failure_session:
-        failed = await ResearchExecutionService(failure_session).fail(
+        terminal_status = await ResearchExecutionService(failure_session).fail(
             run_id, code=error_code, message=error_message
         )
-    if failed:
+    if terminal_status is ResearchRunStatus.CANCELLED:
+        await _publish_terminal_event(
+            run_id=run_id,
+            settings=dependencies.research_settings,
+            status=ResearchRunStatus.CANCELLED,
+            stage=ResearchRunStage.CANCELLED,
+            message="研究任务已在安全执行边界停止。",
+            evidence_count=0,
+        )
+        return {"research_run_id": str(run_id), "status": "cancelled", "evidence_count": 0}
+    if terminal_status is ResearchRunStatus.FAILED:
         await _publish_terminal_event(
             run_id=run_id,
             settings=dependencies.research_settings,

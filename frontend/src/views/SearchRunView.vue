@@ -10,11 +10,16 @@ import {
   ListTree,
   LoaderCircle,
   RotateCcw,
+  ScanSearch,
 } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { apiUrl, getAccessToken, ApiError } from "@/api/client";
-import { searchRunCandidateCount } from "@/features/research/search-run-state";
+import {
+  isSearchRunProgressStalled,
+  searchRunCandidateCount,
+  searchRunRelevanceProgress,
+} from "@/features/research/search-run-state";
 import { getCurrentSearchRun, retrySearch, startSearch } from "@/api/workflow";
 import type { ProviderSummary, SearchProgressEvent, SearchRun, SearchRunStage } from "@/api/types";
 
@@ -26,6 +31,13 @@ const run = ref<SearchRun | null>(null);
 const errorMessage = ref<string | null>(null);
 const loading = ref(true);
 const controller = ref<AbortController | null>(null);
+const lastProgressMessage = ref<string | null>(null);
+const lastProgressAt = ref<number | null>(null);
+const progressStreamStartedAt = ref<number | null>(null);
+const streamProblemMessage = ref<string | null>(null);
+const reconnecting = ref(false);
+const progressClock = ref(Date.now());
+let progressClockTimer: ReturnType<typeof setInterval> | null = null;
 const stages: { key: SearchRunStage; title: string; detail: string; icon: typeof DatabaseZap }[] = [
   {
     key: "provider_search",
@@ -35,6 +47,12 @@ const stages: { key: SearchRunStage; title: string; detail: string; icon: typeof
   },
   { key: "normalize", title: "记录规整", detail: "统一标题、作者、DOI 与摘要字段", icon: ListTree },
   { key: "triage", title: "去重与初筛", detail: "合并重复记录并检查候选边界", icon: FileCheck2 },
+  {
+    key: "relevance_assessment",
+    title: "相关性判断",
+    detail: "在完整候选集合中统一判断与研究方向的关系",
+    icon: ScanSearch,
+  },
   {
     key: "citation_enrichment",
     title: "题录补全",
@@ -48,15 +66,79 @@ const candidatesReady = computed(() =>
   ["completed", "partial_failed"].includes(run.value?.status ?? ""),
 );
 const candidateCount = computed(() => searchRunCandidateCount(run.value?.candidate_counts ?? {}));
+const relevanceProgress = computed(() =>
+  searchRunRelevanceProgress(run.value?.candidate_counts ?? {}),
+);
 const stageIndex = (stage: string | undefined): number =>
   stages.findIndex((item) => item.key === stage);
 const stageState = (stage: SearchRunStage): "done" | "active" | "locked" => {
-  // 即使部分来源失败，只要运行已产生候选，四个可验证处理阶段都已经走完。
+  // 即使部分来源失败，只要运行已产生候选，五个可验证处理阶段都已经走完。
   if (candidatesReady.value) return "done";
   const current = stageIndex(run.value?.stage);
   const index = stageIndex(stage);
   return current > index ? "done" : current === index ? "active" : "locked";
 };
+const relevanceProgressLabel = computed(() => {
+  const { total, completed, failed } = relevanceProgress.value;
+  if (!total) return "正在准备相关性判断";
+  if (failed) return `已分析 ${completed} / ${total} 篇，${failed} 篇需要重试`;
+  return `已分析 ${completed} / ${total} 篇`;
+});
+const currentStageDetail = computed(() => {
+  const currentStage = stages.find((stage) => stage.key === run.value?.stage);
+  if (run.value?.stage === "relevance_assessment") return relevanceProgressLabel.value;
+  return currentStage?.detail ?? "正在准备检索任务";
+});
+const searchHeading = computed(() => {
+  if (candidatesReady.value && candidateCount.value) {
+    return `${candidateCount.value} 篇候选文献，已经准备好。`;
+  }
+  if (candidatesReady.value) return "检索已经完成，可以查看候选结果。";
+  if (run.value?.stage === "relevance_assessment") {
+    const count = candidateCount.value || relevanceProgress.value.total;
+    return count
+      ? `已找到 ${count} 篇候选，正在统一判断相关性。`
+      : "正在依据完整候选集合统一判断与研究方向的相关性。";
+  }
+  return "正在建立候选文献集合。";
+});
+const candidateCountLabel = computed(() => {
+  if (candidatesReady.value) return "可审核候选";
+  if (run.value?.stage === "relevance_assessment") return "已规整候选";
+  return "当前候选";
+});
+const lastProgressLabel = computed(() => {
+  if (!lastProgressAt.value) return "正在等待第一条进度更新";
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor((progressClock.value - lastProgressAt.value) / 1000),
+  );
+  if (elapsedSeconds <= 5) return "刚刚收到进度更新";
+  return `${elapsedSeconds} 秒前收到进度更新`;
+});
+const streamStalled = computed(() => {
+  if (terminal(run.value?.status)) return false;
+  return isSearchRunProgressStalled(
+    lastProgressAt.value,
+    progressStreamStartedAt.value,
+    progressClock.value,
+  );
+});
+const progressNotice = computed(() => {
+  if (streamProblemMessage.value) return streamProblemMessage.value;
+  if (streamStalled.value) return "暂未收到新的进度事件，可重新连接确认任务状态。";
+  return null;
+});
+function stageDetail(stage: (typeof stages)[number]): string {
+  return stage.key === "relevance_assessment" ? relevanceProgressLabel.value : stage.detail;
+}
+function stageStateLabel(stage: (typeof stages)[number]): string {
+  const state = stageState(stage.key);
+  if (state === "done") return "已完成";
+  if (state === "active" && stage.key === "relevance_assessment")
+    return relevanceProgressLabel.value;
+  return state === "active" ? "进行中" : "等待";
+}
 
 const stageLabels: Record<SearchRunStage, string> = {
   dispatch: "准备执行",
@@ -113,6 +195,13 @@ const providerHealthSummary = computed(() => {
   if (!total) return "正在连接来源";
   return `${readyProviderCount.value} / ${total} 个来源已返回`;
 });
+const failedProviderCount = computed(
+  () => providerEntries.value.filter((provider) => provider.tone === "failed").length,
+);
+const failedProviderNotice = computed(() => {
+  if (!failedProviderCount.value) return null;
+  return `${failedProviderCount.value} 个来源暂未返回，系统仍会继续处理其他来源已返回的候选。`;
+});
 
 async function loadRun(): Promise<SearchRun> {
   try {
@@ -138,6 +227,10 @@ function updateFromEvent(event: SearchProgressEvent): void {
     // 事件可能只携带本阶段新增的统计，不能覆盖已从持久化运行读取到的最终候选数。
     candidate_counts: { ...run.value.candidate_counts, ...event.candidate_counts },
   });
+  // 时间与说明只在确实收到 SSE 事件时更新，避免把页面首次加载伪装成实时进度。
+  lastProgressAt.value = Date.now();
+  if (event.message) lastProgressMessage.value = event.message;
+  streamProblemMessage.value = null;
 }
 
 async function refreshTerminalRun(runId: string): Promise<void> {
@@ -149,64 +242,103 @@ async function streamEvents(runId: string): Promise<void> {
   controller.value?.abort();
   const abort = new AbortController();
   controller.value = abort;
-  const response = await fetch(
-    apiUrl(`/api/v1/collections/${workspaceId.value}/search-runs/${runId}/events`),
-    { headers: { Authorization: `Bearer ${getAccessToken() ?? ""}` }, signal: abort.signal },
-  );
-  if (!response.ok || !response.body) throw new Error("无法建立检索进度流。");
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split("\n\n");
-    buffer = chunks.pop() ?? "";
-    for (const chunk of chunks) {
-      const dataLine = chunk.split("\n").find((line) => line.startsWith("data:"));
-      if (!dataLine) continue;
-      try {
-        updateFromEvent(JSON.parse(dataLine.slice(5).trim()) as SearchProgressEvent);
-      } catch {
-        /* 忽略心跳或损坏事件，下一次刷新会恢复真实状态。 */
+  try {
+    const response = await fetch(
+      apiUrl(`/api/v1/collections/${workspaceId.value}/search-runs/${runId}/events`),
+      { headers: { Authorization: `Bearer ${getAccessToken() ?? ""}` }, signal: abort.signal },
+    );
+    if (!response.ok || !response.body) throw new Error("无法建立检索进度流。");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() ?? "";
+      for (const chunk of chunks) {
+        const dataLine = chunk.split("\n").find((line) => line.startsWith("data:"));
+        if (!dataLine) continue;
+        try {
+          updateFromEvent(JSON.parse(dataLine.slice(5).trim()) as SearchProgressEvent);
+        } catch {
+          /* 忽略心跳或损坏事件，下一次刷新会恢复真实状态。 */
+        }
       }
     }
+    if (run.value && terminal(run.value.status)) {
+      // SSE 只用于推进画布；终态重新读取数据库快照，确保显示最终候选统计。
+      await refreshTerminalRun(runId);
+      return;
+    }
+    if (!abort.signal.aborted) throw new Error("进度连接已结束，请重新连接确认任务状态。");
+  } catch (error) {
+    // 用户主动重连、路由卸载时会终止旧请求，不应把这类正常中断显示为错误。
+    if (abort.signal.aborted || (error instanceof Error && error.name === "AbortError")) return;
+    throw error;
+  } finally {
+    if (controller.value === abort) controller.value = null;
   }
-  if (run.value && terminal(run.value.status)) {
-    // SSE 只用于推进画布；终态重新读取数据库快照，确保显示最终候选统计。
-    await refreshTerminalRun(runId);
+}
+
+async function connectProgressStream(runId: string): Promise<void> {
+  streamProblemMessage.value = null;
+  progressStreamStartedAt.value = Date.now();
+  try {
+    await streamEvents(runId);
+  } catch (error) {
+    streamProblemMessage.value =
+      error instanceof Error ? error.message : "无法继续读取检索进度，请重新连接。";
   }
 }
 
 async function initialize(): Promise<void> {
   loading.value = true;
   errorMessage.value = null;
+  controller.value?.abort();
   try {
-    run.value = await loadRun();
-    if (!terminal(run.value.status)) await streamEvents(run.value.id);
+    saveRun(await loadRun());
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "无法读取检索状态。";
   } finally {
     loading.value = false;
   }
+  if (run.value && !terminal(run.value.status)) void connectProgressStream(run.value.id);
 }
 
 async function retry(): Promise<void> {
   if (!run.value) return;
   loading.value = true;
+  errorMessage.value = null;
+  controller.value?.abort();
   try {
-    run.value = await retrySearch(workspaceId.value, run.value.id);
-    await streamEvents(run.value.id);
+    saveRun(await retrySearch(workspaceId.value, run.value.id));
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "检索重试失败。";
   } finally {
     loading.value = false;
   }
+  if (run.value && !terminal(run.value.status)) void connectProgressStream(run.value.id);
 }
 
-onMounted(() => void initialize());
-onUnmounted(() => controller.value?.abort());
+async function reconnectProgress(): Promise<void> {
+  if (!run.value || terminal(run.value.status)) return;
+  reconnecting.value = true;
+  await connectProgressStream(run.value.id);
+  reconnecting.value = false;
+}
+
+onMounted(() => {
+  progressClockTimer = setInterval(() => {
+    progressClock.value = Date.now();
+  }, 1_000);
+  void initialize();
+});
+onUnmounted(() => {
+  controller.value?.abort();
+  if (progressClockTimer) clearInterval(progressClockTimer);
+});
 </script>
 
 <template>
@@ -215,13 +347,7 @@ onUnmounted(() => controller.value?.abort());
       <div>
         <div class="eyebrow">{{ candidatesReady ? "检索结果已交接" : "文献检索中" }}</div>
         <h1>
-          {{
-            candidatesReady && candidateCount
-              ? `${candidateCount} 篇候选文献，已经准备好。`
-              : candidatesReady
-                ? "检索已经完成，可以查看候选结果。"
-                : "正在建立候选文献集合。"
-          }}
+          {{ searchHeading }}
         </h1>
         <p>
           {{
@@ -287,19 +413,22 @@ onUnmounted(() => controller.value?.abort());
     <template v-else-if="run">
       <section class="search-outcome-band" aria-label="本次检索结果摘要">
         <div class="search-outcome-count">
-          <span>可审核候选</span>
+          <span>{{ candidateCountLabel }}</span>
           <strong>{{ candidateCount }}</strong
           ><small>篇</small>
         </div>
         <div class="search-outcome-copy">
-          <strong>{{ candidatesReady ? "候选已完成规整与初筛" : "正在汇总候选结果" }}</strong>
+          <strong>{{ candidatesReady ? "候选已完成规整与初筛" : currentStageDetail }}</strong>
           <p>
             {{
               candidatesReady
                 ? "进入筛选后，你可以核对题录、引用格式和全文可用性，再决定是否纳入研究集合。"
-                : "候选数与来源状态会随着检索进度实时刷新。"
+                : (lastProgressMessage ?? "候选数与来源状态会随着检索进度实时刷新。")
             }}
           </p>
+          <small v-if="!candidatesReady" class="search-progress-timestamp">{{
+            lastProgressLabel
+          }}</small>
         </div>
         <dl class="search-outcome-facts">
           <div>
@@ -317,6 +446,25 @@ onUnmounted(() => controller.value?.abort());
         </dl>
       </section>
 
+      <section
+        v-if="progressNotice"
+        class="search-progress-notice"
+        role="status"
+        aria-live="polite"
+      >
+        <CircleAlert :size="16" />
+        <p>{{ progressNotice }}</p>
+        <button
+          class="secondary-button search-progress-reconnect"
+          type="button"
+          :disabled="reconnecting"
+          @click="reconnectProgress"
+        >
+          <RotateCcw :class="{ spin: reconnecting }" :size="14" />
+          {{ reconnecting ? "正在连接" : "重新连接" }}
+        </button>
+      </section>
+
       <div class="search-handoff-grid">
         <section class="search-stage-panel" aria-labelledby="search-stage-heading">
           <div class="search-panel-heading">
@@ -325,7 +473,11 @@ onUnmounted(() => controller.value?.abort());
               <h2 id="search-stage-heading">这次检索已经经过哪些处理</h2>
             </div>
             <span class="search-stage-caption">{{
-              candidatesReady ? "全部处理完成" : "实时更新"
+              candidatesReady
+                ? "全部处理完成"
+                : run?.stage === "relevance_assessment"
+                  ? relevanceProgressLabel
+                  : "实时更新"
             }}</span>
           </div>
           <div class="search-stage-track" role="list">
@@ -344,15 +496,9 @@ onUnmounted(() => controller.value?.abort());
               /></span>
               <div>
                 <strong>{{ stage.title }}</strong
-                ><small>{{ stage.detail }}</small>
+                ><small>{{ stageDetail(stage) }}</small>
               </div>
-              <span class="search-stage-state">{{
-                stageState(stage.key) === "done"
-                  ? "已完成"
-                  : stageState(stage.key) === "active"
-                    ? "进行中"
-                    : "等待"
-              }}</span>
+              <span class="search-stage-state">{{ stageStateLabel(stage) }}</span>
             </div>
           </div>
         </section>
@@ -391,6 +537,9 @@ onUnmounted(() => controller.value?.abort());
           <div v-else class="provider-health-empty">
             <LoaderCircle class="spin" :size="16" /><span>正在连接已启用的文献来源…</span>
           </div>
+          <p v-if="failedProviderNotice" class="provider-health-continuation">
+            {{ failedProviderNotice }}
+          </p>
         </aside>
       </div>
     </template>

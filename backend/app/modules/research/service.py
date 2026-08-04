@@ -27,6 +27,7 @@ from app.modules.research.contracts import (
     ResearchRunStatus,
 )
 from app.modules.research.job_queue import ResearchJobQueue, ResearchQueueError
+from app.modules.research.settings import ResearchSettings, get_research_settings
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,10 +35,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class ResearchConversationService:
     """保证研究问题只能进入用户拥有、已完成索引的集合。"""
 
-    def __init__(self, session: AsyncSession, queue: ResearchJobQueue | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        queue: ResearchJobQueue | None = None,
+        settings: ResearchSettings | None = None,
+    ) -> None:
         """请求路径注入队列，纯读取操作可不创建 Redis 依赖。"""
         self._session = session
         self._queue = queue
+        self._settings = settings
 
     async def create_conversation(
         self,
@@ -141,6 +148,7 @@ class ResearchConversationService:
             lock=True,
         )
         await self._require_researchable_documents(collection_id)
+        quota = await self._assert_submission_quota(owner_user_id)
 
         now = datetime.now(UTC)
         user_message = Message(
@@ -161,7 +169,11 @@ class ResearchConversationService:
             stage=ResearchRunStage.DISPATCH.value,
             langgraph_thread_id=f"research-{uuid4()}",
             model_config=dict(model_config),
-            retrieval_trace={"stage": ResearchRunStage.DISPATCH.value, "rewrite_attempts": 0},
+            retrieval_trace={
+                "stage": ResearchRunStage.DISPATCH.value,
+                "rewrite_attempts": 0,
+                "governance": {"submission_quota": quota},
+            },
         )
         # 新会话默认截取首个问题，用户提供的标题始终优先保留。
         if conversation.title is None:
@@ -231,12 +243,14 @@ class ResearchConversationService:
         run.stage = ResearchRunStage.DISPATCH.value
         run.error_code = None
         run.error_message = None
+        run.cancel_requested_at = None
         run.finished_at = None
+        run.stage_started_at = None
         run.arq_job_id = None
         run.retrieval_trace = {"stage": ResearchRunStage.DISPATCH.value, "rewrite_attempts": 0}
         await self._session.commit()
         try:
-            run.arq_job_id = await self._queue_or_raise().enqueue_research(run.id)
+            run.arq_job_id = await self._queue_or_raise().enqueue_research(run.id, retry=True)
         except ResearchQueueError:
             await self._mark_queue_failed(run.id)
             raise ResearchError(
@@ -254,7 +268,7 @@ class ResearchConversationService:
         conversation_id: UUID,
         research_run_id: UUID,
     ) -> ResearchRunResponse:
-        """只取消尚未被 Worker 领取的任务，避免中途外部模型调用留下歧义。"""
+        """queued 运行立即取消；running 运行持久化协作停止请求并等待安全边界确认。"""
         run = await self._require_owned_run(
             owner_user_id=owner_user_id,
             collection_id=collection_id,
@@ -262,16 +276,31 @@ class ResearchConversationService:
             research_run_id=research_run_id,
             lock=True,
         )
-        if run.status != ResearchRunStatus.QUEUED.value:
-            raise ResearchError(
-                ResearchErrorCode.RUN_NOT_CANCELLABLE,
-                "只有等待 Worker 的研究任务可以取消。",
-            )
-        run.status = ResearchRunStatus.CANCELLED.value
-        run.stage = ResearchRunStage.CANCELLED.value
-        run.finished_at = datetime.now(UTC)
-        await self._session.commit()
-        return self._run_response(run)
+        now = datetime.now(UTC)
+        if run.status == ResearchRunStatus.QUEUED.value:
+            run.status = ResearchRunStatus.CANCELLED.value
+            run.stage = ResearchRunStage.CANCELLED.value
+            run.cancel_requested_at = now
+            run.finished_at = now
+            await self._session.commit()
+            return self._run_response(run)
+        if run.status == ResearchRunStatus.RUNNING.value:
+            if run.cancel_requested_at is None:
+                run.cancel_requested_at = now
+                run.retrieval_trace = {
+                    **run.retrieval_trace,
+                    "cancellation": {
+                        "state": "requested",
+                        "requested_at": now.isoformat(),
+                        "stage": run.stage,
+                    },
+                }
+                await self._session.commit()
+            return self._run_response(run)
+        raise ResearchError(
+            ResearchErrorCode.RUN_NOT_CANCELLABLE,
+            "研究任务已经结束，不能再取消。",
+        )
 
     async def delete_conversation(
         self,
@@ -305,6 +334,46 @@ class ResearchConversationService:
         run.error_message = "研究对话任务无法投递，请稍后重试。"
         run.finished_at = datetime.now(UTC)
         await self._session.commit()
+
+    async def _assert_submission_quota(self, owner_user_id: UUID) -> dict[str, object]:
+        """按 UTC 自然日检查真实已提交运行数，拒绝原因可写入新运行审计 trace。"""
+        settings = self._settings or get_research_settings()
+        now = datetime.now(UTC)
+        period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        user_run_count = int(
+            await self._session.scalar(
+                select(func.count(ResearchRun.id))
+                .join(ResearchCollection, ResearchCollection.id == ResearchRun.collection_id)
+                .where(
+                    ResearchCollection.owner_user_id == owner_user_id,
+                    ResearchRun.created_at >= period_start,
+                )
+            )
+            or 0
+        )
+        if user_run_count >= settings.rag_user_daily_research_run_limit:
+            raise ResearchError(
+                ResearchErrorCode.USER_QUOTA_EXCEEDED,
+                "今日研究问题额度已用尽，请明天继续或联系管理员调整额度。",
+            )
+        global_run_count = int(
+            await self._session.scalar(
+                select(func.count(ResearchRun.id)).where(ResearchRun.created_at >= period_start)
+            )
+            or 0
+        )
+        if global_run_count >= settings.rag_global_daily_research_run_limit:
+            raise ResearchError(
+                ResearchErrorCode.GLOBAL_BUDGET_EXHAUSTED,
+                "今日全局研究运行预算已用尽，请稍后再试。",
+            )
+        return {
+            "period_start": period_start.isoformat(),
+            "user_runs_used": user_run_count + 1,
+            "user_run_limit": settings.rag_user_daily_research_run_limit,
+            "global_runs_used": global_run_count + 1,
+            "global_run_limit": settings.rag_global_daily_research_run_limit,
+        }
 
     async def _require_owned_collection(
         self, *, owner_user_id: UUID, collection_id: UUID, lock: bool
@@ -454,7 +523,9 @@ class ResearchConversationService:
             retrieval_trace=dict(run.retrieval_trace),
             error_code=run.error_code,
             error_message=run.error_message,
+            cancel_requested_at=run.cancel_requested_at,
             started_at=run.started_at,
+            stage_started_at=run.stage_started_at,
             finished_at=run.finished_at,
             created_at=run.created_at,
         )

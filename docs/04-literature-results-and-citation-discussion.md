@@ -1,6 +1,6 @@
 # academic-search 文献结果与引用讨论稿
 
-状态：后端候选结果、候选相关性 Agent、格式中立题录补全、正式引用渲染、候选准备清单、全文准入与集合构建 API 已实现；Vue 审核表支持服务端分页、跨页选择、批量准备与批量加入待确认集合，并已接入论文详情、服务端理由/证据展示、单项重试及 GB/T、APA、MLA、Chicago、BibTeX 预览与复制。
+状态：后端候选结果、候选相关性 Agent、格式中立题录补全、正式引用渲染、候选准备清单、全文准入与集合构建 API 已实现；Vue 审核表支持服务端分页、跨页选择、批量准备与批量加入待确认集合，并已接入论文详情、服务端理由/证据展示、运行级整批相关性重试/取消及 GB/T、APA、MLA、Chicago、BibTeX 预览与复制。
 定位：定义文献结果如何呈现、如何证明推荐理由、如何让用户正确复制和使用引用。
 关联：候选产生与排序见 [`03-literature-search-and-discovery-discussion.md`](03-literature-search-and-discovery-discussion.md)；RAG 研究问答见 [`05-rag-research-workspace-discussion.md`](05-rag-research-workspace-discussion.md)。
 

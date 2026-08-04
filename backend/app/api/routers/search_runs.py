@@ -13,8 +13,8 @@ from app.db.models.user import User
 from app.db.session import get_db_session
 from app.modules.fulltext import Boto3StagingObjectStorage, get_fulltext_acquisition_settings
 from app.modules.workflow.candidate_relevance_service import (
-    CandidateRelevanceRetryError,
-    CandidateRelevanceRetryErrorCode,
+    CandidateRelevanceRunError,
+    CandidateRelevanceRunErrorCode,
     CandidateRelevanceService,
 )
 from app.modules.workflow.candidate_review_service import (
@@ -36,7 +36,11 @@ from app.modules.workflow.contracts import (
     SearchRunErrorCode,
     SearchRunResponse,
 )
-from app.modules.workflow.job_queue import ArqCandidateFulltextJobQueue, ArqSearchRunJobQueue
+from app.modules.workflow.job_queue import (
+    ArqCandidateFulltextJobQueue,
+    ArqCandidateRelevanceJobQueue,
+    ArqSearchRunJobQueue,
+)
 from app.modules.workflow.search_run_service import SearchRunService
 from app.modules.workflow.search_session import SearchSessionStore
 from app.modules.workflow.state import SearchRunStage, SearchRunStatus
@@ -59,6 +63,11 @@ def _search_error_response(error: SearchRunError) -> HTTPException:
         status_code = status.HTTP_410_GONE
     elif error.code is SearchRunErrorCode.QUEUE_UNAVAILABLE:
         status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    elif error.code in {
+        SearchRunErrorCode.USER_QUOTA_EXCEEDED,
+        SearchRunErrorCode.GLOBAL_BUDGET_EXHAUSTED,
+    }:
+        status_code = status.HTTP_429_TOO_MANY_REQUESTS
     else:
         status_code = status.HTTP_409_CONFLICT
     return HTTPException(
@@ -67,13 +76,13 @@ def _search_error_response(error: SearchRunError) -> HTTPException:
     )
 
 
-def _relevance_retry_error_response(error: CandidateRelevanceRetryError) -> HTTPException:
-    """将候选相关性重试的会话与状态错误映射为稳定 HTTP 响应。"""
+def _relevance_run_error_response(error: CandidateRelevanceRunError) -> HTTPException:
+    """将运行级候选相关性控制错误映射为稳定 HTTP 响应。"""
     status_code = (
-        status.HTTP_404_NOT_FOUND
-        if error.code is CandidateRelevanceRetryErrorCode.CANDIDATE_NOT_FOUND
-        else status.HTTP_410_GONE
-        if error.code is CandidateRelevanceRetryErrorCode.SESSION_EXPIRED
+        status.HTTP_410_GONE
+        if error.code is CandidateRelevanceRunErrorCode.SESSION_EXPIRED
+        else status.HTTP_503_SERVICE_UNAVAILABLE
+        if error.code is CandidateRelevanceRunErrorCode.QUEUE_UNAVAILABLE
         else status.HTTP_409_CONFLICT
     )
     return HTTPException(
@@ -399,34 +408,34 @@ async def admit_candidate_selection(
 
 
 @router.post(
-    "/{collection_id}/search-runs/{search_run_id}/candidates/{candidate_id}/relevance/retry",
+    "/{collection_id}/search-runs/{search_run_id}/relevance/retry",
     response_model=SearchCandidatesResponse,
-    summary="重试候选相关性分析",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="重试整批候选相关性分析",
 )
 async def retry_candidate_relevance(
     collection_id: UUID,
     search_run_id: UUID,
-    candidate_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> SearchCandidatesResponse:
-    """只重试当前用户、当前会话中失败且可重试的一条候选理由。"""
+    """复用当前候选快照重跑完整集合，不重新调用文献来源。"""
     settings = get_literature_source_settings()
     redis = redis_client_from_environment()
     try:
         result = await CandidateRelevanceService(
             session,
             SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
+            ArqCandidateRelevanceJobQueue(),
         ).retry(
             owner_user_id=current_user.id,
             collection_id=collection_id,
             search_run_id=search_run_id,
-            candidate_id=candidate_id,
         )
     except SearchRunError as exc:
         raise _search_error_response(exc) from exc
-    except CandidateRelevanceRetryError as exc:
-        raise _relevance_retry_error_response(exc) from exc
+    except CandidateRelevanceRunError as exc:
+        raise _relevance_run_error_response(exc) from exc
     finally:
         await redis.aclose()
 
@@ -437,6 +446,38 @@ async def retry_candidate_relevance(
         candidate_counts=snapshot.get("candidate_counts", {}),
         candidates=snapshot.get("candidates", []),
     )
+
+
+@router.post(
+    "/{collection_id}/search-runs/{search_run_id}/relevance/cancel",
+    response_model=SearchRunResponse,
+    summary="取消候选相关性分析",
+)
+async def cancel_candidate_relevance(
+    collection_id: UUID,
+    search_run_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SearchRunResponse:
+    """请求停止当前流式相关性任务，保留候选并允许后续整批重跑。"""
+    settings = get_literature_source_settings()
+    redis = redis_client_from_environment()
+    try:
+        result = await CandidateRelevanceService(
+            session,
+            SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
+        ).cancel(
+            owner_user_id=current_user.id,
+            collection_id=collection_id,
+            search_run_id=search_run_id,
+        )
+    except SearchRunError as exc:
+        raise _search_error_response(exc) from exc
+    except CandidateRelevanceRunError as exc:
+        raise _relevance_run_error_response(exc) from exc
+    finally:
+        await redis.aclose()
+    return SearchRunResponse.model_validate(result.search_run)
 
 
 @router.get(

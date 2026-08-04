@@ -25,15 +25,18 @@ router = APIRouter(prefix="/collections", tags=["研究集合构建"])
 
 def _build_error_response(error: CollectionBuildError) -> HTTPException:
     """集合构建错误统一映射为不泄漏其他用户资源的 HTTP 响应。"""
-    status_code = (
-        status.HTTP_404_NOT_FOUND
-        if error.code
-        in {
-            CollectionBuildErrorCode.COLLECTION_NOT_FOUND,
-            CollectionBuildErrorCode.DOCUMENT_NOT_FOUND,
-        }
-        else status.HTTP_409_CONFLICT
-    )
+    if error.code in {
+        CollectionBuildErrorCode.COLLECTION_NOT_FOUND,
+        CollectionBuildErrorCode.DOCUMENT_NOT_FOUND,
+    }:
+        status_code = status.HTTP_404_NOT_FOUND
+    elif error.code in {
+        CollectionBuildErrorCode.USER_QUOTA_EXCEEDED,
+        CollectionBuildErrorCode.GLOBAL_BUDGET_EXHAUSTED,
+    }:
+        status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    else:
+        status_code = status.HTTP_409_CONFLICT
     return HTTPException(
         status_code=status_code,
         detail={"code": error.code, "message": str(error)},

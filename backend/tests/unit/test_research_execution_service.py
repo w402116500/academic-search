@@ -1,0 +1,219 @@
+"""研究运行取消、配额和阶段计时的离线服务契约测试。"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
+from uuid import UUID
+
+import pytest
+from app.db.models.research import Conversation, ResearchRun
+from app.modules.research.contracts import (
+    ResearchError,
+    ResearchErrorCode,
+    ResearchRunStage,
+    ResearchRunStatus,
+)
+from app.modules.research.execution import ResearchExecutionService
+from app.modules.research.retrieval import RetrievedEvidence
+from app.modules.research.service import ResearchConversationService
+from app.modules.research.settings import ResearchSettings
+from sqlalchemy.ext.asyncio import AsyncSession
+
+_OWNER_ID = UUID("00000000-0000-0000-0000-000000000901")
+_COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000902")
+_CONVERSATION_ID = UUID("00000000-0000-0000-0000-000000000903")
+_RUN_ID = UUID("00000000-0000-0000-0000-000000000904")
+_INPUT_MESSAGE_ID = UUID("00000000-0000-0000-0000-000000000905")
+
+
+class FakeExecutionSession:
+    """只实现研究运行服务使用到的异步会话表面。"""
+
+    def __init__(self, scalar_values: list[object | None]) -> None:
+        self._scalar_values = iter(scalar_values)
+        self.added: list[object] = []
+        self.executed: list[object] = []
+        self.commit_count = 0
+
+    @asynccontextmanager
+    async def begin(self) -> AsyncIterator[FakeExecutionSession]:
+        yield self
+
+    async def scalar(self, _statement: object) -> object | None:
+        return next(self._scalar_values)
+
+    async def execute(self, statement: object) -> object:
+        self.executed.append(statement)
+        return object()
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    def add_all(self, values: list[object]) -> None:
+        self.added.extend(values)
+
+    async def commit(self) -> None:
+        self.commit_count += 1
+
+
+@dataclass(frozen=True, slots=True)
+class FakeOutcome:
+    """不含证据时的最小图输出，用于验证终态持久化顺序。"""
+
+    status: ResearchRunStatus = ResearchRunStatus.COMPLETED
+    stage: ResearchRunStage = ResearchRunStage.COMPLETED
+    answer: str = "原文证据支持该回答。"
+    evidences: tuple[RetrievedEvidence, ...] = ()
+    cited_chunk_ids: tuple[UUID, ...] = ()
+    retrieval_trace: dict[str, Any] = field(default_factory=lambda: {"stage": "answering"})
+    mode: str = "single_rag"
+
+
+class RunAccessService(ResearchConversationService):
+    """让取消服务测试聚焦状态迁移，不依赖 SQL 查询细节。"""
+
+    def __init__(self, session: AsyncSession, run: ResearchRun) -> None:
+        super().__init__(session)
+        self._run = run
+
+    async def _require_owned_run(self, **_: object) -> ResearchRun:
+        return self._run
+
+
+def _run(
+    *,
+    stage: ResearchRunStage = ResearchRunStage.ANSWERING,
+    status: ResearchRunStatus = ResearchRunStatus.RUNNING,
+) -> ResearchRun:
+    """构造已领取、正在一个公开阶段运行的记录。"""
+    now = datetime.now(UTC)
+    return ResearchRun(
+        id=_RUN_ID,
+        conversation_id=_CONVERSATION_ID,
+        collection_id=_COLLECTION_ID,
+        input_message_id=_INPUT_MESSAGE_ID,
+        mode="single_rag",
+        status=status.value,
+        stage=stage.value,
+        model_config={},
+        retrieval_trace={
+            "stage": stage.value,
+            "timing": {
+                "started_at": (now - timedelta(seconds=5)).isoformat(),
+                "current_stage": stage.value,
+                "stage_started_at": (now - timedelta(seconds=2)).isoformat(),
+                "stages": [],
+            },
+        },
+        started_at=now - timedelta(seconds=5),
+        stage_started_at=now - timedelta(seconds=2),
+        created_at=now - timedelta(seconds=5),
+    )
+
+
+def _recorded_stage(run: ResearchRun) -> str:
+    timing = cast(dict[str, Any], run.retrieval_trace["timing"])
+    stages = cast(list[dict[str, Any]], timing["stages"])
+    return cast(str, stages[-1]["stage"])
+
+
+@pytest.mark.asyncio
+async def test_complete_closes_the_active_stage_before_persisting_completed() -> None:
+    """完成态不能把原本的 answering 阶段篡改为 completed。"""
+    run = _run(stage=ResearchRunStage.ANSWERING)
+    conversation = Conversation(
+        id=_CONVERSATION_ID,
+        collection_id=_COLLECTION_ID,
+        owner_user_id=_OWNER_ID,
+        status="active",
+    )
+    session = FakeExecutionSession([run, conversation])
+
+    status = await ResearchExecutionService(cast(AsyncSession, session)).complete(
+        _RUN_ID, FakeOutcome()
+    )
+
+    assert status is ResearchRunStatus.COMPLETED
+    assert run.status == ResearchRunStatus.COMPLETED.value
+    assert run.stage == ResearchRunStage.COMPLETED.value
+    assert _recorded_stage(run) == ResearchRunStage.ANSWERING.value
+
+
+@pytest.mark.asyncio
+async def test_fail_closes_the_active_stage_before_persisting_failed() -> None:
+    """失败态也要保留导致失败的实际阶段，便于后续故障归因。"""
+    run = _run(stage=ResearchRunStage.RERANKING)
+    session = FakeExecutionSession([run])
+
+    status = await ResearchExecutionService(cast(AsyncSession, session)).fail(
+        _RUN_ID, code="research_model_failed", message="模型响应无效"
+    )
+
+    assert status is ResearchRunStatus.FAILED
+    assert run.stage == ResearchRunStage.FAILED.value
+    assert _recorded_stage(run) == ResearchRunStage.RERANKING.value
+
+
+@pytest.mark.asyncio
+async def test_finalize_cancellation_closes_the_active_stage_before_cancelling() -> None:
+    """Worker 在安全边界确认停止后只关闭原阶段，不写回答或证据。"""
+    run = _run(stage=ResearchRunStage.HYBRID_RETRIEVAL)
+    run.cancel_requested_at = datetime.now(UTC)
+    session = FakeExecutionSession([run])
+
+    cancelled = await ResearchExecutionService(cast(AsyncSession, session)).finalize_cancellation(
+        _RUN_ID
+    )
+
+    assert cancelled is True
+    assert run.status == ResearchRunStatus.CANCELLED.value
+    assert run.stage == ResearchRunStage.CANCELLED.value
+    assert _recorded_stage(run) == ResearchRunStage.HYBRID_RETRIEVAL.value
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_running_cancel_records_a_cooperative_stop_request() -> None:
+    """运行中取消应保留 running，直到 Worker 在安全边界确认终态。"""
+    run = _run(stage=ResearchRunStage.EVIDENCE_VERIFYING)
+    session = FakeExecutionSession([])
+    service = RunAccessService(cast(AsyncSession, session), run)
+
+    response = await service.cancel_run(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        conversation_id=_CONVERSATION_ID,
+        research_run_id=_RUN_ID,
+    )
+
+    assert response.status is ResearchRunStatus.RUNNING
+    assert response.cancel_requested_at is not None
+    assert run.retrieval_trace["cancellation"]["state"] == "requested"
+    assert session.commit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_submission_quota_rejects_user_and_global_limit_exhaustion() -> None:
+    """每日用户额度和全局预算均在创建运行前被稳定拒绝。"""
+    settings = ResearchSettings(
+        rag_user_daily_research_run_limit=2,
+        rag_global_daily_research_run_limit=3,
+    )
+    user_limited = ResearchConversationService(
+        cast(AsyncSession, FakeExecutionSession([2])), settings=settings
+    )
+    global_limited = ResearchConversationService(
+        cast(AsyncSession, FakeExecutionSession([1, 3])), settings=settings
+    )
+
+    with pytest.raises(ResearchError) as user_error:
+        await user_limited._assert_submission_quota(_OWNER_ID)
+    with pytest.raises(ResearchError) as global_error:
+        await global_limited._assert_submission_quota(_OWNER_ID)
+
+    assert user_error.value.code is ResearchErrorCode.USER_QUOTA_EXCEEDED
+    assert global_error.value.code is ResearchErrorCode.GLOBAL_BUDGET_EXHAUSTED

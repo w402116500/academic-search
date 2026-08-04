@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.exceptions import WatchError
 
 SEARCH_SESSION_KEY_PREFIX = "academic-search:search-run"
 _STREAM_ID_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)-(?:0|[1-9][0-9]*)$|^\$$")
@@ -36,6 +37,13 @@ def build_candidate_fulltext_key(session_key: str, candidate_id: UUID) -> str:
     return f"{session_key}:candidate:{candidate_id}:fulltext"
 
 
+def build_candidate_fulltext_upload_lock_key(session_key: str, candidate_id: UUID) -> str:
+    """为同一候选上传建立互斥锁，避免两个请求覆盖彼此的暂存结果。"""
+    if not session_key.startswith(f"{SEARCH_SESSION_KEY_PREFIX}:"):
+        raise ValueError("候选上传锁必须位于服务端生成的检索会话键下")
+    return f"{session_key}:candidate:{candidate_id}:fulltext-upload-lock"
+
+
 def build_candidate_selection_key(session_key: str) -> str:
     """为当前检索会话生成短期准备清单键，不与候选主快照混写。"""
     if not session_key.startswith(f"{SEARCH_SESSION_KEY_PREFIX}:"):
@@ -50,11 +58,18 @@ def build_candidate_selection_lock_key(session_key: str) -> str:
     return f"{session_key}:candidate-selection-lock"
 
 
-def build_candidate_relevance_retry_lock_key(session_key: str, candidate_id: UUID) -> str:
-    """为单篇候选的相关性重试建立短期互斥锁，防止重复模型调用。"""
+def build_candidate_relevance_lock_key(session_key: str) -> str:
+    """为整个候选集合相关性运行建立可续约租约。"""
     if not session_key.startswith(f"{SEARCH_SESSION_KEY_PREFIX}:"):
-        raise ValueError("相关性重试锁必须位于服务端生成的检索会话键下")
-    return f"{session_key}:candidate:{candidate_id}:relevance-retry-lock"
+        raise ValueError("相关性运行锁必须位于服务端生成的检索会话键下")
+    return f"{session_key}:relevance-lock"
+
+
+def build_candidate_relevance_cancel_key(session_key: str) -> str:
+    """为当前相关性运行保存显式取消标记，不把控制状态交给浏览器连接。"""
+    if not session_key.startswith(f"{SEARCH_SESSION_KEY_PREFIX}:"):
+        raise ValueError("相关性取消标记必须位于服务端生成的检索会话键下")
+    return f"{session_key}:relevance-cancel"
 
 
 class SearchSessionStore:
@@ -72,6 +87,39 @@ class SearchSessionStore:
             json.dumps(snapshot, ensure_ascii=False),
             ex=self._ttl_seconds,
         )
+
+    async def merge_snapshot(
+        self,
+        session_key: str,
+        transform: Callable[[dict[str, Any]], dict[str, Any]],
+        *,
+        max_attempts: int = 8,
+    ) -> dict[str, Any]:
+        """以 WATCH/MULTI 合并最新快照，避免异步任务覆盖候选的其他字段更新。"""
+        for _attempt in range(max_attempts):
+            async with self._redis.pipeline(transaction=True) as pipe:
+                await pipe.watch(session_key)
+                raw_value = await pipe.get(session_key)
+                if raw_value is None:
+                    raise KeyError("检索候选会话已过期")
+                if not isinstance(raw_value, str):
+                    raise TypeError("Redis 检索会话快照必须是字符串")
+                snapshot = json.loads(raw_value)
+                if not isinstance(snapshot, dict):
+                    raise ValueError("Redis 检索会话快照必须是 JSON 对象")
+                merged = transform(snapshot)
+                pipe.multi()
+                pipe.set(
+                    session_key,
+                    json.dumps(merged, ensure_ascii=False),
+                    ex=self._ttl_seconds,
+                )
+                try:
+                    await pipe.execute()
+                except WatchError:
+                    continue
+                return merged
+        raise RuntimeError("检索候选快照在合并期间持续变化，请稍后重试")
 
     async def read_snapshot(self, session_key: str) -> dict[str, Any] | None:
         """读取候选快照；Redis 中不存在时返回 None 供 API 区分过期状态。"""
@@ -123,6 +171,43 @@ class SearchSessionStore:
         """尝试获取带租约的短期锁；同一候选的并发重试只允许一个请求执行。"""
         acquired = await self._redis.set(key, token, nx=True, ex=ttl_seconds)
         return bool(acquired)
+
+    async def renew_lock(self, key: str, *, token: str, ttl_seconds: int) -> bool:
+        """仅持有者可续期租约；过期或易主时不续到其他任务名下。"""
+        result = self._redis.eval(
+            """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('EXPIRE', KEYS[1], ARGV[2])
+            end
+            return 0
+            """,
+            1,
+            key,
+            token,
+            str(ttl_seconds),
+        )
+        return bool(await cast(Awaitable[Any], result))
+
+    async def request_relevance_cancellation(self, session_key: str) -> None:
+        """写入与候选会话同 TTL 的取消标记，供长流 Worker 主动停止。"""
+        await self._redis.set(
+            build_candidate_relevance_cancel_key(session_key),
+            "1",
+            ex=self._ttl_seconds,
+        )
+
+    async def is_relevance_cancellation_requested(self, session_key: str) -> bool:
+        """检查运行级取消标记；不记录模型正文或局部结论。"""
+        return bool(await self._redis.exists(build_candidate_relevance_cancel_key(session_key)))
+
+    async def clear_relevance_cancellation(self, session_key: str) -> None:
+        """新一轮整批分析开始前清除旧的取消标记。"""
+        await self._redis.delete(build_candidate_relevance_cancel_key(session_key))
+
+    async def renew_arq_in_progress(self, job_id: str, *, ttl_seconds: int) -> None:
+        """续期 ARQ 的占用标记，避免无总时长任务在运行中被重复领取。"""
+        # arq 0.28 固定使用该前缀；这里只续期当前 Worker 传入的服务端 job_id。
+        await self._redis.pexpire(f"arq:in-progress:{job_id}", ttl_seconds * 1_000)
 
     async def release_lock(self, key: str, *, token: str) -> None:
         """仅由持有者释放锁，避免过期后删除其他请求重新获得的锁。"""

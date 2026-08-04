@@ -1,222 +1,101 @@
-"""候选相关性单项重试的会话、所有权与幂等行为测试。"""
+"""候选相关性运行级重试和取消快照转换测试。"""
 
 from __future__ import annotations
 
-from typing import Any, cast
-from uuid import UUID
+from uuid import uuid4
 
-import pytest
-from app.db.models.workflow import ResearchPlan, SearchRun
 from app.modules.search.contracts import (
     CandidateRelevanceError,
+    CandidateRelevanceLevel,
     CandidateRelevanceState,
     RawCandidate,
     SourceName,
     TriageDecision,
     UnifiedCandidate,
 )
-from app.modules.workflow.candidate_relevance import OpenAICompatibleCandidateRelevanceEvaluator
 from app.modules.workflow.candidate_relevance_service import CandidateRelevanceService
-from app.modules.workflow.search_session import SearchSessionStore
-from app.modules.workflow.settings import WorkflowSettings
-from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession
-
-_OWNER_ID = UUID("00000000-0000-0000-0000-000000000701")
-_COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000702")
-_PLAN_ID = UUID("00000000-0000-0000-0000-000000000703")
-_RUN_ID = UUID("00000000-0000-0000-0000-000000000704")
-_CANDIDATE_ID = UUID("00000000-0000-0000-0000-000000000705")
-_SESSION_KEY = "academic-search:search-run:00000000-0000-0000-0000-000000000704"
 
 
-class FakeSession:
-    """按调用顺序返回已授权搜索运行和其绑定计划。"""
-
-    def __init__(self, run: SearchRun, plan: ResearchPlan) -> None:
-        self._values = iter((run, plan))
-
-    async def scalar(self, _statement: object) -> SearchRun | ResearchPlan:
-        return next(self._values)
-
-
-class FakeSessionStore:
-    """在内存中模拟 Redis 快照和单项重试锁。"""
-
-    def __init__(self, snapshot: dict[str, Any]) -> None:
-        self.snapshot = snapshot
-        self.writes: list[dict[str, Any]] = []
-        self.locked = False
-
-    async def read_snapshot(self, session_key: str) -> dict[str, Any] | None:
-        return self.snapshot if session_key == _SESSION_KEY else None
-
-    async def write_snapshot(self, session_key: str, snapshot: dict[str, Any]) -> None:
-        assert session_key == _SESSION_KEY
-        self.snapshot = snapshot
-        self.writes.append(snapshot)
-
-    async def try_acquire_lock(self, _key: str, *, token: str, ttl_seconds: int) -> bool:
-        assert token
-        assert ttl_seconds >= 180
-        if self.locked:
-            return False
-        self.locked = True
-        return True
-
-    async def release_lock(self, _key: str, *, token: str) -> None:
-        assert token
-        self.locked = False
-
-
-class FakeModel:
-    """记录调用次数，并为当前候选返回可核验的结构化评估。"""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def ainvoke(self, input: list[SystemMessage | HumanMessage]) -> object:
-        _ = input
-        self.calls += 1
-        return {
-            "assessments": [
-                {
-                    "candidate_id": str(_CANDIDATE_ID),
-                    "level": "core",
-                    "study_focus": "考察睡眠质量与学生学业表现之间的关系。",
-                    "reason": "研究对象和核心关系与当前已确认方向直接对应。",
-                    "helpful_aspect": "可用于梳理睡眠和学业表现之间的关联证据。",
-                    "limitations": ["判断范围仅限标题和摘要。"],
-                    "recommendation": "建议优先查看正式题录和全文。",
-                    "evidence": [
-                        {
-                            "source_field": "abstract",
-                            "quote": "sleep quality and academic performance",
-                        }
-                    ],
-                }
-            ]
-        }
-
-
-def _run() -> SearchRun:
-    """构造已经完成、仍保留 Redis 会话的检索运行。"""
-    return SearchRun(
-        id=_RUN_ID,
-        collection_id=_COLLECTION_ID,
-        research_plan_id=_PLAN_ID,
-        redis_session_key=_SESSION_KEY,
-        status="completed",
-        stage="completed",
-        attempt_no=1,
-        provider_summary={},
-        candidate_counts={},
-    )
-
-
-def _plan() -> ResearchPlan:
-    """构造单项重试必须复用的已确认计划，不接收前端研究字段。"""
-    return ResearchPlan(
-        id=_PLAN_ID,
-        collection_id=_COLLECTION_ID,
-        revision=1,
-        raw_request="睡眠质量是否影响大学生学业表现？",
-        status="confirmed",
-        selected_direction_id="sleep-performance",
-        direction_options=[
-            {
-                "id": "sleep-performance",
-                "title": "睡眠质量与学业表现",
-                "summary": "关注两者之间的关联。",
-                "subtopics": ["睡眠质量", "学业表现"],
-            }
-        ],
-        scope={"confirmed": {"start_year": 2020, "end_year": 2026, "languages": ["en"]}},
-        query_plan={
-            "queries": [{"provider": "openalex", "query": "sleep quality academic performance"}]
-        },
-        model_snapshot={},
-    )
-
-
-def _candidate() -> UnifiedCandidate:
-    """构造已经失败、但允许用户单项重试的统一候选。"""
+def _candidate(
+    *,
+    abstract: str | None,
+    included: bool = True,
+    failed: bool = True,
+) -> UnifiedCandidate:
     source = RawCandidate(
         source=SourceName.OPENALEX,
-        source_record_id="W-retry",
-        title="Sleep quality and academic performance",
-        abstract=(
-            "The study examines sleep quality and academic performance among university students."
-        ),
+        source_record_id=str(uuid4()),
+        title="Sleep quality and mental health",
+        abstract=abstract,
     )
     return UnifiedCandidate(
-        candidate_id=_CANDIDATE_ID,
+        candidate_id=uuid4(),
         title=source.title,
-        title_key="sleep quality academic performance",
-        abstract=source.abstract,
+        title_key="sleep quality mental health",
+        abstract=abstract,
         source_records=(source,),
-        triage=TriageDecision(included=True),
-        relevance_state=CandidateRelevanceState.FAILED,
-        relevance_error=CandidateRelevanceError(
-            code="candidate_relevance_model_unavailable",
-            message="候选相关性模型暂时不可用，请稍后重试。",
-            retryable=True,
+        triage=TriageDecision(included=included),
+        relevance_state=CandidateRelevanceState.FAILED
+        if failed
+        else CandidateRelevanceState.PENDING,
+        relevance_error=(
+            CandidateRelevanceError(
+                code="candidate_relevance_model_unavailable",
+                message="模型暂时不可用。",
+                retryable=True,
+            )
+            if failed
+            else None
         ),
     )
 
 
-@pytest.mark.asyncio
-async def test_retry_reuses_server_snapshot_and_is_idempotent_after_success() -> None:
-    """单项重试只读取已有会话候选，成功后再次点击不会重复调用模型。"""
-    candidate = _candidate()
-    store = FakeSessionStore(
-        {
-            "status": "completed",
-            "candidate_counts": {"relevance_total_count": 1, "relevance_failed_count": 1},
-            "candidates": [candidate.model_dump(mode="json")],
-        }
-    )
-    model = FakeModel()
-    evaluator = OpenAICompatibleCandidateRelevanceEvaluator(
-        WorkflowSettings(deepseek_api_key=SecretStr("test")),
-        model=model,
-    )
-    service = CandidateRelevanceService(
-        cast(AsyncSession, FakeSession(_run(), _plan())),
-        cast(SearchSessionStore, store),
-        evaluator=evaluator,
-    )
+def test_run_retry_resets_the_complete_eligible_collection_without_requerying() -> None:
+    """整批重试会重置每篇有摘要候选，不把失败范围收窄为单项。"""
+    with_abstract = _candidate(abstract="The study examines sleep and anxiety.")
+    without_abstract = _candidate(abstract=None)
+    excluded = _candidate(abstract="Excluded metadata.", included=False)
+    snapshot = {
+        "status": "partial_failed",
+        "stage": "completed",
+        "candidate_counts": {},
+        "candidates": [
+            with_abstract.model_dump(mode="json"),
+            without_abstract.model_dump(mode="json"),
+            excluded.model_dump(mode="json"),
+        ],
+    }
 
-    result = await service.retry(
-        owner_user_id=_OWNER_ID,
-        collection_id=_COLLECTION_ID,
-        search_run_id=_RUN_ID,
-        candidate_id=_CANDIDATE_ID,
-    )
+    reset = CandidateRelevanceService._reset_relevance_snapshot(snapshot)
+    candidates = CandidateRelevanceService._deserialize_candidates(reset)
 
-    retried = UnifiedCandidate.model_validate(result.snapshot["candidates"][0])
-    assert model.calls == 1
-    assert len(store.writes) == 2
-    assert retried.relevance_state is CandidateRelevanceState.COMPLETED
-    assert retried.relevance_assessment is not None
-    assert retried.relevance_assessment.study_focus.startswith("考察睡眠质量")
-    assert result.snapshot["candidate_counts"]["relevance_failed_count"] == 0
+    assert reset["status"] == "running"
+    assert reset["stage"] == "relevance_assessment"
+    assert candidates[0].relevance_state is CandidateRelevanceState.PENDING
+    assert candidates[1].relevance_state is CandidateRelevanceState.COMPLETED
+    assert candidates[1].relevance_assessment is not None
+    assert (
+        candidates[1].relevance_assessment.level is CandidateRelevanceLevel.INSUFFICIENT_INFORMATION
+    )
+    assert candidates[2].relevance_state is CandidateRelevanceState.SKIPPED
+    assert reset["candidate_counts"]["relevance_pending_count"] == 1
 
-    # 构造一个只需读取授权运行的服务，模拟用户在成功后再次点击重试按钮。
-    repeated = CandidateRelevanceService(
-        cast(AsyncSession, FakeSession(_run(), _plan())),
-        cast(SearchSessionStore, store),
-        evaluator=evaluator,
-    )
-    result = await repeated.retry(
-        owner_user_id=_OWNER_ID,
-        collection_id=_COLLECTION_ID,
-        search_run_id=_RUN_ID,
-        candidate_id=_CANDIDATE_ID,
-    )
 
-    assert model.calls == 1
-    assert UnifiedCandidate.model_validate(result.snapshot["candidates"][0]).relevance_state is (
-        CandidateRelevanceState.COMPLETED
-    )
+def test_cancel_marks_only_unfinished_candidates_as_retryable_failures() -> None:
+    """取消不会伪造已完成结果，但让待处理项可在后续整批重跑。"""
+    pending = _candidate(abstract="The study examines sleep and anxiety.", failed=False)
+    snapshot = {
+        "status": "running",
+        "stage": "relevance_assessment",
+        "candidate_counts": {},
+        "candidates": [pending.model_dump(mode="json")],
+    }
+
+    cancelled = CandidateRelevanceService._cancel_relevance_snapshot(snapshot)
+    candidate = CandidateRelevanceService._deserialize_candidates(cancelled)[0]
+
+    assert cancelled["status"] == "cancelled"
+    assert candidate.relevance_state is CandidateRelevanceState.FAILED
+    assert candidate.relevance_error is not None
+    assert candidate.relevance_error.code == "candidate_relevance_cancelled"
+    assert candidate.relevance_error.retryable is True

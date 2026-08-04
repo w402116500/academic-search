@@ -30,6 +30,8 @@ class CollectionBuildErrorCode(StrEnum):
     DOCUMENT_NOT_PENDING = "collection_build_document_not_pending"
     RUN_NOT_FOUND = "collection_build_run_not_found"
     RUN_NOT_RETRYABLE = "collection_build_run_not_retryable"
+    USER_QUOTA_EXCEEDED = "collection_build_user_quota_exceeded"
+    GLOBAL_BUDGET_EXHAUSTED = "collection_build_global_budget_exhausted"
 
 
 class CollectionBuildError(RuntimeError):
@@ -62,6 +64,7 @@ class IngestionRunResponse(BaseModel):
     is_current: bool
     started_at: datetime | None
     finished_at: datetime | None
+    submitted_at: datetime | None = None
     created_at: datetime
 
 

@@ -73,6 +73,8 @@ class SearchRunErrorCode(StrEnum):
     QUEUE_UNAVAILABLE = "search_run_queue_unavailable"
     SESSION_EXPIRED = "search_run_session_expired"
     PLAN_DATA_INVALID = "search_run_plan_data_invalid"
+    USER_QUOTA_EXCEEDED = "search_run_user_quota_exceeded"
+    GLOBAL_BUDGET_EXHAUSTED = "search_run_global_budget_exhausted"
 
 
 class SearchRunError(RuntimeError):
@@ -92,6 +94,8 @@ class CandidateFulltextErrorCode(StrEnum):
     SESSION_EXPIRED = "candidate_fulltext_session_expired"
     STATE_NOT_FOUND = "candidate_fulltext_state_not_found"
     NOT_RETRYABLE = "candidate_fulltext_not_retryable"
+    UPLOAD_NOT_AUTHORIZED = "candidate_fulltext_upload_not_authorized"
+    UPLOAD_IN_PROGRESS = "candidate_fulltext_upload_in_progress"
 
 
 class CandidateFulltextError(RuntimeError):

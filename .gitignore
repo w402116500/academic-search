@@ -29,6 +29,7 @@ Thumbs.db
 **/coverage/
 **/playwright-report/
 **/test-results/
+/.vite/
 
 # Local service data and generated clients
 .local/

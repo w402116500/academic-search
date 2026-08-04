@@ -47,6 +47,12 @@ def _research_error_response(error: ResearchError) -> HTTPException:
         }
         else status.HTTP_503_SERVICE_UNAVAILABLE
         if error.code is ResearchErrorCode.QUEUE_UNAVAILABLE
+        else status.HTTP_429_TOO_MANY_REQUESTS
+        if error.code
+        in {
+            ResearchErrorCode.USER_QUOTA_EXCEEDED,
+            ResearchErrorCode.GLOBAL_BUDGET_EXHAUSTED,
+        }
         else status.HTTP_409_CONFLICT
     )
     return HTTPException(
@@ -272,7 +278,7 @@ async def retry_research_run(
 @router.post(
     "/{collection_id}/conversations/{conversation_id}/research-runs/{research_run_id}/cancel",
     response_model=ResearchRunResponse,
-    summary="取消尚未开始的研究运行",
+    summary="取消或请求停止研究运行",
 )
 async def cancel_research_run(
     collection_id: UUID,
@@ -281,7 +287,7 @@ async def cancel_research_run(
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ResearchRunResponse:
-    """只允许取消 queued 任务，已开始的模型调用不会被错误伪装为已取消。"""
+    """queued 任务立即取消；running 任务记录请求并由 Worker 在安全边界停止。"""
     try:
         return await ResearchConversationService(session).cancel_run(
             owner_user_id=current_user.id,

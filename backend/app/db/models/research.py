@@ -225,8 +225,14 @@ class ResearchRun(UUIDPrimaryKeyMixin, Base):
     error_message: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="可展示的失败原因"
     )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="用户请求协作停止的时间"
+    )
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="运行开始时间"
+    )
+    stage_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="当前公开阶段开始时间"
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="运行结束时间"

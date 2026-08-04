@@ -52,6 +52,24 @@ export const getFulltext = (
     `/api/v1/collections/${workspaceId}/search-runs/${runId}/candidates/${candidateId}/fulltext`,
   );
 
+export const uploadAuthorizedFulltext = (
+  workspaceId: string,
+  runId: string,
+  candidateId: string,
+  file: File,
+): Promise<FulltextResponse> =>
+  apiFetch<FulltextResponse>(
+    `/api/v1/collections/${workspaceId}/search-runs/${runId}/candidates/${candidateId}/fulltext/upload`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": file.type || "application/pdf",
+        "X-Upload-Authorized": "true",
+      },
+      body: file,
+    },
+  );
+
 export const getCandidateCitation = (
   workspaceId: string,
   runId: string,

@@ -12,7 +12,7 @@ from uuid import UUID
 import httpx
 import pytest
 from app.core.settings import NetworkMode
-from app.modules.fulltext.acquisition import OpenAccessPdfAcquirer
+from app.modules.fulltext.acquisition import AuthorizedPdfUploader, OpenAccessPdfAcquirer
 from app.modules.fulltext.contracts import (
     FulltextAcquisitionErrorCode,
     FulltextAcquisitionStatus,
@@ -142,6 +142,12 @@ async def _private_resolver(
     return (_PRIVATE_ADDRESS,)
 
 
+async def _upload_chunks(*chunks: bytes):
+    """以与 FastAPI Request.stream() 相同的异步字节流形状提供上传正文。"""
+    for chunk in chunks:
+        yield chunk
+
+
 @pytest.mark.asyncio
 async def test_acquirer_downloads_valid_pdf_and_uploads_a_private_staging_object() -> None:
     """满足 DOI、开放获取与 PDF 校验后，才能产生可供后续入库的文件结果。"""
@@ -178,6 +184,40 @@ async def test_acquirer_requires_upload_when_candidate_is_not_open_access() -> N
     assert result.status is FulltextAcquisitionStatus.REQUIRES_UPLOAD
     assert result.error is not None
     assert result.error.code is FulltextAcquisitionErrorCode.NOT_OPEN_ACCESS
+    assert not storage.uploads
+
+
+@pytest.mark.asyncio
+async def test_authorized_uploader_accepts_a_verified_non_open_access_candidate() -> None:
+    """用户上传不能依赖公开 URL，但仍必须绑定服务端已核验的候选 DOI。"""
+    storage = MemoryStorage()
+    result = await AuthorizedPdfUploader(_settings(), storage).acquire(
+        candidate=_candidate(is_open_access=False, fulltext_url=None),
+        chunks=_upload_chunks(_PDF_BYTES[:12], _PDF_BYTES[12:]),
+        media_type="application/pdf",
+    )
+
+    assert result.status is FulltextAcquisitionStatus.AVAILABLE
+    assert result.document is not None
+    assert result.document.origin_kind == "user_upload"
+    assert result.document.access_rights == "user_upload"
+    assert result.document.sha256 == hashlib.sha256(_PDF_BYTES).hexdigest()
+    assert storage.uploads[result.document.staging_object_key][0] == _PDF_BYTES
+
+
+@pytest.mark.asyncio
+async def test_authorized_uploader_rejects_a_non_pdf_request_body() -> None:
+    """仅文件扩展名不能代表 PDF；上传内容必须同时通过 MIME 和魔数校验。"""
+    storage = MemoryStorage()
+    result = await AuthorizedPdfUploader(_settings(), storage).acquire(
+        candidate=_candidate(is_open_access=False, fulltext_url=None),
+        chunks=_upload_chunks(b"<html>not a pdf</html>"),
+        media_type="text/html",
+    )
+
+    assert result.status is FulltextAcquisitionStatus.REJECTED
+    assert result.error is not None
+    assert result.error.code is FulltextAcquisitionErrorCode.INVALID_CONTENT_TYPE
     assert not storage.uploads
 
 

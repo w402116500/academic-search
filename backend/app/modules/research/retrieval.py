@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
 
+import httpx
 from app.db.models.collection import CollectionPaper, ResearchCollection
 from app.db.models.document import Document, DocumentChunk, IngestionRun
 from app.db.models.paper import Paper
@@ -36,6 +37,119 @@ class VectorMatch:
 
     chunk_id: UUID
     score: float
+
+
+@dataclass(frozen=True, slots=True)
+class RerankMatch:
+    """真实重排服务返回的输入序号与相关性分数。"""
+
+    index: int
+    score: float
+
+
+class ResearchRerankerError(RuntimeError):
+    """配置已启用的外部重排器未能返回可审计结果时抛出。"""
+
+
+class ResearchReranker(Protocol):
+    """可替换的真实重排器边界；未配置时检索器不会调用它。"""
+
+    @property
+    def name(self) -> str:
+        """返回会写入 trace 的适配器标识，不包含端点或密钥。"""
+        raise NotImplementedError
+
+    async def rerank(
+        self,
+        *,
+        query: str,
+        evidences: Sequence[RetrievedEvidence],
+        limit: int,
+    ) -> tuple[RerankMatch, ...]:
+        """对传入的有限证据池重排，只能按输入下标返回结果。"""
+        raise NotImplementedError
+
+
+class HttpResearchReranker:
+    """兼容常见 `/rerank` JSON 协议的外部交叉编码器适配器。"""
+
+    def __init__(
+        self,
+        settings: ResearchSettings,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        if not settings.reranker_enabled:
+            raise ValueError("未配置 RAG Reranker，不能创建 HTTP 重排适配器")
+        self._settings = settings
+        self._transport = transport
+
+    @property
+    def name(self) -> str:
+        """不暴露供应商端点，仅说明本次确实调用了 HTTP 重排器。"""
+        return "http_reranker"
+
+    async def rerank(
+        self,
+        *,
+        query: str,
+        evidences: Sequence[RetrievedEvidence],
+        limit: int,
+    ) -> tuple[RerankMatch, ...]:
+        """调用配置端点并严格验证返回下标，禁止服务端指定任意 chunk。"""
+        if not evidences:
+            return ()
+        api_key = self._settings.rag_reranker_api_key
+        url = self._settings.rag_reranker_url
+        model = self._settings.rag_reranker_model
+        if api_key is None or url is None or model is None:
+            raise ResearchRerankerError("Reranker 配置不完整。")
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(self._settings.rag_reranker_timeout_seconds),
+                transport=self._transport,
+                trust_env=False,
+            ) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
+                    json={
+                        "model": model,
+                        "query": query,
+                        "documents": [
+                            evidence.content[: self._settings.rag_reranker_document_max_characters]
+                            for evidence in evidences
+                        ],
+                        "top_n": min(limit, len(evidences)),
+                        "return_documents": False,
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ResearchRerankerError("真实 Reranker 调用失败。") from exc
+
+        raw_results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(raw_results, list):
+            raise ResearchRerankerError("真实 Reranker 返回了无效结果。")
+        matches: list[RerankMatch] = []
+        seen_indexes: set[int] = set()
+        for item in raw_results:
+            if not isinstance(item, dict):
+                raise ResearchRerankerError("真实 Reranker 返回了无效结果。")
+            raw_index = item.get("index")
+            raw_score = item.get("relevance_score")
+            if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                raise ResearchRerankerError("真实 Reranker 返回了无效证据下标。")
+            if raw_index < 0 or raw_index >= len(evidences) or raw_index in seen_indexes:
+                raise ResearchRerankerError("真实 Reranker 返回了重复或越界证据下标。")
+            if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+                raise ResearchRerankerError("真实 Reranker 返回了无效相关性分数。")
+            seen_indexes.add(raw_index)
+            matches.append(RerankMatch(index=raw_index, score=float(raw_score)))
+        if not matches:
+            raise ResearchRerankerError("真实 Reranker 没有返回可用证据。")
+        return tuple(sorted(matches, key=lambda item: item.score, reverse=True)[:limit])
 
 
 class ResearchVectorSearch(Protocol):
@@ -73,6 +187,7 @@ class RetrievedEvidence:
     vector_score: float | None = None
     lexical_score: float | None = None
     rrf_score: float | None = None
+    rerank_score: float | None = None
     rank: int | None = None
     source_chunk_ids: tuple[UUID, ...] = ()
     parent_merged: bool = False
@@ -195,11 +310,13 @@ class ResearchRetriever:
         embedder: TextEmbedder,
         vector_search: ResearchVectorSearch,
         settings: ResearchSettings,
+        reranker: ResearchReranker | None = None,
     ) -> None:
         self._session = session
         self._embedder = embedder
         self._vector_search = vector_search
         self._settings = settings
+        self._reranker = reranker
 
     async def retrieve(self, *, scope: RetrievalScope, query: str) -> RetrievalResult:
         """在固定权限范围内完成向量/关键词召回、RRF 与父块 Auto-merging。"""
@@ -247,11 +364,9 @@ class ResearchRetriever:
             for evidence in merged
             if (evidence.rrf_score or 0) >= self._settings.rag_min_rrf_score
         )
+        reranked, reranker_trace = await self._rerank(query=query, evidences=eligible)
         final = tuple(
-            replace(evidence, rank=index)
-            for index, evidence in enumerate(
-                eligible[: self._settings.rag_final_evidence_limit], start=1
-            )
+            replace(evidence, rank=index) for index, evidence in enumerate(reranked, start=1)
         )
         await self._session.rollback()
         return RetrievalResult(
@@ -261,8 +376,43 @@ class ResearchRetriever:
                 "keyword_candidate_count": len(lexical_rows),
                 "rrf_candidate_count": len(fused),
                 "parent_merged_count": sum(item.parent_merged for item in merged),
+                "reranker": reranker_trace,
                 "final_evidence_count": len(final),
                 "ingestion_run_count": len(ingestion_run_ids),
+            },
+        )
+
+    async def _rerank(
+        self,
+        *,
+        query: str,
+        evidences: Sequence[RetrievedEvidence],
+    ) -> tuple[tuple[RetrievedEvidence, ...], dict[str, object]]:
+        """只在真实服务完整配置时计算重排分数；否则保留明确的 RRF 截断语义。"""
+        if self._reranker is None:
+            return (
+                tuple(evidences[: self._settings.rag_final_evidence_limit]),
+                {
+                    "enabled": False,
+                    "status": "disabled",
+                    "reason": "未配置真实 Reranker，最终证据按 RRF 结果截断。",
+                },
+            )
+        pool = tuple(evidences[: self._settings.rag_reranker_candidate_limit])
+        matches = await self._reranker.rerank(
+            query=query,
+            evidences=pool,
+            limit=self._settings.rag_final_evidence_limit,
+        )
+        reranked = tuple(replace(pool[match.index], rerank_score=match.score) for match in matches)
+        return (
+            reranked,
+            {
+                "enabled": True,
+                "status": "completed",
+                "adapter": self._reranker.name,
+                "candidate_count": len(pool),
+                "returned_count": len(reranked),
             },
         )
 

@@ -24,6 +24,9 @@ class IngestionSettings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_embedding_model: str = "text-embedding-3-large"
     rag_embedding_batch_size: int = Field(default=16, ge=1, le=128)
+    # 只有确认构建后实际进入队列的文献运行消耗该预算；待确认 pending 不计入。
+    rag_user_daily_ingestion_run_limit: int = Field(default=40, ge=1, le=2_000)
+    rag_global_daily_ingestion_run_limit: int = Field(default=1_000, ge=1, le=20_000)
 
     rag_max_l1_characters: int = Field(default=12_000, ge=512, le=100_000)
     rag_max_l2_characters: int = Field(default=4_000, ge=256, le=50_000)

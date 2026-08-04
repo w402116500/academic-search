@@ -80,12 +80,12 @@ const allCandidates = [
   candidate("candidate-3", "Built environment correlates of daily walking in adults", "en"),
 ];
 
-function fulltextState(candidateId: string) {
+function fulltextState(candidateId: string, status: "available" | "validating") {
   return {
     search_run_id: runId,
     candidate_id: candidateId,
     attempt_no: 1,
-    status: "available",
+    status,
     document: {
       staging_object_key: `staging/${candidateId}.pdf`,
       sha256: "a".repeat(64),
@@ -99,7 +99,7 @@ function fulltextState(candidateId: string) {
 
 async function openReviewPage(page: Page): Promise<void> {
   const selectedIds = new Set<string>();
-  const preparedIds = new Set<string>();
+  const verificationStates = new Map<string, "available" | "validating">();
   let pendingDocumentCount = 0;
 
   await page.addInitScript(() =>
@@ -143,11 +143,17 @@ async function openReviewPage(page: Page): Promise<void> {
     }
     if (pathname.endsWith(selectionPath) && method === "DELETE") {
       selectedIds.clear();
-      preparedIds.clear();
+      verificationStates.clear();
       return route.fulfill({ json: { run_id: runId, selected_count: 0 } });
     }
     if (pathname.endsWith(`${selectionPath}/prepare`) && method === "POST") {
-      for (const candidateId of selectedIds) preparedIds.add(candidateId);
+      for (const candidateId of selectedIds) {
+        // 模拟同一批次内的真实部分完成：一篇已通过，另一篇仍在校验。
+        verificationStates.set(
+          candidateId,
+          candidateId === "candidate-1" ? "available" : "validating",
+        );
+      }
       return route.fulfill({
         status: 202,
         json: {
@@ -164,10 +170,15 @@ async function openReviewPage(page: Page): Promise<void> {
       });
     }
     if (pathname.endsWith(`${selectionPath}/admission`) && method === "POST") {
-      const admittedCount = selectedIds.size;
+      const admittedCandidateIds = [...selectedIds].filter(
+        (candidateId) => verificationStates.get(candidateId) === "available",
+      );
+      const admittedCount = admittedCandidateIds.length;
       pendingDocumentCount += admittedCount;
-      selectedIds.clear();
-      preparedIds.clear();
+      for (const candidateId of admittedCandidateIds) {
+        selectedIds.delete(candidateId);
+        verificationStates.delete(candidateId);
+      }
       return route.fulfill({
         json: {
           run_id: runId,
@@ -201,10 +212,13 @@ async function openReviewPage(page: Page): Promise<void> {
             : visibleCandidates.slice(2)
           : visibleCandidates;
       const needsFulltextCount = [...selectedIds].filter(
-        (candidateId) => !preparedIds.has(candidateId),
+        (candidateId) => !verificationStates.has(candidateId),
       ).length;
-      const readyForAdmissionCount = [...selectedIds].filter((candidateId) =>
-        preparedIds.has(candidateId),
+      const fulltextInProgressCount = [...selectedIds].filter((candidateId) =>
+        ["queued", "downloading", "validating"].includes(verificationStates.get(candidateId) ?? ""),
+      ).length;
+      const readyForAdmissionCount = [...selectedIds].filter(
+        (candidateId) => verificationStates.get(candidateId) === "available",
       ).length;
       return route.fulfill({
         json: {
@@ -214,8 +228,11 @@ async function openReviewPage(page: Page): Promise<void> {
           items: pageCandidates.map((candidate) => ({
             candidate,
             is_selected: selectedIds.has(candidate.candidate_id),
-            fulltext: preparedIds.has(candidate.candidate_id)
-              ? fulltextState(candidate.candidate_id)
+            fulltext: verificationStates.has(candidate.candidate_id)
+              ? fulltextState(
+                  candidate.candidate_id,
+                  verificationStates.get(candidate.candidate_id)!,
+                )
               : null,
           })),
           page: {
@@ -226,7 +243,7 @@ async function openReviewPage(page: Page): Promise<void> {
           selection: {
             selected_count: selectedIds.size,
             needs_fulltext_count: needsFulltextCount,
-            fulltext_in_progress_count: 0,
+            fulltext_in_progress_count: fulltextInProgressCount,
             ready_for_admission_count: readyForAdmissionCount,
             blocked_count: 0,
           },
@@ -242,7 +259,7 @@ async function openReviewPage(page: Page): Promise<void> {
   await page.goto(`/workspace/${workspaceId}/results?run=${runId}`);
 }
 
-test("候选审核在跨页、筛选和刷新后保持准备清单，并完成批量准入", async ({ page }) => {
+test("候选审核在跨页、筛选和刷新后保持准备清单，并在核验页部分加入集合", async ({ page }) => {
   await openReviewPage(page);
 
   const firstTitle = allCandidates[0].title;
@@ -273,14 +290,25 @@ test("候选审核在跨页、筛选和刷新后保持准备清单，并完成�
   await expect(candidateTable.getByText(firstTitle)).toBeVisible();
   await expect(candidateTable.getByText(thirdTitle)).toBeVisible();
 
-  await page.getByRole("button", { name: "准备核验" }).click();
-  const selectionActionBar = page.getByLabel("本次准备清单操作");
-  await expect(selectionActionBar).toContainText("可入集合 2");
-  await expect(selectionActionBar.getByRole("button", { name: "加入待确认集合" })).toBeEnabled();
+  await page.getByRole("button", { name: "核验任务" }).click();
+  await expect(page).toHaveURL(new RegExp(`/workspace/${workspaceId}/verification\\?run=${runId}`));
+  await expect(page.getByText("准备清单").first()).toBeVisible();
+  await expect(page.getByText("题录与全文核验", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "开始核验" })).toBeEnabled();
 
-  await selectionActionBar.getByRole("button", { name: "加入待确认集合" }).click();
-  await expect(page.getByLabel("本次准备清单操作")).not.toBeVisible();
-  await expect(page.getByRole("button", { name: "待确认集合 2 篇" })).toBeEnabled();
-  await page.getByRole("button", { name: "待确认集合 2 篇" }).click();
-  await expect(page.getByTestId("collection-confirm-dialog")).toContainText("构建这 2 篇文献");
+  await page.getByRole("button", { name: "开始核验" }).click();
+  await expect(page.getByText("正在校验 PDF")).toBeVisible();
+  await expect(page.getByText("已通过核验", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /加入待确认集合/ })).toBeEnabled();
+
+  await page.getByRole("button", { name: /加入待确认集合/ }).click();
+  await expect(page.getByTestId("verification-admission-dialog")).toContainText(
+    "将 1 篇已核验文献加入待确认集合",
+  );
+  await page
+    .getByTestId("verification-admission-dialog")
+    .getByRole("button", { name: "确认加入" })
+    .click();
+  await expect(page.getByText("本次已加入 1 篇文献")).toBeVisible();
+  await expect(page.getByRole("button", { name: "待确认集合 1 篇" })).toBeEnabled();
 });

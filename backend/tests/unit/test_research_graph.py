@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Literal
 from uuid import UUID
 
 import pytest
 from app.modules.research.contracts import ResearchRunStatus
 from app.modules.research.execution import ResearchExecutionContext
 from app.modules.research.graph import (
+    AnswerClaimVerification,
+    AnswerClaimVerificationItem,
     AnswerDraft,
     EvidenceVerification,
     ResearchGraphRunner,
+    ResearchRouteDecision,
+    ResearchRunCancelled,
+    ResearchToolAction,
 )
 from app.modules.research.retrieval import RetrievalResult, RetrievedEvidence
 from app.modules.research.settings import ResearchSettings
@@ -80,13 +86,29 @@ class FakeRetriever:
 class FakeModel:
     """为图测试提供完全确定的结构化模型输出。"""
 
-    def __init__(self, *, sufficient: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        sufficient: bool = True,
+        claims_supported: bool = True,
+        route_mode: Literal["single_rag", "multi_agent"] = "single_rag",
+    ) -> None:
         self.sufficient = sufficient
+        self.claims_supported = claims_supported
+        self.route_mode: Literal["single_rag", "multi_agent"] = route_mode
         self.rewrite_count = 0
 
     async def rewrite_query(self, question: str) -> str:
         self.rewrite_count += 1
         return f"rewritten: {question}"
+
+    async def route_question(self, question: str) -> ResearchRouteDecision:
+        return ResearchRouteDecision(
+            mode=self.route_mode,
+            reason="问题需要分别核验多个方面。"
+            if self.route_mode == "multi_agent"
+            else "问题可以由同一组原文证据直接核验。",
+        )
 
     async def generate_answer(
         self, *, question: str, evidences: Sequence[RetrievedEvidence]
@@ -101,10 +123,54 @@ class FakeModel:
     async def plan_subquestions(self, question: str, max_subquestions: int) -> tuple[str, ...]:
         return ("方法差异是什么？", "结果差异是什么？")
 
+    async def decide_research_action(
+        self,
+        *,
+        question: str,
+        available_queries: Sequence[str],
+        observations: Sequence[dict[str, object]],
+        tool_calls_remaining: int,
+    ) -> ResearchToolAction:
+        if available_queries:
+            return ResearchToolAction(
+                action="retrieve",
+                query=available_queries[0],
+                reason="还有未核验的子问题。",
+            )
+        return ResearchToolAction(action="answer", reason="已获得全部规划子问题的观察结果。")
+
     async def verify_evidence(
         self, *, question: str, evidences: Sequence[RetrievedEvidence]
     ) -> EvidenceVerification:
         return EvidenceVerification(supported_chunk_ids=[item.chunk_id for item in evidences])
+
+    async def verify_answer_claims(
+        self,
+        *,
+        question: str,
+        answer: str,
+        evidences: Sequence[RetrievedEvidence],
+    ) -> AnswerClaimVerification:
+        assert question
+        return AnswerClaimVerification(
+            claims=[
+                AnswerClaimVerificationItem(
+                    claim=answer,
+                    supported=self.claims_supported,
+                    supporting_chunk_ids=[evidences[0].chunk_id] if self.claims_supported else [],
+                )
+            ]
+        )
+
+
+@pytest.mark.parametrize("alias", ["router", "choice", "agent", "route"])
+def test_structured_router_accepts_known_model_aliases(alias: str) -> None:
+    """真实 OpenAI 兼容模型的已知别名应归一到稳定 mode 契约。"""
+    decision = ResearchRouteDecision.model_validate(
+        {alias: "single_rag", "reason": "问题无需多源比较。"}
+    )
+
+    assert decision.mode == "single_rag"
 
 
 def test_answer_draft_allows_empty_citations_only_for_insufficient_evidence() -> None:
@@ -162,8 +228,28 @@ async def test_single_rag_rewrites_at_most_once_then_requests_clarification() ->
 
 
 @pytest.mark.asyncio
-async def test_complex_question_uses_planning_and_evidence_verification() -> None:
-    """包含比较意图的问题进入受限复杂模式，并在核验后才生成最终回答。"""
+async def test_single_rag_rejects_an_answer_with_an_unsupported_atomic_claim() -> None:
+    """回答模型声称证据充分也必须经过独立主张核验，否则只返回证据不足。"""
+    retriever = FakeRetriever([RetrievalResult(evidences=(_evidence(),), trace={"final": 1})])
+    outcome = await ResearchGraphRunner(
+        retriever=retriever,
+        model=FakeModel(claims_supported=False),
+        settings=ResearchSettings(),
+        checkpoint_database_url=None,
+    ).run(_context("该方法的实验结果是什么？"))
+
+    assert outcome.status is ResearchRunStatus.AWAITING_CLARIFICATION
+    assert outcome.cited_chunk_ids == ()
+    assert outcome.retrieval_trace["answer_claim_verification"] == {
+        "claim_count": 1,
+        "unsupported_claim_count": 1,
+        "status": "unsupported",
+    }
+
+
+@pytest.mark.asyncio
+async def test_complex_question_uses_structured_routing_and_evidence_verification() -> None:
+    """结构化路由可让不含关键词的同义表达进入受限复杂模式。"""
     retriever = FakeRetriever(
         [
             RetrievalResult(evidences=(_evidence(),), trace={"final": 1}),
@@ -172,12 +258,58 @@ async def test_complex_question_uses_planning_and_evidence_verification() -> Non
     )
     outcome = await ResearchGraphRunner(
         retriever=retriever,
-        model=FakeModel(),
+        model=FakeModel(route_mode="multi_agent"),
         settings=ResearchSettings(),
         checkpoint_database_url=None,
-    ).run(_context("请比较两篇论文的方法和结果差异。"))
+    ).run(_context("请分别归纳两组研究证据在方法和结果上的不同。"))
 
     assert outcome.status is ResearchRunStatus.COMPLETED
     assert outcome.mode == "multi_agent"
     assert outcome.retrieval_trace["tool_calls"] == 2
+    assert outcome.retrieval_trace["routing"] == {
+        "classifier": "structured_question_router",
+        "mode": "multi_agent",
+        "reason": "问题需要分别核验多个方面。",
+    }
+    assert len(outcome.retrieval_trace["react_steps"]) == 3
+    assert outcome.retrieval_trace["budget"]["tool_calls"] == 2
     assert outcome.cited_chunk_ids == (_CHUNK_ID,)
+
+
+@pytest.mark.asyncio
+async def test_complex_research_answers_from_evidence_when_tool_budget_is_reached() -> None:
+    """工具预算耗尽后不再继续调用 Retriever，而是用已获证据进入核验和回答。"""
+    retriever = FakeRetriever([RetrievalResult(evidences=(_evidence(),), trace={"final": 1})])
+    outcome = await ResearchGraphRunner(
+        retriever=retriever,
+        model=FakeModel(route_mode="multi_agent"),
+        settings=ResearchSettings(rag_max_react_tool_calls=1),
+        checkpoint_database_url=None,
+    ).run(_context("请分别归纳两组研究证据在方法和结果上的不同。"))
+
+    assert outcome.status is ResearchRunStatus.COMPLETED
+    assert outcome.retrieval_trace["budget_exhausted"] is True
+    assert outcome.retrieval_trace["budget"]["tool_calls"] == 1
+    assert len(retriever.queries) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_checker_stops_before_a_following_graph_node() -> None:
+    """图在模型调用返回后的安全边界观察取消，不会继续写入回答。"""
+    checks = 0
+
+    async def cancellation_checker() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    with pytest.raises(ResearchRunCancelled):
+        await ResearchGraphRunner(
+            retriever=FakeRetriever(
+                [RetrievalResult(evidences=(_evidence(),), trace={"final": 1})]
+            ),
+            model=FakeModel(),
+            settings=ResearchSettings(),
+            checkpoint_database_url=None,
+            cancellation_checker=cancellation_checker,
+        ).run(_context("该方法的实验结果是什么？"))

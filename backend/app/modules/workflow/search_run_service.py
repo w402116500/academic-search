@@ -12,13 +12,14 @@ from app.db.models.workflow import ResearchPlan, SearchRun
 from app.modules.workflow.contracts import SearchRunError, SearchRunErrorCode
 from app.modules.workflow.job_queue import SearchRunJobQueue, SearchRunQueueError
 from app.modules.workflow.search_session import build_search_session_key
+from app.modules.workflow.settings import WorkflowSettings, get_workflow_settings
 from app.modules.workflow.state import (
     ResearchPlanStatus,
     SearchRunStage,
     SearchRunStatus,
     WorkspaceWorkflowStage,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,9 +36,16 @@ class SearchRunSubmission:
 class SearchRunService:
     """维护检索运行的长期状态，不执行外部 Provider 请求。"""
 
-    def __init__(self, session: AsyncSession, queue: SearchRunJobQueue | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        queue: SearchRunJobQueue | None = None,
+        *,
+        settings: WorkflowSettings | None = None,
+    ) -> None:
         self._session = session
         self._queue = queue
+        self._settings = settings
 
     async def start_search(
         self,
@@ -53,6 +61,7 @@ class SearchRunService:
         plan = await self._confirmed_plan_for_update(collection_id=collection_id)
         self._ensure_retrieval_stage(collection)
         await self._ensure_no_active_run(plan.id)
+        await self._assert_submission_quota(owner_user_id)
 
         search_run = self._new_run(collection=collection, plan=plan, attempt_no=1)
         collection.workflow_stage = WorkspaceWorkflowStage.RETRIEVING.value
@@ -105,6 +114,7 @@ class SearchRunService:
         plan = await self._confirmed_plan_for_update(collection_id=collection_id)
         self._ensure_retrieval_stage(collection)
         await self._ensure_no_active_run(plan.id)
+        await self._assert_submission_quota(owner_user_id)
         search_run = self._new_run(
             collection=collection,
             plan=plan,
@@ -263,6 +273,66 @@ class SearchRunService:
         await self._session.refresh(search_run)
         return search_run
 
+    async def reopen_relevance_run(
+        self,
+        *,
+        search_run_id: UUID,
+        candidate_counts: dict[str, Any],
+    ) -> SearchRun | None:
+        """在不重新请求 Provider 的前提下重新打开当前候选集合的相关性阶段。"""
+        row = await self._run_and_collection_for_update(search_run_id)
+        if row is None:
+            return None
+        search_run, collection = row
+        if (
+            search_run.status == SearchRunStatus.RUNNING.value
+            and search_run.stage == SearchRunStage.RELEVANCE_ASSESSMENT.value
+        ):
+            return search_run
+        if search_run.status not in {
+            SearchRunStatus.COMPLETED.value,
+            SearchRunStatus.PARTIAL_FAILED.value,
+            SearchRunStatus.CANCELLED.value,
+        }:
+            return None
+        search_run.status = SearchRunStatus.RUNNING.value
+        search_run.stage = SearchRunStage.RELEVANCE_ASSESSMENT.value
+        search_run.candidate_counts = candidate_counts
+        search_run.error_code = None
+        search_run.error_message = None
+        search_run.finished_at = None
+        collection.workflow_stage = WorkspaceWorkflowStage.SCREENING.value
+        await self._session.commit()
+        await self._session.refresh(search_run)
+        return search_run
+
+    async def cancel_relevance_run(
+        self,
+        *,
+        search_run_id: UUID,
+        candidate_counts: dict[str, Any],
+    ) -> SearchRun | None:
+        """显式取消当前语义分析，但保留已经检索到的候选供整批重试。"""
+        row = await self._run_and_collection_for_update(search_run_id)
+        if row is None:
+            return None
+        search_run, collection = row
+        if (
+            search_run.status != SearchRunStatus.RUNNING.value
+            or search_run.stage != SearchRunStage.RELEVANCE_ASSESSMENT.value
+        ):
+            return None
+        search_run.status = SearchRunStatus.CANCELLED.value
+        search_run.stage = SearchRunStage.COMPLETED.value
+        search_run.candidate_counts = candidate_counts
+        search_run.error_code = "candidate_relevance_cancelled"
+        search_run.error_message = "候选相关性分析已取消，可基于当前候选集合重新分析。"
+        search_run.finished_at = datetime.now(UTC)
+        collection.workflow_stage = WorkspaceWorkflowStage.SCREENING.value
+        await self._session.commit()
+        await self._session.refresh(search_run)
+        return search_run
+
     async def expire_run(self, search_run_id: UUID) -> SearchRun | None:
         """当 Redis 候选会话不存在时，将终态运行标为过期并保留数据库审计。"""
         row = await self._run_and_collection_for_update(search_run_id)
@@ -303,6 +373,39 @@ class SearchRunService:
             await self._session.commit()
             await self._session.refresh(search_run)
             raise SearchRunError(SearchRunErrorCode.QUEUE_UNAVAILABLE, message) from exc
+
+    async def _assert_submission_quota(self, owner_user_id: UUID) -> None:
+        """按 UTC 自然日限制用户与全局实际提交的检索运行数。"""
+        settings = self._settings or get_workflow_settings()
+        now = datetime.now(UTC)
+        period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        user_run_count = int(
+            await self._session.scalar(
+                select(func.count(SearchRun.id))
+                .join(ResearchCollection, ResearchCollection.id == SearchRun.collection_id)
+                .where(
+                    ResearchCollection.owner_user_id == owner_user_id,
+                    SearchRun.created_at >= period_start,
+                )
+            )
+            or 0
+        )
+        if user_run_count >= settings.workflow_user_daily_search_run_limit:
+            raise SearchRunError(
+                SearchRunErrorCode.USER_QUOTA_EXCEEDED,
+                "今日文献检索额度已用尽，请明天继续或联系管理员调整额度。",
+            )
+        global_run_count = int(
+            await self._session.scalar(
+                select(func.count(SearchRun.id)).where(SearchRun.created_at >= period_start)
+            )
+            or 0
+        )
+        if global_run_count >= settings.workflow_global_daily_search_run_limit:
+            raise SearchRunError(
+                SearchRunErrorCode.GLOBAL_BUDGET_EXHAUSTED,
+                "今日全局文献检索预算已用尽，请稍后再试。",
+            )
 
     async def _owned_collection_for_update(
         self,

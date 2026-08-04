@@ -21,18 +21,26 @@ from app.modules.collections.build_contracts import (
     IngestionRunStatus,
 )
 from app.modules.ingestion.job_queue import IngestionJobQueue, IngestionQueueError
+from app.modules.ingestion.settings import IngestionSettings, get_ingestion_settings
 from app.modules.workflow.state import WorkspaceWorkflowStage
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class ResearchCollectionBuildService:
     """维护集合构建的持久状态，不在 API 请求内执行 PDF 解析和向量化。"""
 
-    def __init__(self, session: AsyncSession, queue: IngestionJobQueue | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        queue: IngestionJobQueue | None = None,
+        *,
+        settings: IngestionSettings | None = None,
+    ) -> None:
         """注入请求或 Worker 范围内的会话，队列在只读列表操作中可以省略。"""
         self._session = session
         self._queue = queue
+        self._settings = settings
 
     async def list_documents(
         self,
@@ -135,15 +143,21 @@ class ResearchCollectionBuildService:
                 CollectionBuildErrorCode.NO_PENDING_DOCUMENTS,
                 "当前研究集合没有待确认构建的全文文献。",
             )
+        await self._assert_submission_quota(
+            owner_user_id=owner_user_id,
+            requested_run_count=len(pending_runs),
+        )
 
         # 先在同一数据库提交中打开 Worker 领取资格，避免已投递任务读到旧的 pending 状态。
         collection.workflow_stage = WorkspaceWorkflowStage.COLLECTION_BUILDING.value
+        submitted_at = datetime.now(UTC)
         for run in pending_runs:
             run.status = IngestionRunStatus.QUEUED.value
             run.error_code = None
             run.error_message = None
             run.finished_at = None
             run.is_current = False
+            run.submitted_at = submitted_at
         await self._session.commit()
 
         results = [await self._enqueue_run(run.id) for run in pending_runs]
@@ -168,6 +182,7 @@ class ResearchCollectionBuildService:
             collection_id=collection_id,
             ingestion_run_id=ingestion_run_id,
         )
+        await self._assert_submission_quota(owner_user_id=owner_user_id, requested_run_count=1)
         new_run = IngestionRun(
             # 任务在提交后立即要投递，提前生成 UUID 可避免依赖 ORM flush 时机。
             id=uuid4(),
@@ -181,6 +196,7 @@ class ResearchCollectionBuildService:
             statistics={},
             attempt_no=previous.attempt_no + 1,
             is_current=False,
+            submitted_at=datetime.now(UTC),
         )
         collection.workflow_stage = WorkspaceWorkflowStage.COLLECTION_BUILDING.value
         self._session.add(new_run)
@@ -290,6 +306,45 @@ class ResearchCollectionBuildService:
             error_code=run.error_code,
             error_message=run.error_message,
         )
+
+    async def _assert_submission_quota(
+        self,
+        *,
+        owner_user_id: UUID,
+        requested_run_count: int,
+    ) -> None:
+        """按 UTC 自然日预检本批实际进入构建队列的文献运行额度。"""
+        settings = self._settings or get_ingestion_settings()
+        now = datetime.now(UTC)
+        period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        user_run_count = int(
+            await self._session.scalar(
+                select(func.count(IngestionRun.id))
+                .join(Document, Document.id == IngestionRun.document_id)
+                .join(ResearchCollection, ResearchCollection.id == Document.collection_id)
+                .where(
+                    ResearchCollection.owner_user_id == owner_user_id,
+                    IngestionRun.submitted_at >= period_start,
+                )
+            )
+            or 0
+        )
+        if user_run_count + requested_run_count > settings.rag_user_daily_ingestion_run_limit:
+            raise CollectionBuildError(
+                CollectionBuildErrorCode.USER_QUOTA_EXCEEDED,
+                "今日文献入库额度不足，无法投递本次待构建文献。",
+            )
+        global_run_count = int(
+            await self._session.scalar(
+                select(func.count(IngestionRun.id)).where(IngestionRun.submitted_at >= period_start)
+            )
+            or 0
+        )
+        if global_run_count + requested_run_count > settings.rag_global_daily_ingestion_run_limit:
+            raise CollectionBuildError(
+                CollectionBuildErrorCode.GLOBAL_BUDGET_EXHAUSTED,
+                "今日全局文献入库预算不足，无法投递本次待构建文献。",
+            )
 
     async def _record_arq_job_id(self, ingestion_run_id: UUID, job_id: str) -> IngestionRun:
         """回写任务标识；Worker 即使很快完成，也保留可审计的投递来源。"""

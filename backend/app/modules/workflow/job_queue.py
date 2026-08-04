@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
-from app.workers.queues import WORKFLOW_QUEUE_NAME
+from app.workers.queues import RELEVANCE_QUEUE_NAME, WORKFLOW_QUEUE_NAME
 from app.workers.redis import redis_settings_from_environment
 from arq import create_pool
 
@@ -40,6 +40,14 @@ class CandidateFulltextJobQueue(Protocol):
         raise NotImplementedError
 
 
+class CandidateRelevanceJobQueue(Protocol):
+    """运行级候选相关性服务依赖的最小投递接口。"""
+
+    async def enqueue_relevance(self, *, search_run_id: UUID, attempt_id: str) -> str:
+        """投递完整候选集合的一次语义分析，返回唯一 arq Job 标识。"""
+        raise NotImplementedError
+
+
 class ResearchPlanQueueError(RuntimeError):
     """Redis 或 arq 队列无法接收计划分析任务时抛出。"""
 
@@ -50,6 +58,10 @@ class SearchRunQueueError(RuntimeError):
 
 class CandidateFulltextQueueError(RuntimeError):
     """Redis 或 arq 队列无法接收全文获取任务时抛出。"""
+
+
+class CandidateRelevanceQueueError(RuntimeError):
+    """Redis 或 arq 队列无法接收完整候选相关性任务时抛出。"""
 
 
 class ArqResearchPlanJobQueue:
@@ -132,6 +144,30 @@ class ArqCandidateFulltextJobQueue:
             return job.job_id if job is not None else job_id
         except Exception as exc:
             raise CandidateFulltextQueueError("全文获取任务无法投递到 Redis。") from exc
+        finally:
+            if redis is not None:
+                await redis.aclose(close_connection_pool=True)
+
+
+class ArqCandidateRelevanceJobQueue:
+    """向专用 relevance Worker 投递完整候选集合任务。"""
+
+    async def enqueue_relevance(self, *, search_run_id: UUID, attempt_id: str) -> str:
+        """每轮使用新尝试标识；相同尝试的重复点击仍保持幂等。"""
+        redis = None
+        job_id = f"relevance-{search_run_id}-{attempt_id}"
+        try:
+            redis = await create_pool(redis_settings_from_environment())
+            job = await redis.enqueue_job(
+                "run_candidate_relevance",
+                str(search_run_id),
+                attempt_id,
+                _job_id=job_id,
+                _queue_name=RELEVANCE_QUEUE_NAME,
+            )
+            return job.job_id if job is not None else job_id
+        except Exception as exc:
+            raise CandidateRelevanceQueueError("候选相关性任务无法投递到 Redis。") from exc
         finally:
             if redis is not None:
                 await redis.aclose(close_connection_pool=True)

@@ -162,6 +162,56 @@ function runForOutputMessage(messageId: string): ResearchRun | null {
   return conversationDetail.value?.runs.find((run) => run.output_message_id === messageId) ?? null;
 }
 
+function rerankerDisabled(run: ResearchRun | null): boolean {
+  const reranker = run?.retrieval_trace.reranker;
+  return (
+    typeof reranker === "object" &&
+    reranker !== null &&
+    "enabled" in reranker &&
+    reranker.enabled === false
+  );
+}
+
+function isTraceRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function cancellationRequested(run: ResearchRun | null): boolean {
+  return run?.status === "running" && run.cancel_requested_at !== null;
+}
+
+function governanceSummary(run: ResearchRun | null): string | null {
+  const trace = run?.retrieval_trace;
+  if (!trace) return null;
+  const routing = trace.routing;
+  const budget = trace.budget;
+  const timing = trace.timing;
+  const parts: string[] = [];
+  if (isTraceRecord(routing)) {
+    const reason = routing.reason;
+    if (typeof reason === "string") parts.push(reason);
+  }
+  if (isTraceRecord(budget)) {
+    const modelCalls = budget.model_calls;
+    const modelLimit = budget.model_call_limit;
+    const toolCalls = budget.tool_calls;
+    const toolLimit = budget.tool_call_limit;
+    if (
+      typeof modelCalls === "number" &&
+      typeof modelLimit === "number" &&
+      typeof toolCalls === "number" &&
+      typeof toolLimit === "number"
+    ) {
+      parts.push(`模型 ${modelCalls}/${modelLimit} 次，检索 ${toolCalls}/${toolLimit} 次`);
+    }
+  }
+  if (isTraceRecord(timing)) {
+    const duration = timing.total_duration_ms;
+    if (typeof duration === "number") parts.push(`耗时 ${(duration / 1_000).toFixed(1)} 秒`);
+  }
+  return parts.length ? parts.join("；") : null;
+}
+
 async function refreshConversation(): Promise<void> {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ["research-conversations", workspaceId.value] }),
@@ -327,15 +377,15 @@ async function cancelCurrentRun(): Promise<void> {
   if (!run || !selectedConversationId.value) return;
   operationError.value = null;
   try {
-    activeRun.value = await cancelRunMutation.mutateAsync({
+    const cancelled = await cancelRunMutation.mutateAsync({
       conversationId: selectedConversationId.value,
       runId: run.id,
     });
-    eventController.value?.abort();
+    activeRun.value = cancelled;
+    if (cancelled.status === "cancelled") eventController.value?.abort();
     await refreshConversation();
   } catch (error) {
-    operationError.value =
-      error instanceof Error ? error.message : "任务已被 Worker 领取，无法取消。";
+    operationError.value = error instanceof Error ? error.message : "取消请求暂时无法提交。";
   }
 }
 
@@ -634,7 +684,21 @@ onBeforeUnmount(() => {
                     }}
                     条引用已核验</span
                   >
-                  <span v-else>{{ message.status === "completed" ? "已保存" : "处理中" }}</span>
+                  <span
+                    v-if="
+                      message.role === 'assistant' &&
+                      rerankerDisabled(runForOutputMessage(message.id))
+                    "
+                    >未启用模型重排</span
+                  >
+                  <small
+                    v-if="
+                      message.role === 'assistant' &&
+                      governanceSummary(runForOutputMessage(message.id))
+                    "
+                    >{{ governanceSummary(runForOutputMessage(message.id)) }}</small
+                  >
+                  <span v-if="message.status !== 'completed'">处理中</span>
                 </div>
                 <p class="research-chat-message-body">{{ message.content }}</p>
                 <details
@@ -688,8 +752,21 @@ onBeforeUnmount(() => {
                   :size="17" /><CircleAlert v-else :size="17"
               /></span>
               <div>
-                <strong>{{ progressEvent?.message ?? pendingRun.stage_display.label }}</strong>
-                <p>{{ pendingRun.error_message ?? pendingRun.stage_display.description }}</p>
+                <strong>{{
+                  cancellationRequested(pendingRun)
+                    ? "已请求停止，正在等待当前调用返回。"
+                    : (progressEvent?.message ?? pendingRun.stage_display.label)
+                }}</strong>
+                <p>
+                  {{
+                    cancellationRequested(pendingRun)
+                      ? "任务会在当前模型或检索调用结束后的安全边界停止，不会生成回答或新的引用证据。"
+                      : (pendingRun.error_message ?? pendingRun.stage_display.description)
+                  }}
+                </p>
+                <small v-if="governanceSummary(pendingRun)">{{
+                  governanceSummary(pendingRun)
+                }}</small>
                 <small v-if="progressEvent"
                   >已确认 {{ progressEvent.evidence_count }} 个候选证据片段</small
                 >
@@ -703,14 +780,20 @@ onBeforeUnmount(() => {
                     <RotateCcw :size="15" />重新投递
                   </button>
                 </div>
-                <div v-else-if="pendingRun.status === 'queued'" class="research-chat-run-actions">
+                <div
+                  v-else-if="
+                    pendingRun.status === 'queued' ||
+                    (pendingRun.status === 'running' && !cancellationRequested(pendingRun))
+                  "
+                  class="research-chat-run-actions"
+                >
                   <button
                     class="secondary-button"
                     type="button"
                     :disabled="cancelRunMutation.isPending.value"
                     @click="cancelCurrentRun"
                   >
-                    <X :size="15" />取消任务
+                    <X :size="15" />{{ pendingRun.status === "running" ? "请求停止" : "取消任务" }}
                   </button>
                 </div>
               </div>

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from uuid import uuid4
 
@@ -28,42 +27,59 @@ def _live_test_is_enabled() -> bool:
     return os.getenv(_LIVE_TEST_ENVIRONMENT_FLAG) == "1"
 
 
-def _candidate() -> UnifiedCandidate:
-    """构造与来源规整后形态一致的候选，不向外部来源或本地存储写入测试数据。"""
-    source = RawCandidate(
-        source=SourceName.OPENALEX,
-        source_record_id="live-relevance-urban-green-space",
-        title="Urban green space and mental health",
-        abstract=(
-            "This review examines associations between urban green space exposure and mental "
-            "health outcomes. It discusses accessibility, frequency of use, and differences "
-            "across population groups."
+def _candidates() -> tuple[UnifiedCandidate, ...]:
+    """构造同一检索集合中的多条候选，不向外部来源或本地存储写入测试数据。"""
+    records = (
+        RawCandidate(
+            source=SourceName.OPENALEX,
+            source_record_id="live-relevance-urban-green-space",
+            title="Urban green space and mental health",
+            abstract=(
+                "This review examines associations between urban green space exposure and mental "
+                "health outcomes. It discusses accessibility, frequency of use, and differences "
+                "across population groups."
+            ),
+            published_year=2024,
+            document_type="review",
+            language=CandidateLanguage.ENGLISH,
         ),
-        published_year=2024,
-        document_type="review",
-        language=CandidateLanguage.ENGLISH,
+        RawCandidate(
+            source=SourceName.SEMANTIC_SCHOLAR,
+            source_record_id="live-relevance-street-trees",
+            title="Street tree canopy and depressive symptoms among urban adults",
+            abstract=(
+                "This longitudinal cohort study estimates associations between residential street "
+                "tree canopy, depressive symptoms, and socioeconomic conditions among urban adults."
+            ),
+            published_year=2023,
+            document_type="article",
+            language=CandidateLanguage.ENGLISH,
+        ),
     )
-    return UnifiedCandidate(
-        candidate_id=uuid4(),
-        title=source.title,
-        title_key="urban green space mental health",
-        abstract=source.abstract,
-        published_year=2024,
-        document_type=source.document_type,
-        language=CandidateLanguage.ENGLISH,
-        source_records=(source,),
-        triage=TriageDecision(included=True),
+    return tuple(
+        UnifiedCandidate(
+            candidate_id=uuid4(),
+            title=record.title,
+            title_key=" ".join(record.title.casefold().split()),
+            abstract=record.abstract,
+            published_year=record.published_year,
+            document_type=record.document_type,
+            language=record.language or CandidateLanguage.UNKNOWN,
+            source_records=(record,),
+            triage=TriageDecision(included=True),
+        )
+        for record in records
     )
 
 
 @pytest.mark.live
 @pytest.mark.asyncio
-async def test_live_candidate_relevance_assessment_is_grounded_in_candidate_metadata() -> None:
-    """DeepSeek 的展示理由应完整、可读，并且每条依据都能回到标题或摘要。"""
+async def test_live_candidate_relevance_assessment_never_exposes_unverified_claims() -> None:
+    """真实模型只能展示通过二次核验的理由，扩大解释必须安全降级。"""
     if not _live_test_is_enabled():
         pytest.skip(f"仅在 {_LIVE_TEST_ENVIRONMENT_FLAG}=1 时运行真实相关性验收")
 
-    candidate = _candidate()
+    candidates = _candidates()
     context = CandidateRelevanceContext(
         research_question="城市绿地如何影响居民心理健康？",
         direction_title="城市绿地暴露与心理健康结果",
@@ -77,31 +93,40 @@ async def test_live_candidate_relevance_assessment_is_grounded_in_candidate_meta
 
     result = await OpenAICompatibleCandidateRelevanceEvaluator(get_workflow_settings()).assess(
         context=context,
-        candidates=(candidate,),
+        candidates=candidates,
     )
 
-    assessed = result[0]
-    assert assessed.relevance_state == "completed"
-    assert assessed.relevance_assessment is not None
-    assert assessed.relevance_assessment.study_focus
-    assert assessed.relevance_assessment.reason
-    assert assessed.relevance_assessment.helpful_aspect
-    assert assessed.relevance_assessment.recommendation
-    assert assessed.relevance_assessment.evidence
+    assert len(result) == len(candidates)
+    assert {candidate.candidate_id for candidate in result} == {
+        candidate.candidate_id for candidate in candidates
+    }
+    completed_count = 0
+    rejected_count = 0
+    for candidate in result:
+        if candidate.relevance_state == "failed":
+            rejected_count += 1
+            assert candidate.relevance_assessment is None
+            assert candidate.relevance_error is not None
+            assert candidate.relevance_error.code.startswith("candidate_relevance_claim_")
+            continue
 
-    for evidence in assessed.relevance_assessment.evidence:
-        source = candidate.title if evidence.source_field == "title" else candidate.abstract
-        assert source is not None
-        assert " ".join(evidence.quote.casefold().split()) in " ".join(source.casefold().split())
+        completed_count += 1
+        assert candidate.relevance_state == "completed"
+        assert candidate.relevance_assessment is not None
+        assert candidate.relevance_assessment.study_focus
+        assert candidate.relevance_assessment.reason
+        assert candidate.relevance_assessment.helpful_aspect
+        assert candidate.relevance_assessment.recommendation
+        assert candidate.relevance_assessment.evidence
+        for evidence in candidate.relevance_assessment.evidence:
+            source = candidate.title if evidence.source_field == "title" else candidate.abstract
+            assert source is not None
+            assert " ".join(evidence.quote.casefold().split()) in " ".join(
+                source.casefold().split()
+            )
 
+    assert completed_count + rejected_count == len(candidates)
     print(
-        json.dumps(
-            {
-                "candidate_id": str(candidate.candidate_id),
-                "relevance_state": assessed.relevance_state,
-                "assessment": assessed.relevance_assessment.model_dump(mode="json"),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        "live relevance claim-verification acceptance passed: "
+        f"{completed_count} completed, {rejected_count} rejected"
     )

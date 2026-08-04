@@ -109,15 +109,17 @@ uv run pytest tests/integration/test_live_candidate_relevance.py -m live -s
 
 ## Workers
 
-Run the intent-analysis worker in one terminal and the RAG ingestion worker in another:
+Run the workflow, relevance, and RAG ingestion workers in separate terminals:
 
 ```powershell
 uv run --directory backend arq app.workers.workflow.WorkerSettings
+uv run --directory backend arq app.workers.relevance.WorkerSettings
 uv run --directory backend arq app.workers.ingestion.WorkerSettings
 ```
 
-The workflow worker reads the root `.env` and consumes intent-analysis, search and candidate-fulltext jobs from
-the dedicated `arq:queue:workflow` queue. It
+The workflow worker reads the root `.env` and consumes intent-analysis, Provider search and candidate-fulltext jobs from
+the dedicated `arq:queue:workflow` queue. The relevance worker consumes complete-candidate semantic analysis from
+`arq:queue:relevance`; it has no total job timeout and renews its ARQ and Redis leases while a model stream remains active. It
 uses `SEARCH_HTTP_TIMEOUT_SECONDS`, `SEARCH_MAX_CONCURRENT_PROVIDERS`,
 `SEARCH_SESSION_TTL_SECONDS`, and `SEARCH_CITATION_ENRICHMENT_LIMIT` for the search pipeline.
 The ingestion worker remains separate and only receives a document from `arq:queue:ingestion` after the user
@@ -125,10 +127,13 @@ confirms the collection build. The workflow worker uses `WORKFLOW_CHAT_PROVIDER`
 selected provider's credentials. The default `deepseek` mode uses `DEEPSEEK_API_KEY`,
 `DEEPSEEK_BASE_URL`, and `DEEPSEEK_CHAT_MODEL`; `openai_compatible` mode uses the corresponding
 `OPENAI_*` chat settings. `WORKFLOW_INTENT_TIMEOUT_SECONDS` controls research-plan analysis. After
-normalization and deterministic triage, the same worker sends only eligible candidate titles and abstracts to
-the relevance Agent in sequential batches controlled by `WORKFLOW_RELEVANCE_BATCH_SIZE` and
-`WORKFLOW_RELEVANCE_TIMEOUT_SECONDS`; `WORKFLOW_RELEVANCE_ABSTRACT_MAX_CHARACTERS` and
-`WORKFLOW_RELEVANCE_MAX_OUTPUT_TOKENS` bound each candidate input and model completion. The worker
-validates returned evidence against the same candidate metadata; a failed candidate can be retried individually
-without hiding the other candidates. The worker validates a JSON research-plan draft before making it available
+normalization and deterministic triage, the workflow worker publishes the complete eligible candidate collection and
+hands it to the relevance worker in one shared context. It never blocks relevance assessment merely because of candidate count
+or silently splits the collection. `WORKFLOW_RELEVANCE_STREAM_IDLE_TIMEOUT_SECONDS`,
+`WORKFLOW_RELEVANCE_OUTPUT_TOKENS_PER_CANDIDATE`, and
+`WORKFLOW_RELEVANCE_VERIFICATION_OUTPUT_TOKENS_PER_CANDIDATE` control the two complete-collection
+model calls; the timeout is only the period without any stream activity, not a wall-clock limit. Candidates without an
+abstract remain deterministic `insufficient_information`. The worker validates returned evidence against the same candidate
+metadata; a retryable failure is retried as a complete current-candidate collection, without hiding other candidates. The
+workflow worker validates a JSON research-plan draft before making it available
 for user confirmation.
