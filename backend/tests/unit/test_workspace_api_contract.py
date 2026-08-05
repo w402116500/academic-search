@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.api.routers.collections import _workspace_error_response
 from app.main import app
-from app.modules.collections.workspace_contracts import WorkspaceError, WorkspaceErrorCode
+from app.modules.research.workspace_contracts import WorkspaceError, WorkspaceErrorCode
 
 
 def test_workspace_list_openapi_exposes_search_and_cursor_pagination() -> None:

@@ -6,6 +6,8 @@ import os
 from uuid import uuid4
 
 import pytest
+from app.core.workflow_settings import get_workflow_settings
+from app.infra.llm.candidate_relevance import build_candidate_relevance_evaluator
 from app.modules.search.contracts import (
     CandidateLanguage,
     RawCandidate,
@@ -13,11 +15,9 @@ from app.modules.search.contracts import (
     TriageDecision,
     UnifiedCandidate,
 )
-from app.modules.workflow.candidate_relevance import (
+from app.modules.search.relevance import (
     CandidateRelevanceContext,
-    OpenAICompatibleCandidateRelevanceEvaluator,
 )
-from app.modules.workflow.settings import get_workflow_settings
 
 _LIVE_TEST_ENVIRONMENT_FLAG = "RUN_LIVE_CANDIDATE_RELEVANCE_TESTS"
 
@@ -91,7 +91,7 @@ async def test_live_candidate_relevance_assessment_never_exposes_unverified_clai
         languages=("en",),
     )
 
-    result = await OpenAICompatibleCandidateRelevanceEvaluator(get_workflow_settings()).assess(
+    result = await build_candidate_relevance_evaluator(get_workflow_settings()).assess(
         context=context,
         candidates=candidates,
     )

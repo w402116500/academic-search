@@ -7,30 +7,37 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from app.db.models.workflow import SearchRun
-from app.modules.fulltext.contracts import (
+from app.modules.documents.contracts import (
     CandidateFulltextState,
     FulltextAcquisitionError,
     FulltextAcquisitionErrorCode,
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
 )
-from app.modules.search.citation_formatter import CitationFormat
-from app.modules.search.contracts import (
-    CandidateAuthor,
-    CandidateLinks,
+from app.modules.documents.keys import build_candidate_fulltext_key
+from app.modules.literature.api_contracts import (
+    CandidateCitationError,
+    CandidateCitationErrorCode,
+)
+from app.modules.literature.citation_formatter import CitationFormat
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
+)
+from app.modules.search.citation_service import CandidateCitationService
+from app.modules.search.contracts import (
+    CandidateAuthor,
+    CandidateLinks,
     RawCandidate,
     SourceName,
     UnifiedCandidate,
 )
-from app.modules.workflow.citation_service import CandidateCitationService
-from app.modules.workflow.contracts import CandidateCitationError, CandidateCitationErrorCode
-from app.modules.workflow.search_session import SearchSessionStore, build_candidate_fulltext_key
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.modules.search.fulltext_candidate import to_fulltext_candidate
+from app.modules.search.run_models import SearchRunRecord
+from app.modules.search.run_repository import SearchRunRepository
+from app.modules.search.session import SearchSessionStore
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000000901")
 _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000902")
@@ -40,13 +47,27 @@ _CANDIDATE_ID = UUID("00000000-0000-0000-0000-000000000905")
 _SESSION_KEY = "academic-search:search-run:00000000-0000-0000-0000-000000000904"
 
 
-class FakeSession:
+class FakeSearchRunRepository:
     """只模拟候选读取所依赖的检索运行所有权查询。"""
 
-    def __init__(self, run: SearchRun) -> None:
+    def __init__(self, run: SearchRunRecord) -> None:
         self._run = run
 
-    async def scalar(self, _statement: object) -> SearchRun:
+    async def get_owned_run(
+        self,
+        *,
+        owner_user_id: UUID,
+        collection_id: UUID,
+        search_run_id: UUID,
+        for_update: bool = False,
+    ) -> SearchRunRecord | None:
+        del for_update
+        if (
+            owner_user_id != _OWNER_ID
+            or collection_id != self._run.collection_id
+            or search_run_id != self._run.id
+        ):
+            return None
         return self._run
 
 
@@ -60,18 +81,26 @@ class FakeSessionStore:
         return self._snapshots.get(session_key)
 
 
-def _run() -> SearchRun:
+def _run() -> SearchRunRecord:
     """构造拥有短期候选快照的完成检索运行。"""
-    return SearchRun(
+    now = datetime.now(UTC)
+    return SearchRunRecord(
         id=_RUN_ID,
         collection_id=_COLLECTION_ID,
         research_plan_id=_PLAN_ID,
+        arq_job_id=None,
         redis_session_key=_SESSION_KEY,
         status="completed",
         stage="completed",
         attempt_no=1,
         provider_summary={},
         candidate_counts={},
+        error_code=None,
+        error_message=None,
+        started_at=now,
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -120,7 +149,7 @@ def _fulltext_state(citation: CitationMetadata) -> CandidateFulltextState:
     """模拟全文任务已补齐题录，但不会回写主候选快照的中间状态。"""
     return CandidateFulltextState(
         search_run_id=_RUN_ID,
-        candidate=_candidate(citation),
+        candidate=to_fulltext_candidate(_candidate(citation)),
         attempt_no=1,
         result=FulltextAcquisitionResult(
             candidate_id=_CANDIDATE_ID,
@@ -142,7 +171,7 @@ async def test_render_uses_the_server_side_ready_metadata_for_the_requested_styl
     """前端仅传递格式枚举，引用文本必须由会话内 `ready` 题录生成。"""
     candidate = _candidate(_citation())
     service = CandidateCitationService(
-        cast(AsyncSession, FakeSession(_run())),
+        cast(SearchRunRepository, FakeSearchRunRepository(_run())),
         cast(
             SearchSessionStore,
             FakeSessionStore({_SESSION_KEY: {"candidates": [candidate.model_dump(mode="json")]}}),
@@ -168,7 +197,7 @@ async def test_render_rejects_incomplete_metadata_instead_of_returning_a_fake_ci
     """不完整、冲突或解析失败的题录必须被拒绝，而不是降级为手工拼接文本。"""
     candidate = _candidate(_citation(status=CitationMetadataStatus.PARTIAL))
     service = CandidateCitationService(
-        cast(AsyncSession, FakeSession(_run())),
+        cast(SearchRunRepository, FakeSearchRunRepository(_run())),
         cast(
             SearchSessionStore,
             FakeSessionStore({_SESSION_KEY: {"candidates": [candidate.model_dump(mode="json")]}}),
@@ -193,7 +222,7 @@ async def test_render_uses_ready_metadata_from_the_candidate_fulltext_state() ->
     candidate = _candidate(None)
     state = _fulltext_state(_citation())
     service = CandidateCitationService(
-        cast(AsyncSession, FakeSession(_run())),
+        cast(SearchRunRepository, FakeSearchRunRepository(_run())),
         cast(
             SearchSessionStore,
             FakeSessionStore(

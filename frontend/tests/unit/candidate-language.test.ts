@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   candidateLanguageLabel,
   normalizeCandidateLanguage,
-} from "@/features/research/candidate-language";
+} from "@/features/search/candidate-language";
 
 describe("candidate language", () => {
   it("将语言码显示为可读的候选筛选标签", () => {

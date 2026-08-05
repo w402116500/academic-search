@@ -12,22 +12,19 @@ import os
 from uuid import UUID, uuid4
 
 import pytest
-from app.modules.fulltext import (
-    Boto3StagingObjectStorage,
-    OpenAccessPdfAcquirer,
-    get_fulltext_acquisition_settings,
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
+from app.infra.storage.documents import Boto3StagingObjectStorage
+from app.modules.documents.acquisition import OpenAccessPdfAcquirer
+from app.modules.documents.contracts import (
+    FulltextAcquisitionStatus,
+    FulltextCandidate,
+    FulltextCandidateLinks,
 )
-from app.modules.fulltext.contracts import FulltextAcquisitionStatus
-from app.modules.search.contracts import (
-    CandidateAuthor,
-    CandidateLinks,
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
-    RawCandidate,
-    SourceName,
-    UnifiedCandidate,
 )
 from botocore.exceptions import ClientError
 
@@ -41,29 +38,13 @@ def _live_test_is_enabled() -> bool:
     return os.getenv(_LIVE_TEST_ENVIRONMENT_FLAG) == "1"
 
 
-def _candidate(candidate_id: UUID) -> UnifiedCandidate:
+def _candidate(candidate_id: UUID) -> FulltextCandidate:
     """构造一篇 DOI 已就绪、来源明确开放获取的真实论文候选。"""
-    author = CandidateAuthor(name="Ashish Vaswani")
-
-    return UnifiedCandidate(
+    return FulltextCandidate(
         candidate_id=candidate_id,
         doi=_ARXIV_DOI,
-        title="Attention Is All You Need",
-        title_key="attention is all you need",
-        authors=(author,),
-        links=CandidateLinks(fulltext_url=_ARXIV_PDF_URL),
+        links=FulltextCandidateLinks(fulltext_url=_ARXIV_PDF_URL),
         is_open_access=True,
-        source_records=(
-            RawCandidate(
-                source=SourceName.ARXIV,
-                source_record_id="1706.03762",
-                title="Attention Is All You Need",
-                authors=(author,),
-                doi=_ARXIV_DOI,
-                fulltext_url=_ARXIV_PDF_URL,
-                is_open_access=True,
-            ),
-        ),
         citation=CitationMetadata(
             status=CitationMetadataStatus.READY,
             authors=(CitationAuthor(given="Ashish", family="Vaswani"),),

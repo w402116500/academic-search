@@ -1,23 +1,15 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { useMutation } from "@tanstack/vue-query";
 import { ArrowRight } from "@lucide/vue";
 import { useRouter } from "vue-router";
 
 import AppHeader from "@/components/AppHeader.vue";
-import { startResearch } from "@/api/workflow";
+import { useStartResearchMutation } from "@/api/hooks/research";
 
 const router = useRouter();
 const rawRequest = ref("");
 const requestError = ref<string | null>(null);
-const submitMutation = useMutation({
-  mutationFn: () => startResearch(rawRequest.value.trim()),
-  onSuccess: (result) =>
-    router.push({ name: "workspace-runner", params: { workspaceId: result.workspace_id } }),
-  onError: (error) => {
-    requestError.value = error instanceof Error ? error.message : "暂时无法开始分析。";
-  },
-});
+const submitMutation = useStartResearchMutation();
 
 function submit(): void {
   requestError.value = null;
@@ -25,7 +17,13 @@ function submit(): void {
     requestError.value = "请先描述你想研究的问题，至少写下一句完整要求。";
     return;
   }
-  submitMutation.mutate();
+  submitMutation.mutate(rawRequest.value.trim(), {
+    onSuccess: (result) =>
+      router.push({ name: "workspace-runner", params: { workspaceId: result.workspace_id } }),
+    onError: (error) => {
+      requestError.value = error instanceof Error ? error.message : "暂时无法开始分析。";
+    },
+  });
 }
 </script>
 

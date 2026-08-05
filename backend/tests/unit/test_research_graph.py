@@ -7,19 +7,20 @@ from typing import Literal
 from uuid import UUID
 
 import pytest
-from app.modules.research.contracts import ResearchRunStatus
-from app.modules.research.execution import ResearchExecutionContext
-from app.modules.research.graph import (
+from app.modules.agents.checkpoint import DirectResearchGraphExecutor
+from app.modules.agents.contracts import (
     AnswerClaimVerification,
     AnswerClaimVerificationItem,
     AnswerDraft,
     EvidenceVerification,
-    ResearchGraphRunner,
     ResearchRouteDecision,
     ResearchRunCancelled,
     ResearchToolAction,
 )
-from app.modules.research.retrieval import RetrievalResult, RetrievedEvidence
+from app.modules.agents.graph import ResearchGraphRunner
+from app.modules.rag.retrieval import RetrievalResult, RetrievedEvidence
+from app.modules.research.contracts import ResearchRunStatus
+from app.modules.research.execution_port import ResearchExecutionContext
 from app.modules.research.settings import ResearchSettings
 from pydantic import ValidationError
 
@@ -195,7 +196,7 @@ async def test_single_rag_only_uses_retrieved_evidence_for_citation() -> None:
         retriever=retriever,
         model=FakeModel(),
         settings=ResearchSettings(),
-        checkpoint_database_url=None,
+        graph_executor=DirectResearchGraphExecutor(),
     ).run(_context("该方法的实验结果是什么？"))
 
     assert outcome.status is ResearchRunStatus.COMPLETED
@@ -218,7 +219,7 @@ async def test_single_rag_rewrites_at_most_once_then_requests_clarification() ->
         retriever=retriever,
         model=model,
         settings=ResearchSettings(rag_max_query_rewrites=1),
-        checkpoint_database_url=None,
+        graph_executor=DirectResearchGraphExecutor(),
     ).run(_context("没有足够上下文的问题"))
 
     assert outcome.status is ResearchRunStatus.AWAITING_CLARIFICATION
@@ -235,7 +236,7 @@ async def test_single_rag_rejects_an_answer_with_an_unsupported_atomic_claim() -
         retriever=retriever,
         model=FakeModel(claims_supported=False),
         settings=ResearchSettings(),
-        checkpoint_database_url=None,
+        graph_executor=DirectResearchGraphExecutor(),
     ).run(_context("该方法的实验结果是什么？"))
 
     assert outcome.status is ResearchRunStatus.AWAITING_CLARIFICATION
@@ -260,7 +261,7 @@ async def test_complex_question_uses_structured_routing_and_evidence_verificatio
         retriever=retriever,
         model=FakeModel(route_mode="multi_agent"),
         settings=ResearchSettings(),
-        checkpoint_database_url=None,
+        graph_executor=DirectResearchGraphExecutor(),
     ).run(_context("请分别归纳两组研究证据在方法和结果上的不同。"))
 
     assert outcome.status is ResearchRunStatus.COMPLETED
@@ -284,7 +285,7 @@ async def test_complex_research_answers_from_evidence_when_tool_budget_is_reache
         retriever=retriever,
         model=FakeModel(route_mode="multi_agent"),
         settings=ResearchSettings(rag_max_react_tool_calls=1),
-        checkpoint_database_url=None,
+        graph_executor=DirectResearchGraphExecutor(),
     ).run(_context("请分别归纳两组研究证据在方法和结果上的不同。"))
 
     assert outcome.status is ResearchRunStatus.COMPLETED
@@ -310,6 +311,6 @@ async def test_cancellation_checker_stops_before_a_following_graph_node() -> Non
             ),
             model=FakeModel(),
             settings=ResearchSettings(),
-            checkpoint_database_url=None,
+            graph_executor=DirectResearchGraphExecutor(),
             cancellation_checker=cancellation_checker,
         ).run(_context("该方法的实验结果是什么？"))

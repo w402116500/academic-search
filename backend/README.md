@@ -2,7 +2,7 @@
 
 The backend package provides local account authentication, research-workspace, research-plan,
 multi-source search, candidate review, fulltext admission, collection-build and research-session
-APIs, an asynchronous SQLAlchemy/Alembic PostgreSQL foundation under `app/db/`, and intent-analysis,
+APIs, an asynchronous SQLAlchemy/Alembic PostgreSQL foundation under `app/infra/db/`, and intent-analysis,
 search, fulltext, RAG-ingestion and research workers.
 
 ## Database Commands

@@ -10,7 +10,7 @@ from alembic import context
 from app.core.env import load_env
 
 # models.__init__ 会集中导入所有模型，使 target_metadata 包含完整表集合。
-from app.db.models import Base
+from app.infra.db.models import Base
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine

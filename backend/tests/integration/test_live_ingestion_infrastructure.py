@@ -12,11 +12,11 @@ from uuid import uuid4
 
 import pytest
 from app.core.env import load_env
-from app.modules.fulltext.settings import get_fulltext_acquisition_settings
-from app.modules.fulltext.storage import Boto3StagingObjectStorage
-from app.modules.ingestion.contracts import EmbeddedVectorChunk, VectorChunk
-from app.modules.ingestion.milvus import MilvusDocumentChunkIndex
-from app.modules.ingestion.settings import IngestionSettings
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
+from app.core.ingestion_settings import IngestionSettings
+from app.infra.milvus.document_chunks import MilvusDocumentChunkIndex
+from app.infra.storage.documents import Boto3StagingObjectStorage
+from app.modules.rag.ingestion.contracts import EmbeddedVectorChunk, VectorChunk
 from pymilvus import MilvusClient
 
 

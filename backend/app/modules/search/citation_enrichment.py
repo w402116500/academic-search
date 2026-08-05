@@ -4,22 +4,21 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from app.modules.search.contracts import (
-    CandidateAuthor,
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
     DoiCslRecord,
     DoiMetadataResolution,
+)
+from app.modules.literature.normalization import normalize_document_type, normalize_doi
+from app.modules.search.contracts import (
+    CandidateAuthor,
     SourceName,
     UnifiedCandidate,
 )
-from app.modules.search.normalize import (
-    normalize_document_type,
-    normalize_doi,
-    normalize_title_key,
-)
+from app.modules.search.normalize import normalize_title_key
 
 _DOI_PROVENANCE = "doi_content_negotiation"
 

@@ -16,48 +16,48 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from app.api.routers import search_runs as search_run_router
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
 from app.core.security import AuthenticationSettings, create_access_token
 from app.core.settings import get_literature_source_settings
-from app.db.models.collection import ResearchCollection
-from app.db.models.document import Document
-from app.db.models.paper import Paper
-from app.db.models.user import User
-from app.db.models.workflow import ResearchPlan, SearchRun
-from app.db.session import async_session_factory
+from app.infra.db.models.collection import ResearchCollection
+from app.infra.db.models.document import Document
+from app.infra.db.models.paper import Paper
+from app.infra.db.models.user import User
+from app.infra.db.models.workflow import ResearchPlan, SearchRun
+from app.infra.db.session import async_session_factory
+from app.infra.redis.connection import redis_client_from_environment
+from app.infra.redis.search_session import RedisSearchSessionStore
+from app.infra.storage.documents import Boto3StagingObjectStorage
 from app.main import app
-from app.modules.fulltext import Boto3StagingObjectStorage, get_fulltext_acquisition_settings
-from app.modules.fulltext.contracts import (
+from app.modules.documents.contracts import (
     AcquiredFulltext,
     CandidateFulltextState,
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
 )
-from app.modules.search.citation_formatter import CitationFormat
-from app.modules.search.contracts import (
-    CandidateAuthor,
-    CandidateLinks,
+from app.modules.documents.keys import build_candidate_fulltext_key
+from app.modules.literature.citation_formatter import CitationFormat
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
+)
+from app.modules.research.state import ResearchPlanStatus, WorkspaceWorkflowStage
+from app.modules.search.contracts import (
+    CandidateAuthor,
+    CandidateLinks,
     RawCandidate,
     SourceName,
     TriageDecision,
     UnifiedCandidate,
 )
-from app.modules.workflow.search_session import (
-    SearchSessionStore,
-    build_candidate_fulltext_key,
+from app.modules.search.fulltext_candidate import to_fulltext_candidate
+from app.modules.search.session import (
     build_search_event_stream_key,
     build_search_session_key,
 )
-from app.modules.workflow.state import (
-    ResearchPlanStatus,
-    SearchRunStage,
-    SearchRunStatus,
-    WorkspaceWorkflowStage,
-)
-from app.workers.redis import redis_client_from_environment
+from app.modules.search.state import SearchRunStage, SearchRunStatus
 from pydantic import SecretStr
 from sqlalchemy import select
 
@@ -204,7 +204,7 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
             )
             await session.commit()
 
-        store = SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds)
+        store = RedisSearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds)
         await store.write_snapshot(
             session_key,
             {
@@ -342,7 +342,7 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                 fulltext_state_key,
                 CandidateFulltextState(
                     search_run_id=run_id,
-                    candidate=_candidate(candidate_id, doi=candidate_doi),
+                    candidate=to_fulltext_candidate(_candidate(candidate_id, doi=candidate_doi)),
                     attempt_no=1,
                     result=FulltextAcquisitionResult(
                         candidate_id=candidate_id,

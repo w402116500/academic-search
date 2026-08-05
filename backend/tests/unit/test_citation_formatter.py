@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from app.modules.search.citation_formatter import (
+from app.modules.literature.citation_formatter import (
     CitationFormat,
     CitationFormattingError,
     format_citation,
 )
-from app.modules.search.contracts import (
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,

@@ -8,9 +8,9 @@ from typing import cast
 from uuid import UUID
 
 import pytest
-from app.modules.fulltext.storage import ReadableResearchDocumentObjectStorage
-from app.modules.ingestion.chunking import ChunkingConfig, HierarchicalChunker
-from app.modules.ingestion.contracts import (
+from app.modules.documents.storage import ReadableResearchDocumentObjectStorage
+from app.modules.rag.ingestion.chunking import ChunkingConfig, HierarchicalChunker
+from app.modules.rag.ingestion.contracts import (
     DocumentChunkDraft,
     EmbeddedVectorChunk,
     IngestionContext,
@@ -20,11 +20,11 @@ from app.modules.ingestion.contracts import (
     ParsedPage,
     VectorChunk,
 )
-from app.modules.ingestion.embedding import TextEmbedder
-from app.modules.ingestion.milvus import DocumentChunkVectorIndex
-from app.modules.ingestion.parser import PdfTextParser
-from app.modules.ingestion.repository import IngestionRepository
-from app.modules.ingestion.service import DocumentIngestionService
+from app.modules.rag.ingestion.embedding import TextEmbedder
+from app.modules.rag.ingestion.parser import PdfTextParser
+from app.modules.rag.ingestion.repository import IngestionRepository
+from app.modules.rag.ingestion.service import DocumentIngestionService
+from app.modules.rag.ingestion.vector_index import DocumentChunkVectorIndex
 from pypdf import PdfWriter
 
 _RUN_ID = UUID("00000000-0000-0000-0000-000000000201")

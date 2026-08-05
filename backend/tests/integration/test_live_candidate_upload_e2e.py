@@ -14,39 +14,47 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from app.db.models.collection import ResearchCollection
-from app.db.models.document import Document, IngestionRun
-from app.db.models.paper import Paper
-from app.db.models.user import User
-from app.db.models.workflow import ResearchPlan, SearchRun
-from app.db.session import async_session_factory
-from app.modules.fulltext import (
-    AuthorizedPdfUploader,
-    Boto3StagingObjectStorage,
-    get_fulltext_acquisition_settings,
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
+from app.infra.db.models.collection import ResearchCollection
+from app.infra.db.models.document import Document, IngestionRun
+from app.infra.db.models.paper import Paper
+from app.infra.db.models.user import User
+from app.infra.db.models.workflow import ResearchPlan, SearchRun
+from app.infra.db.repositories.literature_admission import (
+    SqlAlchemyLiteratureAdmissionAdapter,
 )
-from app.modules.fulltext.contracts import FulltextAcquisitionStatus
-from app.modules.search.contracts import (
-    CandidateAuthor,
+from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
+from app.infra.db.session import async_session_factory
+from app.infra.redis.connection import redis_client_from_environment
+from app.infra.redis.search_session import RedisSearchSessionStore
+from app.infra.storage.documents import Boto3StagingObjectStorage
+from app.modules.documents.acquisition import AuthorizedPdfUploader
+from app.modules.documents.contracts import FulltextAcquisitionStatus
+from app.modules.documents.keys import build_candidate_fulltext_key
+from app.modules.documents.service import CandidateFulltextService
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
+)
+from app.modules.research.state import ResearchPlanStatus
+from app.modules.search.contracts import (
+    CandidateAuthor,
     RawCandidate,
     SourceName,
     TriageDecision,
     UnifiedCandidate,
 )
-from app.modules.workflow.candidate_review_service import CandidateReviewService
-from app.modules.workflow.fulltext_service import CandidateFulltextService
-from app.modules.workflow.search_session import (
-    SearchSessionStore,
-    build_candidate_fulltext_key,
+from app.modules.search.fulltext_candidate import SearchCandidateFulltextLookup
+from app.modules.search.review_admission import CandidateAdmissionService
+from app.modules.search.review_selection import CandidateSelectionService
+from app.modules.search.review_session import CandidateReviewSession
+from app.modules.search.session import (
     build_candidate_selection_key,
     build_search_session_key,
 )
-from app.modules.workflow.state import ResearchPlanStatus, SearchRunStage, SearchRunStatus
-from app.workers.redis import redis_client_from_environment
+from app.modules.search.state import SearchRunStage, SearchRunStatus
 from sqlalchemy import select
 
 _LIVE_TEST_ENVIRONMENT_FLAG = "RUN_LIVE_CANDIDATE_UPLOAD_E2E_TESTS"
@@ -166,7 +174,7 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
             )
             await session.commit()
 
-        store = SearchSessionStore(redis, ttl_seconds=600)
+        store = RedisSearchSessionStore(redis, ttl_seconds=600)
         candidate = _candidate(candidate_id, doi)
         await store.write_snapshot(
             session_key,
@@ -179,9 +187,11 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
         )
 
         async with async_session_factory() as session:
+            runs = SqlAlchemySearchRunRepository(session)
             submission = await CandidateFulltextService(
-                session,
+                runs,
                 store,
+                candidate_lookup=SearchCandidateFulltextLookup(runs, store),
                 uploader=AuthorizedPdfUploader(acquisition_settings, storage),
             ).upload(
                 owner_user_id=owner_user_id,
@@ -205,15 +215,26 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
         staging_object_key = uploaded.staging_object_key
 
         async with async_session_factory() as session:
-            review = CandidateReviewService(session, store, admission_storage=storage)
-            await review.update_selection(
+            runs = SqlAlchemySearchRunRepository(session)
+            review_session = CandidateReviewSession(runs, store)
+            selection = CandidateSelectionService(review_session)
+            await selection.update_selection(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
                 search_run_id=run_id,
                 candidate_ids=[candidate_id],
                 selected=True,
             )
-            admitted = await review.admit_selected(
+            admitted = await CandidateAdmissionService(
+                review_session,
+                CandidateFulltextService(
+                    runs,
+                    store,
+                    candidate_lookup=SearchCandidateFulltextLookup(runs, store),
+                ),
+                SqlAlchemyLiteratureAdmissionAdapter(session, storage),
+                selection,
+            ).admit_selected(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
                 search_run_id=run_id,

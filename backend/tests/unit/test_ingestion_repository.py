@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
-from app.modules.ingestion.contracts import IngestionContext, IngestionError, IngestionErrorCode
-from app.modules.ingestion.repository import SqlAlchemyIngestionRepository
+from app.infra.db.repositories.ingestion import SqlAlchemyIngestionRepository
+from app.modules.rag.ingestion.contracts import IngestionContext, IngestionError, IngestionErrorCode
 from sqlalchemy.exc import InvalidRequestError
 
 _RUN_ID = UUID("00000000-0000-0000-0000-000000000401")

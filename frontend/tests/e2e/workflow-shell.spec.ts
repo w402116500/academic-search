@@ -57,8 +57,8 @@ const runningRun: SearchRun = {
     deduplicated_candidate_count: 52,
     included_candidate_count: 50,
     relevance_total_count: 50,
-    relevance_completed_count: 18,
-    relevance_failed_count: 0,
+    relevance_analyzed_count: 18,
+    relevance_excluded_count: 0,
   },
   finished_at: null,
   updated_at: "2026-08-01T00:00:18Z",
@@ -69,7 +69,7 @@ const relevanceProgressEvent: SearchProgressEvent = {
   stage: "relevance_assessment",
   provider_summary: runningRun.provider_summary,
   candidate_counts: runningRun.candidate_counts,
-  message: "已完成 18 条候选的统一相关性分析。",
+  message: "正在分析候选相关性。",
 };
 const plan: ResearchPlan = {
   id: run.research_plan_id,
@@ -242,8 +242,10 @@ test("检索运行中展示真实的相关性计数和来源失败说明", async
   await expect(
     page.getByRole("heading", { name: "已找到 50 篇候选，正在统一判断相关性。" }),
   ).toBeVisible();
-  await expect(page.getByText("已分析 18 / 50 篇", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("已完成 18 条候选的统一相关性分析。")).toBeVisible();
+  await expect(
+    page.getByText("正在分析候选相关性 · 已分析 18 / 50 篇 · 已排除 0 篇", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(page.getByText("正在分析候选相关性。")).toBeVisible();
   await expect(page.getByText("刚刚收到进度更新")).toBeVisible();
   await expect(
     page.getByText("1 个来源暂未返回，系统仍会继续处理其他来源已返回的候选。"),
@@ -289,61 +291,10 @@ test("窄屏仍可查看候选检查器与集合确认", async ({ page }) => {
   await expect(page.getByTestId("collection-confirm-dialog")).toBeVisible();
 });
 
-test("候选相关性只支持运行级取消与整批重试", async ({ page }) => {
-  let activeRun = runningRun;
-  let cancelRequests = 0;
-  let retryRequests = 0;
-  const citationEnrichingRun = {
-    ...runningRun,
-    stage: "citation_enrichment" as const,
-  };
-
-  await page.addInitScript(() =>
-    localStorage.setItem("academic-search.access-token", "mock-token"),
-  );
-  await page.route("http://127.0.0.1:8000/api/v1/**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (path.endsWith(`/search-runs/${runId}/relevance/cancel`)) {
-      expect(route.request().method()).toBe("POST");
-      cancelRequests += 1;
-      activeRun = {
-        ...runningRun,
-        status: "cancelled",
-        stage: "completed",
-        candidate_counts: { ...runningRun.candidate_counts, relevance_failed_count: 32 },
-      };
-      return route.fulfill({ json: activeRun });
-    }
-    if (path.endsWith(`/search-runs/${runId}/relevance/retry`)) {
-      expect(route.request().method()).toBe("POST");
-      retryRequests += 1;
-      activeRun = runningRun;
-      return route.fulfill({
-        status: 202,
-        json: {
-          run_id: runId,
-          status: "running",
-          candidate_counts: runningRun.candidate_counts,
-          candidates: [candidate, chineseCandidate],
-        },
-      });
-    }
-    return fulfillWorkflowRequest(route, activeRun);
-  });
-
+test("候选相关性分析中不暴露取消或重试控制", async ({ page }) => {
+  await openRunningRun(page);
   await page.goto(`/workspace/${workspaceId}/results?run=${runId}`);
-  await expect(page.getByRole("button", { name: "取消相关性分析" })).toBeVisible();
-  await page.getByRole("button", { name: "取消相关性分析" }).click();
-  await expect.poll(() => cancelRequests).toBe(1);
-  await expect(page.getByRole("button", { name: "重新分析全部候选理由" })).toBeVisible();
 
-  await page.getByRole("button", { name: "重新分析全部候选理由" }).click();
-  await expect.poll(() => retryRequests).toBe(1);
-  await expect(page.getByRole("button", { name: "取消相关性分析" })).toBeVisible();
-  await expect(page.getByText("正在重新分析当前完整候选集合。")).toBeVisible();
-
-  activeRun = citationEnrichingRun;
-  await page.reload();
   await expect(page.getByRole("button", { name: "取消相关性分析" })).not.toBeVisible();
   await expect(page.getByRole("button", { name: "重新分析全部候选理由" })).not.toBeVisible();
 });

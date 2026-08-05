@@ -7,10 +7,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+
 from app.core.settings import OpenAlexProviderSettings
+from app.modules.literature.contracts import CitationDate
 from app.modules.search.contracts import (
     CandidateAuthor,
-    CitationDate,
     ProviderError,
     ProviderErrorCode,
     ProviderQuery,

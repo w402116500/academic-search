@@ -15,6 +15,9 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "api:export": "uv run --project ../backend python ../scripts/export_openapi.py",
+    "api:generate": "corepack pnpm api:export && corepack pnpm exec openapi-typescript src/api/generated/openapi.json -o src/api/generated/schema.ts && corepack pnpm exec prettier --write src/api/generated/openapi.json src/api/generated/schema.ts",
+    "api:check": "corepack pnpm api:generate && git diff --exit-code -- src/api/generated/openapi.json src/api/generated/schema.ts && git ls-files --error-unmatch src/api/generated/openapi.json src/api/generated/schema.ts",
     "typecheck": "vue-tsc --noEmit",
     "test:unit": "vitest run --passWithNoTests",
     "test:e2e": "playwright test --pass-with-no-tests"
@@ -38,6 +41,7 @@
     "eslint-plugin-vue": "^9.32.0",
     "globals": "^15.14.0",
     "jsdom": "26.1.0",
+    "openapi-typescript": "^7.9.1",
     "prettier": "^3.4.2",
     "tailwindcss": "^4.0.6",
     "typescript": "~5.7.2",

@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from app.core.settings import LiteratureSourceSettings
-from app.modules.search.contracts import CitationResolutionErrorCode
+from app.modules.literature.contracts import CitationResolutionErrorCode
 from app.modules.search.providers.doi_resolver import DoiMetadataResolver
 
 _FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "doi_csl_record.json"

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from app.modules.workflow.intent_analysis import (
+from app.core.workflow_settings import WorkflowSettings
+from app.modules.research.intent_analysis import (
     IntentAnalysisError,
     IntentAnalysisErrorCode,
-    OpenAICompatibleIntentAnalyzer,
+    ResearchIntentAnalyzer,
 )
-from app.modules.workflow.settings import WorkflowSettings
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import SecretStr
 
@@ -80,7 +80,7 @@ def _valid_draft() -> dict[str, object]:
 @pytest.mark.asyncio
 async def test_analyzer_returns_validated_plan_and_server_owned_model_snapshot() -> None:
     """模型只提供研究内容；调用模型、地址和提示词版本由服务端写入快照。"""
-    analyzer = OpenAICompatibleIntentAnalyzer(
+    analyzer = ResearchIntentAnalyzer(
         _settings(),
         model=FakeStructuredModel(_valid_draft()),
     )
@@ -109,7 +109,7 @@ def test_deepseek_configuration_is_the_default_chat_provider() -> None:
 @pytest.mark.asyncio
 async def test_analyzer_rejects_invalid_json_structure() -> None:
     """少方向、少范围或少查询计划的返回都不能进入确认页面。"""
-    analyzer = OpenAICompatibleIntentAnalyzer(
+    analyzer = ResearchIntentAnalyzer(
         _settings(),
         model=FakeStructuredModel({"direction_options": []}),
     )
@@ -123,7 +123,7 @@ async def test_analyzer_rejects_invalid_json_structure() -> None:
 @pytest.mark.asyncio
 async def test_analyzer_marks_gateway_failure_without_empty_plan_fallback() -> None:
     """网关异常必须明确失败，不能伪造空计划让后续检索继续。"""
-    analyzer = OpenAICompatibleIntentAnalyzer(
+    analyzer = ResearchIntentAnalyzer(
         _settings(),
         model=FakeStructuredModel(TimeoutError("gateway timed out")),
     )

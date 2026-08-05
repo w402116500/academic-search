@@ -6,14 +6,14 @@ import os
 from uuid import UUID, uuid4
 
 import pytest
-from app.db.models.collection import CollectionPaper, ResearchCollection
-from app.db.models.document import Document, IngestionRun
-from app.db.models.paper import Paper
-from app.db.models.user import User
-from app.db.session import async_session_factory
-from app.modules.collections.build_contracts import IngestionRunStatus
-from app.modules.collections.build_service import ResearchCollectionBuildService
-from app.modules.workflow.state import WorkspaceWorkflowStage
+from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.document import Document, IngestionRun
+from app.infra.db.models.paper import Paper
+from app.infra.db.models.user import User
+from app.infra.db.repositories.collection_builds import SqlAlchemyCollectionBuildAdapter
+from app.infra.db.session import async_session_factory
+from app.modules.research.build_contracts import IngestionRunStatus
+from app.modules.research.state import WorkspaceWorkflowStage
 
 _LIVE_TEST_ENVIRONMENT_FLAG = "RUN_LIVE_COLLECTION_BUILD_TESTS"
 
@@ -98,7 +98,7 @@ async def test_live_build_transitions_pending_document_and_records_arq_job() -> 
                     )
                 )
 
-            response = await ResearchCollectionBuildService(session, queue).build(
+            response = await SqlAlchemyCollectionBuildAdapter(session, queue).build(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
             )

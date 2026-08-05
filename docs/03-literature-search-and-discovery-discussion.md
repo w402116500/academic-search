@@ -125,9 +125,9 @@ MVP 接入以下来源：
 
 自动获取必须作为受控异步任务执行。后端只能使用 Redis 搜索会话中已发现的全文 URL，不能接受前端提交的任意下载地址；下载时需限制重定向、单次网络等待、整次获取总时限与文件大小，并同时校验 HTTP `Content-Type` 与 PDF 文件魔数。每次重定向都要阻止访问私有网络地址，避免 SSRF。下载成功后计算 SHA-256，先写入临时对象；准入服务将暂存对象服务端复制为正式对象，再在单个事务中创建论文、工作区关联、文件记录和初始入库运行。对象存储与数据库不能构成单一事务，因此任何一步失败都必须补偿删除正式对象和暂存对象。
 
-当前已实现 `app/modules/fulltext` 的下载与暂存边界：它只接收已规整的内部候选对象，拒绝未完成 DOI 题录核验、非开放获取或没有直接 PDF URL 的候选；对每一跳重定向重新执行 HTTPS、端口和公网地址校验，并流式验证 PDF 后上传至 `staging/fulltext/`。
+当前已实现 `app/modules/documents` 的下载与暂存边界：它只接收已规整的内部候选对象，拒绝未完成 DOI 题录核验、非开放获取或没有直接 PDF URL 的候选；对每一跳重定向重新执行 HTTPS、端口和公网地址校验，并流式验证 PDF 后上传至 `staging/fulltext/`。
 
-当前已实现 `app/modules/collections/ResearchCollectionAdmissionService`：它复核候选、`ready` 题录与暂存 PDF 属于同一 DOI，校验当前用户对活动研究集合的所有权，处理同一 DOI 的幂等重复加入，并将对象转正。在一个 PostgreSQL 事务中创建或复用 `papers`，再创建 `collection_papers`、`documents` 与状态为 `pending`、阶段为 `parse` 的 `ingestion_runs`；数据库或对象操作失败时会清理正式键和暂存键。`POST .../fulltext/admission` 已接入该服务，但它不会自动投递 Worker。用户调用 `POST /collections/{collection_id}/build` 后，集合构建服务才将活动 `pending` 运行批量切换为 `queued` 并逐篇投递 arq；单篇队列失败会明确写为 `failed`，不影响已投递的文献。`app.workers.ingestion` 消费 `queued` 运行并完成 PDF 解析、切块、embedding 与 Milvus 写入。成功结果仍只表示“文献已进入研究集合并等待或正在入库”，只有 `completed + is_current=true` 才表示能够被 RAG 检索。
+当前已实现 `app/infra/db/repositories/literature_admission.py::SqlAlchemyLiteratureAdmissionAdapter`：它复核候选、`ready` 题录与暂存 PDF 属于同一 DOI，校验当前用户对活动研究集合的所有权，处理同一 DOI 的幂等重复加入，并将对象转正。在一个 PostgreSQL 事务中创建或复用 `papers`，再创建 `collection_papers`、`documents` 与状态为 `pending`、阶段为 `parse` 的 `ingestion_runs`；数据库或对象操作失败时会清理正式键和暂存键。`POST .../fulltext/admission` 已接入该服务，但它不会自动投递 Worker。用户调用 `POST /collections/{collection_id}/build` 后，集合构建服务才将活动 `pending` 运行批量切换为 `queued` 并逐篇投递 arq；单篇队列失败会明确写为 `failed`，不影响已投递的文献。`app.workers.ingestion` 消费 `queued` 运行并完成 PDF 解析、切块、embedding 与 Milvus 写入。成功结果仍只表示“文献已进入研究集合并等待或正在入库”，只有 `completed + is_current=true` 才表示能够被 RAG 检索。
 
 全文下载默认直连且不读取进程级 `HTTP_PROXY` / `HTTPS_PROXY`。某个开放获取来源在当前网络环境无法直连时，可显式设置 `FULLTEXT_NETWORK_MODE=proxy`，它只复用已校验的 `LITERATURE_PROXY_URL`，不会改变 MinIO、数据库或其他服务的网络路由。
 

@@ -284,34 +284,27 @@ Milvus 过滤不是权限真相。API 必须在创建检索表达式前校验用
 
 ## 7. 后端数据库代码组织
 
-数据库相关的 Python 代码统一位于 `backend/app/db/`，迁移文件保留在 `backend/alembic/`。不要把 SQLAlchemy 模型定义写进 FastAPI 路由、Pydantic 请求响应模型，或 Docker 基础设施目录。
+数据库相关的 Python 基础设施统一位于 `backend/app/infra/db/`，迁移文件保留在 `backend/alembic/`。业务模块只能依赖仓储端口和领域记录，不得导入 SQLAlchemy model 或 session；FastAPI 路由和 Pydantic 请求响应模型同样不得直接承载数据库实现。
 
 ```text
 backend/
 ├─ app/
-│  ├─ db/
-│  │  ├─ __init__.py
-│  │  ├─ base.py                 # SQLAlchemy Declarative Base 与共享列定义
-│  │  ├─ session.py              # 异步 Engine、SessionFactory 和数据库依赖
-│  │  └─ models/
-│  │     ├─ __init__.py          # 集中导入所有模型，供 Alembic 发现 metadata
-│  │     ├─ user.py              # users
-│  │     ├─ collection.py        # research_collections、collection_papers
-│  │     ├─ paper.py             # papers
-│  │     ├─ document.py          # documents、ingestion_runs、document_chunks
-│  │     ├─ research.py          # conversations、messages、research_runs、research_evidences
-│  │     └─ workflow.py          # research_plans、search_runs
-│  ├─ schemas/                   # Pydantic 请求 / 响应 DTO，不等同数据库模型
-│  ├─ services/                  # 文献校验、入库、RAG 等业务逻辑
+│  ├─ infra/
+│  │  └─ db/
+│  │     ├─ base.py              # SQLAlchemy Declarative Base 与共享列定义
+│  │     ├─ session.py           # 异步 Engine、SessionFactory 和数据库依赖
+│  │     ├─ models/              # ORM 表、外键和关系定义
+│  │     └─ repositories/        # 业务仓储端口的 SQLAlchemy 实现
+│  ├─ modules/                   # 业务用例、领域记录与仓储端口
 │  └─ api/                       # FastAPI 路由
 └─ alembic/
-   ├─ env.py                     # 加载 app.db.models 的 metadata
+   ├─ env.py                     # 加载 app.infra.db.models 的 metadata
    └─ versions/                  # 每次表结构变更的迁移文件
 ```
 
-首版按业务领域拆分模型文件，而不是把全部模型堆进一个 `models.py`。`schemas` 与 `models` 必须分开：前者定义 API 的输入输出，后者定义 PostgreSQL 表和外键。服务层负责“DOI 题录与正文均验证成功后才入库”等业务规则，路由层只调用服务并返回响应。
+首版按业务领域拆分模型文件，而不是把全部模型堆进一个 `models.py`。API DTO 与 ORM model 必须分开：前者定义协议输入输出，后者只定义 PostgreSQL 表和外键。业务模块负责“DOI 题录与正文均验证成功后才入库”等规则，`infra/db` adapter 实现其仓储端口，路由层只调用用例并返回响应。
 
-已实现的数据库基础设施包括 `app/db/base.py`、`app/db/session.py`、`app/db/models/`、`alembic/env.py` 与七条迁移：初始建表、schema 注释、严格准入同步、工作区列表索引、研究工作流状态、工作流唯一约束校正和入库 `pending` 状态。最新 revision `a6d2e9f7c418_add_pending_ingestion_status` 使“准入后待用户确认构建”成为可持久化状态；`f41c8e7b2a06_align_workflow_unique_constraints` 使 `arq_job_id`、`redis_session_key` 的数据库唯一约束与 SQLAlchemy 模型保持一致；`e2a7c4b9d113_add_research_workflow_models` 为工作区增加独立 `workflow_stage`，并创建 `research_plans`、`search_runs`。候选详情仍不写入 PostgreSQL，而只在 Redis TTL 内保存，防止未通过 DOI 与全文准入的数据混入 `papers`。`d7a4c9e2f18b_align_research_document_admission` 已将 `papers.doi` 改为非空唯一、移除 `bibliographic_fingerprint`、补齐格式中立题录字段，并同步 `documents.origin_kind` 与 `ingestion_runs.is_current`。`app/modules/fulltext` 将合法获取的 PDF 写入私有暂存键；`app/modules/collections/ResearchCollectionAdmissionService` 已在验证候选、题录、全文和工作区权限后，以可补偿流程转正对象，并在一个事务中写入长期书目、集合关联、文件和初始 `pending` 入库运行。候选全文、准入和集合构建 API 均已接入这条边界；集合构建服务负责将运行转为 `queued` 并投递 arq，`app.workers.ingestion` 再完成解析、切块、embedding 和 Milvus 写入。后续 RAG 检索与研究对话接口必须继续复用这些准入、版本和权限边界。
+已实现的数据库基础设施包括 `app/infra/db/base.py`、`app/infra/db/session.py`、`app/infra/db/models/`、`alembic/env.py` 与七条迁移：初始建表、schema 注释、严格准入同步、工作区列表索引、研究工作流状态、工作流唯一约束校正和入库 `pending` 状态。最新 revision `a6d2e9f7c418_add_pending_ingestion_status` 使“准入后待用户确认构建”成为可持久化状态；`f41c8e7b2a06_align_workflow_unique_constraints` 使 `arq_job_id`、`redis_session_key` 的数据库唯一约束与 SQLAlchemy 模型保持一致；`e2a7c4b9d113_add_research_workflow_models` 为工作区增加独立 `workflow_stage`，并创建 `research_plans`、`search_runs`。候选详情仍不写入 PostgreSQL，而只在 Redis TTL 内保存，防止未通过 DOI 与全文准入的数据混入 `papers`。`d7a4c9e2f18b_align_research_document_admission` 已将 `papers.doi` 改为非空唯一、移除 `bibliographic_fingerprint`、补齐格式中立题录字段，并同步 `documents.origin_kind` 与 `ingestion_runs.is_current`。`app/modules/documents` 将合法获取的 PDF 写入私有暂存键；`app/infra/db/repositories/literature_admission.py::SqlAlchemyLiteratureAdmissionAdapter` 已在验证候选、题录、全文和工作区权限后，以可补偿流程转正对象，并在一个事务中写入长期书目、集合关联、文件和初始 `pending` 入库运行。候选全文、准入和集合构建 API 均已接入这条边界；集合构建服务负责将运行转为 `queued` 并投递 arq，`app.workers.ingestion` 再完成解析、切块、embedding 和 Milvus 写入。后续 RAG 检索与研究对话接口必须继续复用这些准入、版本和权限边界。
 
 ## 8. 首批 Alembic 迁移顺序
 

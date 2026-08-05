@@ -6,11 +6,12 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
+from app.modules.literature.contracts import CitationDate
+from app.modules.literature.normalization import normalize_doi
 from app.modules.search.contracts import (
     CandidateAuthor,
     CandidateLanguage,
     CandidateLinks,
-    CitationDate,
     RawCandidate,
     SourceName,
     UnifiedCandidate,
@@ -20,7 +21,6 @@ from app.modules.search.normalize import (
     infer_candidate_language,
     normalize_author_key,
     normalize_candidate_record,
-    normalize_doi,
     normalize_title_key,
 )
 

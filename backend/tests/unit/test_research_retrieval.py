@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import cast
 from uuid import UUID
 
 import httpx
 import pytest
-from app.db.models.document import DocumentChunk
-from app.modules.ingestion.embedding import TextEmbedder
-from app.modules.research.retrieval import (
-    HttpResearchReranker,
+from app.infra.llm.reranker import HttpResearchReranker
+from app.modules.rag.ingestion.embedding import TextEmbedder
+from app.modules.rag.retrieval import (
+    LexicalMatch,
     RerankMatch,
     ResearchReranker,
+    ResearchRetrievalRepository,
     ResearchRetriever,
     ResearchVectorSearch,
     RetrievedEvidence,
@@ -22,7 +22,6 @@ from app.modules.research.retrieval import (
 )
 from app.modules.research.settings import ResearchSettings
 from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession
 
 _CHUNK_A = UUID("00000000-0000-0000-0000-000000000901")
 _CHUNK_B = UUID("00000000-0000-0000-0000-000000000902")
@@ -68,18 +67,18 @@ def _evidence(chunk_id: UUID) -> RetrievedEvidence:
 def test_rrf_favors_chunk_retrieved_by_both_vector_and_keyword_paths() -> None:
     """同一片段被两条受控召回路径命中时，RRF 分数应高于单路径片段。"""
     retriever = ResearchRetriever(
-        cast(AsyncSession, object()),
+        cast(ResearchRetrievalRepository, object()),
         embedder=cast(TextEmbedder, object()),
         vector_search=cast(ResearchVectorSearch, object()),
         settings=ResearchSettings(rag_rrf_k=10),
     )
     contexts = {_CHUNK_A: _evidence(_CHUNK_A), _CHUNK_B: _evidence(_CHUNK_B)}
-    lexical_chunk_a = cast(DocumentChunk, SimpleNamespace(id=_CHUNK_A))
-    lexical_chunk_b = cast(DocumentChunk, SimpleNamespace(id=_CHUNK_B))
-
     fused = retriever._fuse(
         vector_matches=(VectorMatch(chunk_id=_CHUNK_A, score=0.9),),
-        lexical_rows=[(lexical_chunk_a, 0.7), (lexical_chunk_b, 0.6)],
+        lexical_rows=[
+            LexicalMatch(chunk_id=_CHUNK_A, score=0.7),
+            LexicalMatch(chunk_id=_CHUNK_B, score=0.6),
+        ],
         contexts=contexts,
     )
 
@@ -93,7 +92,7 @@ def test_rrf_favors_chunk_retrieved_by_both_vector_and_keyword_paths() -> None:
 async def test_disabled_reranker_keeps_rrf_truncation_explicit_and_unscored() -> None:
     """未配置外部服务时不能伪造 `rerank_score` 或把 RRF 截断说成模型精排。"""
     retriever = ResearchRetriever(
-        cast(AsyncSession, object()),
+        cast(ResearchRetrievalRepository, object()),
         embedder=cast(TextEmbedder, object()),
         vector_search=cast(ResearchVectorSearch, object()),
         settings=ResearchSettings(rag_final_evidence_limit=1),
@@ -114,7 +113,7 @@ async def test_disabled_reranker_keeps_rrf_truncation_explicit_and_unscored() ->
 async def test_configured_reranker_reorders_evidence_and_sets_real_score() -> None:
     """真实重排适配器的输出，而非 RRF 排名，决定最终证据顺序和分数。"""
     retriever = ResearchRetriever(
-        cast(AsyncSession, object()),
+        cast(ResearchRetrievalRepository, object()),
         embedder=cast(TextEmbedder, object()),
         vector_search=cast(ResearchVectorSearch, object()),
         settings=ResearchSettings(rag_final_evidence_limit=1),

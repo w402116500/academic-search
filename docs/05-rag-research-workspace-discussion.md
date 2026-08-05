@@ -74,7 +74,7 @@ RAG 的准入条件是“已核验 DOI + 已实际取得的合法正文”，两
 
 ### 3.3 当前 Worker 入库实现
 
-`app.modules.ingestion` 与 `app.workers.ingestion` 已实现以下受控链路：
+`app.modules.rag.ingestion` 与 `app.workers.ingestion` 已实现以下受控链路：
 
 ```text
 queued / parse

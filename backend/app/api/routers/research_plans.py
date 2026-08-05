@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, status
+
 from app.api.deps.auth import get_current_user
-from app.db.models.user import User
-from app.db.session import get_db_session
-from app.modules.workflow.contracts import (
+from app.api.deps.services import get_research_plan_service
+from app.modules.auth.models import UserAccount
+from app.modules.research.plan_contracts import (
     ConfirmResearchPlanRequest,
     RegenerateResearchPlanRequest,
     ResearchPlanError,
@@ -17,11 +19,8 @@ from app.modules.workflow.contracts import (
     ResearchSubmissionResponse,
     StartResearchRequest,
 )
-from app.modules.workflow.job_queue import ArqResearchPlanJobQueue
-from app.modules.workflow.plan_service import ResearchPlanService
-from app.modules.workflow.state import WorkspaceWorkflowStage
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.modules.research.plan_service import ResearchPlanService
+from app.modules.research.state import WorkspaceWorkflowStage
 
 router = APIRouter(prefix="/collections", tags=["研究计划"])
 
@@ -48,12 +47,12 @@ def _research_plan_error_response(error: ResearchPlanError) -> HTTPException:
 )
 async def start_research(
     request: StartResearchRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchPlanService, Depends(get_research_plan_service)],
 ) -> ResearchSubmissionResponse:
     """创建可恢复的工作区和首版计划，返回后由 arq 异步完成意图分析。"""
     try:
-        submission = await ResearchPlanService(session, ArqResearchPlanJobQueue()).start_research(
+        submission = await service.start_research(
             owner_user_id=current_user.id,
             request=request,
         )
@@ -74,12 +73,12 @@ async def start_research(
 )
 async def get_current_research_plan(
     collection_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchPlanService, Depends(get_research_plan_service)],
 ) -> ResearchPlanResponse:
     """刷新页面后从服务端恢复最新计划版本和其生成状态。"""
     try:
-        plan = await ResearchPlanService(session).get_current_plan(
+        plan = await service.get_current_plan(
             owner_user_id=current_user.id,
             collection_id=collection_id,
         )
@@ -97,12 +96,12 @@ async def get_current_research_plan(
 async def regenerate_research_plan(
     collection_id: UUID,
     request: RegenerateResearchPlanRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchPlanService, Depends(get_research_plan_service)],
 ) -> ResearchPlanResponse:
     """创建新版本，不覆盖已失败、已确认或已审核的历史计划。"""
     try:
-        plan = await ResearchPlanService(session, ArqResearchPlanJobQueue()).regenerate_plan(
+        plan = await service.regenerate_plan(
             owner_user_id=current_user.id,
             collection_id=collection_id,
             request=request,
@@ -120,12 +119,12 @@ async def regenerate_research_plan(
 async def confirm_research_plan(
     collection_id: UUID,
     request: ConfirmResearchPlanRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchPlanService, Depends(get_research_plan_service)],
 ) -> ResearchPlanResponse:
     """固化用户选择；后续由显式检索接口据此创建唯一运行。"""
     try:
-        plan = await ResearchPlanService(session).confirm_current_plan(
+        plan = await service.confirm_current_plan(
             owner_user_id=current_user.id,
             collection_id=collection_id,
             request=request,

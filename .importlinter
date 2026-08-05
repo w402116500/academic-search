@@ -1,0 +1,69 @@
+[importlinter]
+root_package = app
+
+[importlinter:contract:business-modules-do-not-import-outer-layers]
+name = Business modules do not import API, workers, or infrastructure
+type = forbidden
+source_modules =
+    app.modules
+forbidden_modules =
+    app.api
+    app.workers
+    app.infra
+
+[importlinter:contract:routers-do-not-compose-infrastructure]
+name = API routers do not import workers or infrastructure
+type = forbidden
+source_modules =
+    app.api.routers
+forbidden_modules =
+    app.workers
+    app.infra
+ignore_imports =
+    app.api.deps.services -> app.infra.db.session
+    app.api.deps.services -> app.infra.db.repositories.users
+    app.api.deps.services -> app.infra.db.repositories.workspaces
+    app.api.deps.services -> app.infra.db.repositories.research_plans
+    app.api.deps.services -> app.infra.db.repositories.search_runs
+    app.api.deps.services -> app.infra.db.repositories.literature_admission
+    app.api.deps.services -> app.infra.db.repositories.collection_builds
+    app.api.deps.services -> app.infra.db.repositories.research_conversations
+    app.api.deps.services -> app.infra.redis.connection
+    app.api.deps.services -> app.infra.redis.job_queues
+    app.api.deps.services -> app.infra.redis.research_events
+    app.api.deps.services -> app.infra.redis.search_session
+    app.api.deps.services -> app.infra.storage.documents
+
+[importlinter:contract:literature-does-not-import-candidate-workflows]
+name = Literature does not import Search or Documents workflows
+type = forbidden
+source_modules =
+    app.modules.literature
+forbidden_modules =
+    app.modules.search
+    app.modules.documents
+
+[importlinter:contract:documents-do-not-import-search]
+name = Documents does not import Search
+type = forbidden
+source_modules =
+    app.modules.documents
+forbidden_modules =
+    app.modules.search
+
+[importlinter:contract:research-does-not-import-search-or-agents]
+name = Research does not import Search or Agents
+type = forbidden
+source_modules =
+    app.modules.research
+forbidden_modules =
+    app.modules.search
+    app.modules.agents
+
+[importlinter:contract:rag-does-not-import-agents]
+name = RAG does not import Agents
+type = forbidden
+source_modules =
+    app.modules.rag
+forbidden_modules =
+    app.modules.agents

@@ -2,95 +2,132 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from app.db.models.collection import ResearchCollection
-from app.modules.collections.workspace_contracts import (
+from app.modules.research.workspace_contracts import (
     CreateWorkspaceRequest,
     UpdateWorkspaceRequest,
     WorkspaceError,
     WorkspaceErrorCode,
 )
-from app.modules.collections.workspace_service import ResearchWorkspaceService
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.modules.research.workspace_models import ResearchWorkspace
+from app.modules.research.workspace_repository import (
+    CreateResearchWorkspace,
+    UpdateWorkspaceDetails,
+    WorkspaceListFilter,
+)
+from app.modules.research.workspace_service import ResearchWorkspaceService
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000000201")
 _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000202")
 
 
-class FakeSession:
-    """工作区服务所需的最小异步会话替身。"""
+class FakeWorkspaceRepository:
+    """Workspace persistence port replacement for lifecycle tests."""
 
     def __init__(
         self,
-        scalar_values: list[object | None] | None = None,
-        scalar_batches: list[list[object]] | None = None,
+        workspaces: list[ResearchWorkspace] | None = None,
+        list_batches: list[list[ResearchWorkspace]] | None = None,
     ) -> None:
-        self._scalar_values = iter(scalar_values or [])
-        self._scalar_batches = iter(scalar_batches or [])
-        self.added: list[object] = []
-        self.flush_count = 0
-        self.commit_count = 0
+        self.workspaces = {workspace.id: workspace for workspace in workspaces or []}
+        self._list_batches = iter(list_batches or [])
+        self.created_commands: list[CreateResearchWorkspace] = []
+        self.detail_updates: list[UpdateWorkspaceDetails] = []
 
-    @asynccontextmanager
-    async def begin(self) -> AsyncIterator[FakeSession]:
-        yield self
+    async def create(self, command: CreateResearchWorkspace) -> ResearchWorkspace:
+        self.created_commands.append(command)
+        workspace = ResearchWorkspace(
+            id=_COLLECTION_ID,
+            owner_user_id=command.owner_user_id,
+            name=command.name,
+            description=command.description,
+            research_question=None,
+            status="active",
+            workflow_stage="draft",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        self.workspaces[workspace.id] = workspace
+        return workspace
 
-    async def scalar(self, _statement: object) -> object | None:
-        return next(self._scalar_values)
+    async def list_owned(self, query: WorkspaceListFilter) -> list[ResearchWorkspace]:
+        return next(self._list_batches)
 
-    async def scalars(self, _statement: object) -> list[object]:
-        return next(self._scalar_batches)
+    async def get_owned(
+        self, *, owner_user_id: UUID, workspace_id: UUID
+    ) -> ResearchWorkspace | None:
+        workspace = self.workspaces.get(workspace_id)
+        if workspace is None or workspace.owner_user_id != owner_user_id:
+            return None
+        return workspace
 
-    def add(self, value: object) -> None:
-        self.added.append(value)
+    async def update_details(
+        self,
+        *,
+        owner_user_id: UUID,
+        workspace_id: UUID,
+        changes: UpdateWorkspaceDetails,
+    ) -> ResearchWorkspace:
+        workspace = self.workspaces[workspace_id]
+        assert workspace.owner_user_id == owner_user_id
+        self.detail_updates.append(changes)
+        updated = replace(
+            workspace,
+            name=changes.name if changes.name is not None else workspace.name,
+            description=(
+                changes.description if changes.change_description else workspace.description
+            ),
+        )
+        self.workspaces[workspace_id] = updated
+        return updated
 
-    async def flush(self) -> None:
-        self.flush_count += 1
+    async def set_status(
+        self, *, owner_user_id: UUID, workspace_id: UUID, status: str
+    ) -> ResearchWorkspace:
+        workspace = self.workspaces[workspace_id]
+        assert workspace.owner_user_id == owner_user_id
+        updated = replace(workspace, status=status)
+        self.workspaces[workspace_id] = updated
+        return updated
 
-    async def commit(self) -> None:
-        self.commit_count += 1
 
-    async def refresh(self, _instance: object) -> None:
-        return None
-
-
-def _collection(*, status: str = "active") -> ResearchCollection:
+def _collection(*, status: str = "active") -> ResearchWorkspace:
     """构建一个已属于测试用户的工作区。"""
-    return ResearchCollection(
+    now = datetime.now(UTC)
+    return ResearchWorkspace(
         id=_COLLECTION_ID,
         owner_user_id=_OWNER_ID,
         name="Original name",
         description="Original description",
+        research_question=None,
         status=status,
+        workflow_stage="draft",
+        created_at=now,
+        updated_at=now,
     )
 
 
-def _listed_collection(*, collection_id: UUID, updated_at: datetime) -> ResearchCollection:
+def _listed_collection(*, collection_id: UUID, updated_at: datetime) -> ResearchWorkspace:
     """构建具有稳定分页排序键的工作区。"""
-    collection = _collection()
-    collection.id = collection_id
-    collection.updated_at = updated_at
-    return collection
+    return replace(_collection(), id=collection_id, updated_at=updated_at)
 
 
 @pytest.mark.asyncio
 async def test_create_assigns_the_owner_from_the_service_boundary() -> None:
     """客户端请求中没有 owner 字段，服务只接受认证依赖传入的用户标识。"""
-    session = FakeSession()
-    service = ResearchWorkspaceService(cast(AsyncSession, session))
+    workspaces = FakeWorkspaceRepository()
+    service = ResearchWorkspaceService(workspaces)
 
     created = await service.create(
         owner_user_id=_OWNER_ID,
         request=CreateWorkspaceRequest(name="  Green   space\nresearch  ", description="  Notes  "),
     )
 
-    assert session.added == [created]
+    assert len(workspaces.created_commands) == 1
     assert created.owner_user_id == _OWNER_ID
     assert created.name == "Green space research"
     assert created.description == "Notes"
@@ -101,8 +138,8 @@ async def test_create_assigns_the_owner_from_the_service_boundary() -> None:
 async def test_update_can_clear_description_but_rejects_archived_workspace() -> None:
     """显式 null 用于清空说明，归档后的普通编辑必须失败。"""
     active = _collection()
-    session = FakeSession([active])
-    service = ResearchWorkspaceService(cast(AsyncSession, session))
+    workspaces = FakeWorkspaceRepository([active])
+    service = ResearchWorkspaceService(workspaces)
 
     updated = await service.update(
         owner_user_id=_OWNER_ID,
@@ -111,11 +148,11 @@ async def test_update_can_clear_description_but_rejects_archived_workspace() -> 
     )
 
     assert updated.description is None
-    assert session.commit_count == 1
+    assert len(workspaces.detail_updates) == 1
 
-    archived_session = FakeSession([_collection(status="archived")])
+    archived_workspaces = FakeWorkspaceRepository([_collection(status="archived")])
     with pytest.raises(WorkspaceError) as error:
-        await ResearchWorkspaceService(cast(AsyncSession, archived_session)).update(
+        await ResearchWorkspaceService(archived_workspaces).update(
             owner_user_id=_OWNER_ID,
             collection_id=_COLLECTION_ID,
             request=UpdateWorkspaceRequest(name="Renamed"),
@@ -127,15 +164,15 @@ async def test_update_can_clear_description_but_rejects_archived_workspace() -> 
 async def test_archive_and_restore_are_idempotent() -> None:
     """重复调用生命周期操作不应使前端重试变成错误。"""
     active = _collection()
-    archive_session = FakeSession([active])
-    archived = await ResearchWorkspaceService(cast(AsyncSession, archive_session)).archive(
+    archive_workspaces = FakeWorkspaceRepository([active])
+    archived = await ResearchWorkspaceService(archive_workspaces).archive(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
     )
     assert archived.status == "archived"
 
-    restore_session = FakeSession([archived])
-    restored = await ResearchWorkspaceService(cast(AsyncSession, restore_session)).restore(
+    restore_workspaces = FakeWorkspaceRepository([archived])
+    restored = await ResearchWorkspaceService(restore_workspaces).restore(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
     )
@@ -145,10 +182,10 @@ async def test_archive_and_restore_are_idempotent() -> None:
 @pytest.mark.asyncio
 async def test_get_owned_returns_not_found_for_foreign_or_deleted_resources() -> None:
     """查询不到资源时统一错误，路由层会映射为不泄漏信息的 404。"""
-    session = FakeSession([None])
+    workspaces = FakeWorkspaceRepository()
 
     with pytest.raises(WorkspaceError) as error:
-        await ResearchWorkspaceService(cast(AsyncSession, session)).get_owned(
+        await ResearchWorkspaceService(workspaces).get_owned(
             owner_user_id=_OWNER_ID,
             collection_id=uuid4(),
         )
@@ -163,9 +200,9 @@ async def test_list_owned_uses_an_opaque_cursor_for_the_next_page() -> None:
     first = _listed_collection(collection_id=UUID(int=301), updated_at=now)
     second = _listed_collection(collection_id=UUID(int=302), updated_at=now - timedelta(minutes=1))
     extra = _listed_collection(collection_id=UUID(int=303), updated_at=now - timedelta(minutes=2))
-    first_session = FakeSession(scalar_batches=[[first, second, extra]])
+    first_workspaces = FakeWorkspaceRepository(list_batches=[[first, second, extra]])
 
-    first_page = await ResearchWorkspaceService(cast(AsyncSession, first_session)).list_owned(
+    first_page = await ResearchWorkspaceService(first_workspaces).list_owned(
         owner_user_id=_OWNER_ID,
         query="研究中",
         limit=2,
@@ -175,8 +212,8 @@ async def test_list_owned_uses_an_opaque_cursor_for_the_next_page() -> None:
     assert first_page.next_cursor is not None
 
     final = _listed_collection(collection_id=UUID(int=304), updated_at=now - timedelta(minutes=3))
-    second_session = FakeSession(scalar_batches=[[final]])
-    second_page = await ResearchWorkspaceService(cast(AsyncSession, second_session)).list_owned(
+    second_workspaces = FakeWorkspaceRepository(list_batches=[[final]])
+    second_page = await ResearchWorkspaceService(second_workspaces).list_owned(
         owner_user_id=_OWNER_ID,
         cursor=first_page.next_cursor,
         limit=2,
@@ -189,7 +226,7 @@ async def test_list_owned_uses_an_opaque_cursor_for_the_next_page() -> None:
 @pytest.mark.asyncio
 async def test_list_owned_rejects_a_damaged_cursor() -> None:
     """客户端传回损坏游标时返回稳定错误，而不是暴露解码异常。"""
-    service = ResearchWorkspaceService(cast(AsyncSession, FakeSession()))
+    service = ResearchWorkspaceService(FakeWorkspaceRepository())
 
     with pytest.raises(WorkspaceError) as error:
         await service.list_owned(

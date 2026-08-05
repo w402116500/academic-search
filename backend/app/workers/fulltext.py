@@ -6,27 +6,27 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
 from app.core.settings import get_literature_source_settings
-from app.db.models.workflow import SearchRun
-from app.db.session import async_session_factory
-from app.modules.fulltext import (
-    Boto3StagingObjectStorage,
+from app.infra.db.models.workflow import SearchRun
+from app.infra.db.session import async_session_factory
+from app.infra.redis.connection import redis_client_from_environment
+from app.infra.redis.search_session import RedisSearchSessionStore
+from app.infra.storage.documents import Boto3StagingObjectStorage
+from app.modules.documents.acquisition import OpenAccessPdfAcquirer
+from app.modules.documents.contracts import (
     CandidateFulltextState,
     FulltextAcquisitionError,
     FulltextAcquisitionErrorCode,
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
-    OpenAccessPdfAcquirer,
-    get_fulltext_acquisition_settings,
 )
+from app.modules.documents.keys import build_candidate_fulltext_key
+from app.modules.literature.contracts import CitationMetadataStatus
 from app.modules.search.citation_enrichment import CitationMetadataEnricher
-from app.modules.search.contracts import CitationMetadataStatus
+from app.modules.search.contracts import UnifiedCandidate
+from app.modules.search.fulltext_candidate import to_fulltext_candidate
 from app.modules.search.providers.doi_resolver import DoiMetadataResolver
-from app.modules.workflow.search_session import (
-    SearchSessionStore,
-    build_candidate_fulltext_key,
-)
-from app.workers.redis import redis_client_from_environment
 
 
 async def acquire_candidate_fulltext(
@@ -51,12 +51,12 @@ async def acquire_candidate_fulltext(
 
         redis = redis_client_from_environment()
         state: CandidateFulltextState | None = None
-        store: SearchSessionStore | None = None
+        store: RedisSearchSessionStore | None = None
         state_key = build_candidate_fulltext_key(run.redis_session_key, parsed_candidate_id)
         try:
             settings = get_fulltext_acquisition_settings()
             source_settings = get_literature_source_settings()
-            store = SearchSessionStore(
+            store = RedisSearchSessionStore(
                 redis, ttl_seconds=source_settings.search_session_ttl_seconds
             )
             raw_state = await store.read_snapshot(state_key)
@@ -80,7 +80,15 @@ async def acquire_candidate_fulltext(
             )
             await store.write_snapshot(state_key, downloading.model_dump(mode="json"))
 
-            candidate = downloading.candidate
+            candidate = await _load_search_candidate(
+                store,
+                run.redis_session_key,
+                parsed_candidate_id,
+            )
+            if candidate.citation is None and downloading.candidate.citation is not None:
+                candidate = candidate.model_copy(
+                    update={"citation": downloading.candidate.citation}
+                )
             if (
                 candidate.citation is None
                 or candidate.citation.status is not CitationMetadataStatus.READY
@@ -92,7 +100,7 @@ async def acquire_candidate_fulltext(
 
             validating = downloading.model_copy(
                 update={
-                    "candidate": candidate,
+                    "candidate": to_fulltext_candidate(candidate),
                     "result": FulltextAcquisitionResult(
                         candidate_id=candidate.candidate_id,
                         status=FulltextAcquisitionStatus.VALIDATING,
@@ -105,7 +113,7 @@ async def acquire_candidate_fulltext(
             acquisition = await OpenAccessPdfAcquirer(
                 settings,
                 Boto3StagingObjectStorage(settings),
-            ).acquire(candidate)
+            ).acquire(to_fulltext_candidate(candidate))
             completed = validating.model_copy(
                 update={"result": acquisition, "updated_at": datetime.now(UTC)}
             )
@@ -142,3 +150,22 @@ def _task_failed_state(state: CandidateFulltextState | None) -> CandidateFulltex
             "updated_at": datetime.now(UTC),
         }
     )
+
+
+async def _load_search_candidate(
+    store: RedisSearchSessionStore,
+    session_key: str,
+    candidate_id: UUID,
+) -> UnifiedCandidate:
+    """Read the canonical Search snapshot before enrichment, then project it back to Documents."""
+    snapshot = await store.read_snapshot(session_key)
+    if snapshot is None:
+        raise ValueError("检索候选会话已过期，无法继续全文任务。")
+    raw_candidates = snapshot.get("candidates")
+    if not isinstance(raw_candidates, list):
+        raise ValueError("检索候选快照格式无效，无法继续全文任务。")
+    for raw_candidate in raw_candidates:
+        candidate = UnifiedCandidate.model_validate(raw_candidate)
+        if candidate.candidate_id == candidate_id:
+            return candidate
+    raise ValueError("全文任务引用的候选不在当前检索会话中。")

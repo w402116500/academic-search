@@ -1,11 +1,12 @@
-"""候选相关性运行级重试和取消快照转换测试。"""
+"""候选相关性快照统计测试。"""
 
 from __future__ import annotations
 
 from uuid import uuid4
 
 from app.modules.search.contracts import (
-    CandidateRelevanceError,
+    CandidateRelevanceAssessment,
+    CandidateRelevanceEvidence,
     CandidateRelevanceLevel,
     CandidateRelevanceState,
     RawCandidate,
@@ -13,89 +14,65 @@ from app.modules.search.contracts import (
     TriageDecision,
     UnifiedCandidate,
 )
-from app.modules.workflow.candidate_relevance_service import CandidateRelevanceService
+from app.modules.search.relevance import exclude_candidate_relevance
+from app.modules.search.relevance_execution import CandidateRelevanceRunExecutor
 
 
-def _candidate(
-    *,
-    abstract: str | None,
-    included: bool = True,
-    failed: bool = True,
-) -> UnifiedCandidate:
+def _candidate(level: CandidateRelevanceLevel) -> UnifiedCandidate:
     source = RawCandidate(
         source=SourceName.OPENALEX,
         source_record_id=str(uuid4()),
         title="Sleep quality and mental health",
-        abstract=abstract,
+        abstract="The study examines sleep quality and mental health.",
     )
     return UnifiedCandidate(
         candidate_id=uuid4(),
         title=source.title,
         title_key="sleep quality mental health",
-        abstract=abstract,
+        abstract=source.abstract,
         source_records=(source,),
-        triage=TriageDecision(included=included),
-        relevance_state=CandidateRelevanceState.FAILED
-        if failed
-        else CandidateRelevanceState.PENDING,
-        relevance_error=(
-            CandidateRelevanceError(
-                code="candidate_relevance_model_unavailable",
-                message="模型暂时不可用。",
-                retryable=True,
-            )
-            if failed
-            else None
+        triage=TriageDecision(included=True),
+        relevance_state=(
+            CandidateRelevanceState.COMPLETED
+            if level
+            in {
+                CandidateRelevanceLevel.CORE,
+                CandidateRelevanceLevel.RELATED,
+                CandidateRelevanceLevel.BACKGROUND,
+            }
+            else CandidateRelevanceState.EXCLUDED
+        ),
+        relevance_assessment=CandidateRelevanceAssessment(
+            level=level,
+            study_focus="测试候选。",
+            reason="测试相关性层级。",
+            helpful_aspect="测试。",
+            recommendation="测试。",
+            evidence=(CandidateRelevanceEvidence(source_field="title", quote=source.title),),
         ),
     )
 
 
-def test_run_retry_resets_the_complete_eligible_collection_without_requerying() -> None:
-    """整批重试会重置每篇有摘要候选，不把失败范围收窄为单项。"""
-    with_abstract = _candidate(abstract="The study examines sleep and anxiety.")
-    without_abstract = _candidate(abstract=None)
-    excluded = _candidate(abstract="Excluded metadata.", included=False)
-    snapshot = {
-        "status": "partial_failed",
-        "stage": "completed",
-        "candidate_counts": {},
-        "candidates": [
-            with_abstract.model_dump(mode="json"),
-            without_abstract.model_dump(mode="json"),
-            excluded.model_dump(mode="json"),
-        ],
-    }
-
-    reset = CandidateRelevanceService._reset_relevance_snapshot(snapshot)
-    candidates = CandidateRelevanceService._deserialize_candidates(reset)
-
-    assert reset["status"] == "running"
-    assert reset["stage"] == "relevance_assessment"
-    assert candidates[0].relevance_state is CandidateRelevanceState.PENDING
-    assert candidates[1].relevance_state is CandidateRelevanceState.COMPLETED
-    assert candidates[1].relevance_assessment is not None
-    assert (
-        candidates[1].relevance_assessment.level is CandidateRelevanceLevel.INSUFFICIENT_INFORMATION
+def test_snapshot_counts_publish_positive_screening_and_exclusion_totals() -> None:
+    """用户只接收总数、处理数、排除数和实际可筛选数。"""
+    core = _candidate(CandidateRelevanceLevel.CORE)
+    background = _candidate(CandidateRelevanceLevel.BACKGROUND)
+    not_recommended = _candidate(CandidateRelevanceLevel.NOT_RECOMMENDED)
+    unsupported = exclude_candidate_relevance(
+        _candidate(CandidateRelevanceLevel.CORE),
+        "理由不能由标题和摘要支持。",
+        code="candidate_relevance_claim_unsupported",
     )
-    assert candidates[2].relevance_state is CandidateRelevanceState.SKIPPED
-    assert reset["candidate_counts"]["relevance_pending_count"] == 1
+    snapshot = {"candidate_counts": {"candidate_count": 4}}
 
+    counts = CandidateRelevanceRunExecutor._candidate_counts(
+        snapshot,
+        (core, background, not_recommended, unsupported),
+    )
 
-def test_cancel_marks_only_unfinished_candidates_as_retryable_failures() -> None:
-    """取消不会伪造已完成结果，但让待处理项可在后续整批重跑。"""
-    pending = _candidate(abstract="The study examines sleep and anxiety.", failed=False)
-    snapshot = {
-        "status": "running",
-        "stage": "relevance_assessment",
-        "candidate_counts": {},
-        "candidates": [pending.model_dump(mode="json")],
-    }
-
-    cancelled = CandidateRelevanceService._cancel_relevance_snapshot(snapshot)
-    candidate = CandidateRelevanceService._deserialize_candidates(cancelled)[0]
-
-    assert cancelled["status"] == "cancelled"
-    assert candidate.relevance_state is CandidateRelevanceState.FAILED
-    assert candidate.relevance_error is not None
-    assert candidate.relevance_error.code == "candidate_relevance_cancelled"
-    assert candidate.relevance_error.retryable is True
+    assert counts["relevance_total_count"] == 4
+    assert counts["relevance_analyzed_count"] == 4
+    assert counts["relevance_excluded_count"] == 2
+    assert counts["screening_candidate_count"] == 2
+    assert "relevance_failed_count" not in counts
+    assert "relevance_insufficient_count" not in counts

@@ -9,30 +9,28 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from app.db.models.collection import CollectionPaper, ResearchCollection
-from app.db.models.document import Document, IngestionRun
-from app.db.models.paper import Paper
-from app.modules.collections import (
-    CollectionAdmissionError,
-    CollectionAdmissionErrorCode,
-    CollectionAdmissionStatus,
-    ResearchCollectionAdmissionService,
+from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.document import Document, IngestionRun
+from app.infra.db.models.paper import Paper
+from app.infra.db.repositories.literature_admission import (
+    SqlAlchemyLiteratureAdmissionAdapter,
 )
-from app.modules.fulltext.contracts import (
+from app.modules.documents.contracts import (
     AcquiredFulltext,
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
 )
-from app.modules.search.contracts import (
-    CandidateAuthor,
-    CandidateLinks,
+from app.modules.literature.admission import (
+    CollectionAdmissionError,
+    CollectionAdmissionErrorCode,
+    CollectionAdmissionStatus,
+    LiteratureAdmissionCandidate,
+)
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
-    RawCandidate,
-    SourceName,
-    UnifiedCandidate,
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,6 +90,9 @@ class FakeSession:
         if self._flush_error is not None:
             raise self._flush_error
 
+    async def rollback(self) -> None:
+        """Allow the command to discard a request-scoped read transaction."""
+
 
 class MemoryResearchDocumentStorage:
     """记录对象转正和删除操作，避免服务单元测试依赖 MinIO。"""
@@ -125,9 +126,8 @@ def _collection() -> ResearchCollection:
     )
 
 
-def _candidate() -> UnifiedCandidate:
-    """构造具有完整 DOI 题录的统一候选。"""
-    author = CandidateAuthor(name="Ada Lovelace")
+def _candidate() -> LiteratureAdmissionCandidate:
+    """构造严格准入边界所需的最小候选命令。"""
     citation = CitationMetadata(
         status=CitationMetadataStatus.READY,
         authors=(CitationAuthor(given="Ada", family="Lovelace"),),
@@ -141,24 +141,11 @@ def _candidate() -> UnifiedCandidate:
         url=f"https://doi.org/{_DOI}",
         field_provenance={"doi": "doi_content_negotiation"},
     )
-    raw = RawCandidate(
-        source=SourceName.OPENALEX,
-        source_record_id="W-admission-test",
-        title=citation.title,
-        authors=(author,),
-        doi=_DOI,
-    )
-
-    return UnifiedCandidate(
+    return LiteratureAdmissionCandidate(
         candidate_id=_CANDIDATE_ID,
         doi=_DOI,
-        title=citation.title,
-        title_key="a verified paper for collection admission",
-        authors=(author,),
         abstract="A concise abstract used to test persistence.",
-        links=CandidateLinks(landing_url=f"https://doi.org/{_DOI}"),
-        is_open_access=True,
-        source_records=(raw,),
+        official_url=f"https://doi.org/{_DOI}",
         citation=citation,
     )
 
@@ -189,7 +176,7 @@ async def test_admit_creates_paper_collection_document_and_pending_ingestion_run
         scalar_values=[_collection(), None, _collection(), None, None],
     )
     storage = MemoryResearchDocumentStorage()
-    service = ResearchCollectionAdmissionService(cast(AsyncSession, session), storage)
+    service = SqlAlchemyLiteratureAdmissionAdapter(cast(AsyncSession, session), storage)
 
     result = await service.admit(
         owner_user_id=_OWNER_ID,
@@ -250,7 +237,7 @@ async def test_admit_is_idempotent_and_discards_the_new_staging_object() -> None
         collection_paper=collection_paper,
     )
     storage = MemoryResearchDocumentStorage()
-    service = ResearchCollectionAdmissionService(cast(AsyncSession, session), storage)
+    service = SqlAlchemyLiteratureAdmissionAdapter(cast(AsyncSession, session), storage)
 
     result = await service.admit(
         owner_user_id=_OWNER_ID,
@@ -276,7 +263,7 @@ async def test_admit_cleans_both_object_keys_when_database_persistence_fails() -
         flush_error=SQLAlchemyError("forced database failure"),
     )
     storage = MemoryResearchDocumentStorage()
-    service = ResearchCollectionAdmissionService(cast(AsyncSession, session), storage)
+    service = SqlAlchemyLiteratureAdmissionAdapter(cast(AsyncSession, session), storage)
 
     with pytest.raises(CollectionAdmissionError) as raised:
         await service.admit(
@@ -297,7 +284,7 @@ async def test_admit_rejects_fulltext_from_a_different_candidate_without_storage
     """候选与全文结果的临时 ID 不同，不能通过后续数据库操作掩盖边界错误。"""
     session = FakeSession(scalar_values=[])
     storage = MemoryResearchDocumentStorage()
-    service = ResearchCollectionAdmissionService(cast(AsyncSession, session), storage)
+    service = SqlAlchemyLiteratureAdmissionAdapter(cast(AsyncSession, session), storage)
 
     with pytest.raises(CollectionAdmissionError) as raised:
         await service.admit(

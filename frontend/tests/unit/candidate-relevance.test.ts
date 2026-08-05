@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Candidate } from "@/api/types";
-import { presentCandidateRelevance } from "@/features/research/candidate-relevance";
+import { presentCandidateRelevance } from "@/features/search/candidate-relevance";
 
 const candidate: Candidate = {
   candidate_id: "candidate-1",
@@ -29,7 +29,14 @@ const candidate: Candidate = {
     evidence: [{ source_field: "title", quote: "Green space exposure" }],
   },
   relevance_error: null,
-  citation: { status: "ready", doi: "10.1000/example.1", url: null },
+  citation: {
+    status: "ready",
+    title: "Green space exposure and mental well-being among older adults",
+    authors: [],
+    missing_fields: [],
+    doi: "10.1000/example.1",
+    url: null,
+  },
 };
 
 describe("candidate relevance presentation", () => {

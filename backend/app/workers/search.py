@@ -6,13 +6,15 @@ from typing import Any
 from uuid import UUID
 
 from app.core.settings import get_literature_source_settings
-from app.db.session import async_session_factory
-from app.modules.workflow.job_queue import ArqCandidateRelevanceJobQueue
-from app.modules.workflow.search_execution import SearchRunExecutor
-from app.modules.workflow.search_run_service import SearchRunService
-from app.modules.workflow.search_session import SearchSessionStore
-from app.modules.workflow.state import SearchRunStatus
-from app.workers.redis import redis_client_from_environment
+from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
+from app.infra.db.session import async_session_factory
+from app.infra.redis.connection import redis_client_from_environment
+from app.infra.redis.job_queues import ArqCandidateRelevanceJobQueue
+from app.infra.redis.search_session import RedisSearchSessionStore
+from app.modules.search.execution import SearchRunExecutor
+from app.modules.search.providers.registry import build_provider_registry
+from app.modules.search.run_service import SearchRunService
+from app.modules.search.state import SearchRunStatus
 
 
 async def run_search(_ctx: dict[str, Any], search_run_id: str) -> dict[str, str]:
@@ -23,7 +25,8 @@ async def run_search(_ctx: dict[str, Any], search_run_id: str) -> dict[str, str]
         raise ValueError("arq 文献检索任务缺少合法的 search_run_id。") from exc
 
     async with async_session_factory() as session:
-        workflow_service = SearchRunService(session)
+        runs = SqlAlchemySearchRunRepository(session)
+        workflow_service = SearchRunService(runs)
         search_run = await workflow_service.claim_run(run_id)
         if search_run is None:
             return {"search_run_id": str(run_id), "status": "ignored"}
@@ -32,14 +35,15 @@ async def run_search(_ctx: dict[str, Any], search_run_id: str) -> dict[str, str]
         try:
             settings = get_literature_source_settings()
             executor = SearchRunExecutor(
-                session=session,
+                runs=runs,
                 search_run=search_run,
-                session_store=SearchSessionStore(
+                session_store=RedisSearchSessionStore(
                     redis,
                     ttl_seconds=settings.search_session_ttl_seconds,
                 ),
-                literature_settings=settings,
                 relevance_queue=ArqCandidateRelevanceJobQueue(),
+                registry=build_provider_registry(settings),
+                max_concurrent_providers=settings.search_max_concurrent_providers,
             )
             return await executor.execute()
         except Exception as exc:

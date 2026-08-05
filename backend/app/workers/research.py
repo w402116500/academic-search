@@ -9,32 +9,39 @@ from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
 
-from app.db.session import async_session_factory
-from app.modules.ingestion.embedding import OpenAICompatibleTextEmbedder
-from app.modules.ingestion.settings import IngestionSettings, get_ingestion_settings
+from app.core.ingestion_settings import IngestionSettings, get_ingestion_settings
+from app.core.workflow_settings import WorkflowSettings, get_workflow_settings
+from app.infra.db.repositories.research_execution import (
+    SqlAlchemyResearchExecutionAdapter,
+)
+from app.infra.db.repositories.research_retrieval import (
+    SqlAlchemyResearchRetrievalRepository,
+)
+from app.infra.db.research_checkpoint import PostgresResearchGraphExecutor
+from app.infra.db.session import async_session_factory
+from app.infra.llm.embeddings import OpenAICompatibleTextEmbedder
+from app.infra.llm.reranker import HttpResearchReranker
+from app.infra.llm.research_model import OpenAICompatibleResearchModel
+from app.infra.milvus.research_search import MilvusResearchVectorSearch
+from app.infra.redis.connection import (
+    redis_client_from_environment,
+    redis_settings_from_environment,
+)
+from app.infra.redis.queues import RESEARCH_QUEUE_NAME
+from app.infra.redis.research_events import RedisResearchEventStore
+from app.modules.agents.contracts import (
+    ResearchChatModel,
+    ResearchModelError,
+    ResearchRunCancelled,
+)
+from app.modules.agents.graph import ResearchGraphRunner
+from app.modules.rag.retrieval import ResearchReranker, ResearchRetriever
 from app.modules.research.contracts import (
     ResearchProgressEvent,
     ResearchRunStage,
     ResearchRunStatus,
 )
-from app.modules.research.events import ResearchEventStore
-from app.modules.research.execution import ResearchExecutionService
-from app.modules.research.graph import (
-    OpenAICompatibleResearchModel,
-    ResearchGraphRunner,
-    ResearchModelError,
-    ResearchRunCancelled,
-)
-from app.modules.research.retrieval import (
-    HttpResearchReranker,
-    MilvusResearchVectorSearch,
-    ResearchReranker,
-    ResearchRetriever,
-)
 from app.modules.research.settings import ResearchSettings, get_research_settings
-from app.modules.workflow.settings import WorkflowSettings, get_workflow_settings
-from app.workers.queues import RESEARCH_QUEUE_NAME
-from app.workers.redis import redis_client_from_environment, redis_settings_from_environment
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +61,7 @@ class ResearchWorkerDependencies:
     embedder: OpenAICompatibleTextEmbedder
     vector_search: MilvusResearchVectorSearch
     reranker: ResearchReranker | None
-    model: OpenAICompatibleResearchModel
+    model: ResearchChatModel
 
 
 async def startup(ctx: dict[str, Any]) -> None:
@@ -84,7 +91,7 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
 
     dependencies = cast(ResearchWorkerDependencies, ctx["research_dependencies"])
     async with async_session_factory() as session:
-        context = await ResearchExecutionService(session).claim(run_id)
+        context = await SqlAlchemyResearchExecutionAdapter(session).claim(run_id)
     if context is None:
         return {"research_run_id": str(run_id), "status": "ignored", "evidence_count": 0}
 
@@ -93,11 +100,11 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
     ) -> None:
         """每次图节点进入公开阶段时更新 PostgreSQL，再写入短期 Redis 事件。"""
         async with async_session_factory() as stage_session:
-            execution = ResearchExecutionService(stage_session)
+            execution = SqlAlchemyResearchExecutionAdapter(stage_session)
             updated = await execution.set_stage(run_id, stage)
         if not updated:
             async with async_session_factory() as cancellation_session:
-                cancelled = await ResearchExecutionService(
+                cancelled = await SqlAlchemyResearchExecutionAdapter(
                     cancellation_session
                 ).is_cancel_requested(run_id)
             if cancelled:
@@ -105,7 +112,7 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
             return
         redis = redis_client_from_environment()
         try:
-            await ResearchEventStore(
+            await RedisResearchEventStore(
                 redis, ttl_seconds=dependencies.research_settings.rag_event_ttl_seconds
             ).publish(
                 ResearchProgressEvent(
@@ -122,12 +129,14 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
     async def cancellation_requested() -> bool:
         """让图在每个模型/检索调用边界读取 PostgreSQL 中的协作取消标记。"""
         async with async_session_factory() as cancellation_session:
-            return await ResearchExecutionService(cancellation_session).is_cancel_requested(run_id)
+            return await SqlAlchemyResearchExecutionAdapter(
+                cancellation_session
+            ).is_cancel_requested(run_id)
 
     try:
         async with async_session_factory() as retrieval_session:
             retriever = ResearchRetriever(
-                retrieval_session,
+                SqlAlchemyResearchRetrievalRepository(retrieval_session),
                 embedder=dependencies.embedder,
                 vector_search=dependencies.vector_search,
                 settings=dependencies.research_settings,
@@ -137,15 +146,17 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
                 retriever=retriever,
                 model=dependencies.model,
                 settings=dependencies.research_settings,
-                checkpoint_database_url=dependencies.research_settings.checkpoint_database_url,
+                graph_executor=PostgresResearchGraphExecutor(
+                    dependencies.research_settings.checkpoint_database_url
+                ),
                 stage_callback=publish_stage,
                 cancellation_checker=cancellation_requested,
             ).run(context)
     except ResearchRunCancelled:
         async with async_session_factory() as cancellation_session:
-            cancelled = await ResearchExecutionService(cancellation_session).finalize_cancellation(
-                run_id
-            )
+            cancelled = await SqlAlchemyResearchExecutionAdapter(
+                cancellation_session
+            ).finalize_cancellation(run_id)
         if cancelled:
             await _publish_terminal_event(
                 run_id=run_id,
@@ -167,9 +178,9 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
         error_message = "研究任务执行失败，请稍后重试。"
     else:
         async with async_session_factory() as completion_session:
-            persisted_status = await ResearchExecutionService(completion_session).complete(
-                run_id, outcome
-            )
+            persisted_status = await SqlAlchemyResearchExecutionAdapter(
+                completion_session
+            ).complete(run_id, outcome)
         if persisted_status is None:
             return {"research_run_id": str(run_id), "status": "ignored", "evidence_count": 0}
         if persisted_status is ResearchRunStatus.CANCELLED:
@@ -199,7 +210,7 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
         }
 
     async with async_session_factory() as failure_session:
-        terminal_status = await ResearchExecutionService(failure_session).fail(
+        terminal_status = await SqlAlchemyResearchExecutionAdapter(failure_session).fail(
             run_id, code=error_code, message=error_message
         )
     if terminal_status is ResearchRunStatus.CANCELLED:
@@ -236,7 +247,7 @@ async def _publish_terminal_event(
     """终态也写入 Stream，使正在订阅的页面无需额外轮询即可结束动画。"""
     redis = redis_client_from_environment()
     try:
-        await ResearchEventStore(redis, ttl_seconds=settings.rag_event_ttl_seconds).publish(
+        await RedisResearchEventStore(redis, ttl_seconds=settings.rag_event_ttl_seconds).publish(
             ResearchProgressEvent(
                 run_id=run_id,
                 status=status,

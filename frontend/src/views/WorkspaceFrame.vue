@@ -1,28 +1,19 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
-import { useInfiniteQuery, useQuery } from "@tanstack/vue-query";
 import { ArrowLeft, FileSearch, PanelLeftClose, PanelLeftOpen, Plus } from "@lucide/vue";
 
-import { getWorkspace, listWorkspaces } from "@/api/collections";
+import { useWorkspaceListQuery, useWorkspaceQuery } from "@/api/hooks/research";
 import AppHeader from "@/components/AppHeader.vue";
 import StageRail from "@/components/StageRail.vue";
 import { workspaceRouteForStage } from "@/router/workspace-route";
 
 const route = useRoute();
 const workspaceId = computed(() => String(route.params.workspaceId));
-const workspaceQuery = useQuery({
-  queryKey: computed(() => ["workspace", workspaceId.value]),
-  queryFn: () => getWorkspace(workspaceId.value),
-});
+const workspaceQuery = useWorkspaceQuery(workspaceId);
 // 左侧栏展示真实工作区列表。即使用户有很多工作区，也可以继续按游标加载，
 // 不把“切换工作区”的能力藏进单一的顶部菜单里。
-const workspaceListQuery = useInfiniteQuery({
-  queryKey: ["workspaces", "sidebar"],
-  queryFn: ({ pageParam }) => listWorkspaces("", pageParam),
-  initialPageParam: null as string | null,
-  getNextPageParam: (lastPage) => lastPage.next_cursor,
-});
+const workspaceListQuery = useWorkspaceListQuery();
 const workspaces = computed(
   () => workspaceListQuery.data.value?.pages.flatMap((page) => page.items) ?? [],
 );

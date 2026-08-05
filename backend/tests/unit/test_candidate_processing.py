@@ -2,10 +2,11 @@
 
 from datetime import UTC, datetime
 
+from app.modules.literature.contracts import CitationDate
+from app.modules.literature.normalization import normalize_doi
 from app.modules.search.contracts import (
     CandidateAuthor,
     CandidateLanguage,
-    CitationDate,
     ProviderError,
     ProviderErrorCode,
     ProviderQuery,
@@ -15,7 +16,7 @@ from app.modules.search.contracts import (
     TriageReasonCode,
 )
 from app.modules.search.deduplicate import deduplicate_candidates
-from app.modules.search.normalize import normalize_doi, normalize_raw_candidate, normalize_title_key
+from app.modules.search.normalize import normalize_raw_candidate, normalize_title_key
 from app.modules.search.processing import process_provider_results
 
 

@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from "vue";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
+import { computed, ref } from "vue";
 import {
   ArrowLeft,
   ArrowRight,
@@ -18,55 +17,47 @@ import {
 } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
 
-import { getCollectionDocuments, requestFulltext } from "@/api/collections";
+import { useCandidateLiteratureMutations } from "@/api/hooks/literature";
+import { useCollectionDocumentsQuery, useCollectionMutations } from "@/api/hooks/research";
+import { useSearchReviewMutations, useVerificationCandidatesQuery } from "@/api/hooks/search";
 import {
   isFulltextTerminal,
   presentFulltextVerification,
-} from "@/features/research/search-run-state";
-import {
-  admitCandidateSelection,
-  getSearchCandidates,
-  prepareCandidateSelection,
-  updateCandidateSelection,
-} from "@/api/workflow";
+} from "@/features/search/search-run-state";
 import type { CandidateReviewItem } from "@/api/types";
+import { useReviewPolling } from "@/features/search/use-review-polling";
 
 const PAGE_SIZE = 20;
-const POLLING_INTERVAL_MS = 1_500;
 
 const route = useRoute();
 const router = useRouter();
-const queryClient = useQueryClient();
 const workspaceId = computed(() => String(route.params.workspaceId));
 const runId = computed(() => (typeof route.query.run === "string" ? route.query.run : ""));
 const cursorHistory = ref<Array<string | null>>([null]);
 const admissionConfirmOpen = ref(false);
 const toast = ref<string | null>(null);
 const lastAdmissionCount = ref<number | null>(null);
-let refreshTimer: number | undefined;
 
 const activeCursor = computed(() => cursorHistory.value.at(-1) ?? null);
 const currentPageNumber = computed(() => cursorHistory.value.length);
-const verificationQuery = useQuery({
-  queryKey: computed(() => [
-    "verification-candidates",
-    workspaceId.value,
-    runId.value,
-    activeCursor.value,
-  ]),
-  queryFn: () =>
-    getSearchCandidates(workspaceId.value, runId.value, {
-      limit: PAGE_SIZE,
-      cursor: activeCursor.value,
-      filter: "selected",
-    }),
-  enabled: computed(() => Boolean(runId.value)),
-  staleTime: 3_000,
-});
-const collectionQuery = useQuery({
-  queryKey: computed(() => ["collection-documents", workspaceId.value]),
-  queryFn: () => getCollectionDocuments(workspaceId.value),
-});
+const verificationQuery = useVerificationCandidatesQuery(
+  workspaceId,
+  runId,
+  activeCursor,
+  PAGE_SIZE,
+);
+const collectionQuery = useCollectionDocumentsQuery(workspaceId);
+const {
+  selectionMutation: removeMutation,
+  prepareSelectionMutation: prepareMutation,
+  admitSelectionMutation: admissionMutation,
+  refreshCandidates: refreshVerification,
+} = useSearchReviewMutations(workspaceId, runId);
+const { requestFulltextMutation: retryMutation } = useCandidateLiteratureMutations(
+  workspaceId,
+  runId,
+);
+const { refreshDocuments: refreshCollectionDocuments } = useCollectionMutations(workspaceId);
 
 const reviewItems = computed(() => verificationQuery.data.value?.items ?? []);
 const selection = computed(
@@ -83,9 +74,10 @@ const page = computed(
   () => verificationQuery.data.value?.page ?? { limit: PAGE_SIZE, total: 0, next_cursor: null },
 );
 const pendingCollectionCount = computed(
-  () => collectionQuery.data.value?.summary.ingestion_status_counts.pending ?? 0,
+  () => collectionQuery.data.value?.summary.ingestion_status_counts?.pending ?? 0,
 );
 const hasActiveVerification = computed(() => selection.value.fulltext_in_progress_count > 0);
+useReviewPolling(hasActiveVerification, refreshVerification);
 const canStartVerification = computed(
   () => selection.value.selected_count > 0 && selection.value.needs_fulltext_count > 0,
 );
@@ -135,55 +127,61 @@ const commandDescription = computed(() => {
   return "开始核验后，系统会逐篇处理 DOI 题录与可公开处理的全文。";
 });
 
-const prepareMutation = useMutation({
-  mutationFn: () => prepareCandidateSelection(workspaceId.value, runId.value),
-  onSuccess: async (result) => {
-    toast.value =
-      result.queued_count > 0
-        ? `已安排 ${result.queued_count} 篇候选进行题录与全文核验。`
-        : "已同步本次准备清单的核验状态。";
-    await refreshVerification();
-  },
-  onError: (error) => {
-    toast.value = error instanceof Error ? error.message : "批量核验无法启动。";
-  },
-});
-const retryMutation = useMutation({
-  mutationFn: (candidateId: string) => requestFulltext(workspaceId.value, runId.value, candidateId),
-  onSuccess: async () => {
-    toast.value = "已重新安排该篇文献的核验。";
-    await refreshVerification();
-  },
-  onError: (error) => {
-    toast.value = error instanceof Error ? error.message : "该篇文献暂时无法重新核验。";
-  },
-});
-const removeMutation = useMutation({
-  mutationFn: (candidateId: string) =>
-    updateCandidateSelection(workspaceId.value, runId.value, [candidateId], false),
-  onSuccess: async () => {
-    toast.value = "已从本次准备清单移除。";
-    await refreshVerification();
-  },
-  onError: (error) => {
-    toast.value = error instanceof Error ? error.message : "准备清单无法更新。";
-  },
-});
-const admissionMutation = useMutation({
-  mutationFn: () => admitCandidateSelection(workspaceId.value, runId.value),
-  onSuccess: async (result) => {
-    admissionConfirmOpen.value = false;
-    lastAdmissionCount.value = result.admitted_count;
-    toast.value =
-      result.admitted_count > 0
-        ? `已将 ${result.admitted_count} 篇文献加入待确认集合。`
-        : "当前准备清单中没有可立即加入集合的文献。";
-    await Promise.all([refreshVerification(), refreshCollectionDocuments()]);
-  },
-  onError: (error) => {
-    toast.value = error instanceof Error ? error.message : "批量加入集合无法完成。";
-  },
-});
+function prepareVerification(): void {
+  prepareMutation.mutate(undefined, {
+    onSuccess: (result) => {
+      toast.value =
+        result.queued_count > 0
+          ? `已安排 ${result.queued_count} 篇候选进行题录与全文核验。`
+          : "已同步本次准备清单的核验状态。";
+    },
+    onError: (error) => {
+      toast.value = error instanceof Error ? error.message : "批量核验无法启动。";
+    },
+  });
+}
+
+function retryCandidate(candidateId: string): void {
+  retryMutation.mutate(candidateId, {
+    onSuccess: () => {
+      toast.value = "已重新安排该篇文献的核验。";
+    },
+    onError: (error) => {
+      toast.value = error instanceof Error ? error.message : "该篇文献暂时无法重新核验。";
+    },
+  });
+}
+
+function removeCandidate(candidateId: string): void {
+  removeMutation.mutate(
+    { candidateIds: [candidateId], selected: false },
+    {
+      onSuccess: () => {
+        toast.value = "已从本次准备清单移除。";
+      },
+      onError: (error) => {
+        toast.value = error instanceof Error ? error.message : "准备清单无法更新。";
+      },
+    },
+  );
+}
+
+function admitCandidates(): void {
+  admissionMutation.mutate(undefined, {
+    onSuccess: async (result) => {
+      admissionConfirmOpen.value = false;
+      lastAdmissionCount.value = result.admitted_count;
+      toast.value =
+        result.admitted_count > 0
+          ? `已将 ${result.admitted_count} 篇文献加入待确认集合。`
+          : "当前准备清单中没有可立即加入集合的文献。";
+      await refreshCollectionDocuments();
+    },
+    onError: (error) => {
+      toast.value = error instanceof Error ? error.message : "批量加入集合无法完成。";
+    },
+  });
+}
 
 function fulltextPresentation(item: CandidateReviewItem) {
   return presentFulltextVerification(item.fulltext);
@@ -209,22 +207,6 @@ function openCandidateUpload(candidateId: string): void {
   });
 }
 
-async function refreshVerification(): Promise<void> {
-  await queryClient.invalidateQueries({
-    queryKey: ["verification-candidates", workspaceId.value, runId.value],
-  });
-}
-
-async function refreshCollectionDocuments(): Promise<void> {
-  await queryClient.invalidateQueries({ queryKey: ["collection-documents", workspaceId.value] });
-}
-
-function restartPolling(): void {
-  window.clearInterval(refreshTimer);
-  if (!hasActiveVerification.value) return;
-  refreshTimer = window.setInterval(() => void refreshVerification(), POLLING_INTERVAL_MS);
-}
-
 function goToPreviousPage(): void {
   if (cursorHistory.value.length <= 1) return;
   cursorHistory.value = cursorHistory.value.slice(0, -1);
@@ -235,9 +217,6 @@ function goToNextPage(): void {
   if (!nextCursor) return;
   cursorHistory.value = [...cursorHistory.value, nextCursor];
 }
-
-watch(hasActiveVerification, restartPolling, { immediate: true });
-onUnmounted(() => window.clearInterval(refreshTimer));
 </script>
 
 <template>
@@ -431,7 +410,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
             class="secondary-button"
             type="button"
             :disabled="prepareMutation.isPending.value"
-            @click="prepareMutation.mutate()"
+            @click="prepareVerification"
           >
             <LoaderCircle v-if="prepareMutation.isPending.value" class="spin" :size="15" />
             <FileDown v-else :size="15" />开始核验
@@ -508,7 +487,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
                 class="compact-button"
                 type="button"
                 :disabled="retryMutation.isPending.value"
-                @click="retryMutation.mutate(item.candidate.candidate_id)"
+                @click="retryCandidate(item.candidate.candidate_id)"
               >
                 <RefreshCw :class="{ spin: retryMutation.isPending.value }" :size="14" />重新核验
               </button>
@@ -517,7 +496,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
                 class="compact-button quiet-danger"
                 type="button"
                 :disabled="removeMutation.isPending.value"
-                @click="removeMutation.mutate(item.candidate.candidate_id)"
+                @click="removeCandidate(item.candidate.candidate_id)"
               >
                 <X :size="14" />移出清单
               </button>
@@ -614,7 +593,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
               class="primary-button"
               type="button"
               :disabled="admissionMutation.isPending.value"
-              @click="admissionMutation.mutate()"
+              @click="admitCandidates"
             >
               {{ admissionMutation.isPending.value ? "正在加入…" : "确认加入" }}
               <Layers2 :size="16" />

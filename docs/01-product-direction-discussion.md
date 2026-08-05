@@ -468,7 +468,7 @@ academic-search/
 │  │  ├─ composables/            Vue 组合式逻辑
 │  │  ├─ stores/                 Pinia 本地 UI 状态
 │  │  ├─ api/
-│  │  │  ├─ generated/           由 OpenAPI 生成的客户端（后续）
+│  │  │  ├─ generated/           由 FastAPI OpenAPI 生成的 schema 与客户端类型
 │  │  │  └─ hooks/               TanStack Query 请求与缓存封装
 │  │  ├─ router/                 前端路由与守卫
 │  │  └─ assets/                 静态视觉资源
@@ -508,10 +508,10 @@ academic-search/
 │     ├─ unit/
 │     ├─ integration/
 │     └─ fixtures/
-├─ infra/                        Docker、Compose 与本地部署资源（后续添加）
+├─ infra/                        Docker、Compose 与本地部署资源
 │  ├─ docker/
 │  └─ compose/
-└─ scripts/                      开发、数据初始化与评测辅助脚本（后续添加）
+└─ scripts/                      开发、数据初始化与评测辅助脚本
 ```
 
 职责约束如下：

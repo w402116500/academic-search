@@ -8,34 +8,41 @@ import os
 from uuid import UUID, uuid4
 
 import pytest
-from app.db.models.collection import ResearchCollection
-from app.db.models.document import Document, DocumentChunk, IngestionRun
-from app.db.models.paper import Paper
-from app.db.models.user import User
-from app.db.session import async_session_factory
-from app.modules.collections import CollectionAdmissionStatus, ResearchCollectionAdmissionService
-from app.modules.collections.build_contracts import IngestionRunStatus
-from app.modules.collections.build_service import ResearchCollectionBuildService
-from app.modules.fulltext import (
-    Boto3StagingObjectStorage,
-    OpenAccessPdfAcquirer,
-    get_fulltext_acquisition_settings,
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
+from app.core.ingestion_settings import get_ingestion_settings
+from app.infra.db.models.collection import ResearchCollection
+from app.infra.db.models.document import Document, DocumentChunk, IngestionRun
+from app.infra.db.models.paper import Paper
+from app.infra.db.models.user import User
+from app.infra.db.repositories.collection_builds import SqlAlchemyCollectionBuildAdapter
+from app.infra.db.repositories.literature_admission import (
+    SqlAlchemyLiteratureAdmissionAdapter,
 )
-from app.modules.fulltext.contracts import FulltextAcquisitionStatus
-from app.modules.ingestion.milvus import MilvusDocumentChunkIndex
-from app.modules.ingestion.settings import get_ingestion_settings
-from app.modules.search.contracts import (
-    CandidateAuthor,
-    CandidateLinks,
+from app.infra.db.session import async_session_factory
+from app.infra.milvus.document_chunks import MilvusDocumentChunkIndex
+from app.infra.storage.documents import Boto3StagingObjectStorage
+from app.modules.documents.acquisition import OpenAccessPdfAcquirer
+from app.modules.documents.contracts import FulltextAcquisitionStatus
+from app.modules.literature.admission import (
+    CollectionAdmissionStatus,
+    LiteratureAdmissionCandidate,
+)
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
+)
+from app.modules.research.build_contracts import IngestionRunStatus
+from app.modules.research.state import WorkspaceWorkflowStage
+from app.modules.search.contracts import (
+    CandidateAuthor,
+    CandidateLinks,
     RawCandidate,
     SourceName,
     UnifiedCandidate,
 )
-from app.modules.workflow.state import WorkspaceWorkflowStage
+from app.modules.search.fulltext_candidate import to_fulltext_candidate
 from app.workers.ingestion import ingest_document, startup
 from pymilvus import MilvusClient
 from sqlalchemy import func, select
@@ -122,7 +129,9 @@ async def test_live_phase_five_ingestion_reaches_researching() -> None:
 
     try:
         # 通过真实全文获取器访问 arXiv，先将 PDF 放入 MinIO 暂存区。
-        acquired_result = await OpenAccessPdfAcquirer(fulltext_settings, storage).acquire(candidate)
+        acquired_result = await OpenAccessPdfAcquirer(fulltext_settings, storage).acquire(
+            to_fulltext_candidate(candidate)
+        )
         assert acquired_result.status is FulltextAcquisitionStatus.AVAILABLE
         assert acquired_result.document is not None
         staging_object_key = acquired_result.document.staging_object_key
@@ -143,10 +152,16 @@ async def test_live_phase_five_ingestion_reaches_researching() -> None:
                 )
 
             # DOI、题录和全文均可用时，候选才正式进入工作区。
-            admission = await ResearchCollectionAdmissionService(session, storage).admit(
+            admission = await SqlAlchemyLiteratureAdmissionAdapter(session, storage).admit(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
-                candidate=candidate,
+                candidate=LiteratureAdmissionCandidate(
+                    candidate_id=candidate.candidate_id,
+                    doi=candidate.doi,
+                    abstract=candidate.abstract,
+                    official_url=(candidate.links.landing_url or candidate.links.open_access_url),
+                    citation=candidate.citation,
+                ),
                 fulltext_result=acquired_result,
             )
             assert admission.status is CollectionAdmissionStatus.ADDED
@@ -164,7 +179,7 @@ async def test_live_phase_five_ingestion_reaches_researching() -> None:
 
         # 模拟用户确认构建：pending -> queued，并记录队列 Job ID。
         async with async_session_factory() as session:
-            build_response = await ResearchCollectionBuildService(session, queue).build(
+            build_response = await SqlAlchemyCollectionBuildAdapter(session, queue).build(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
             )

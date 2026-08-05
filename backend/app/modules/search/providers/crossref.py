@@ -9,10 +9,11 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+
 from app.core.settings import CrossrefProviderSettings
+from app.modules.literature.contracts import CitationDate
 from app.modules.search.contracts import (
     CandidateAuthor,
-    CitationDate,
     ProviderError,
     ProviderErrorCode,
     ProviderQuery,

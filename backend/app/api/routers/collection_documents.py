@@ -5,20 +5,19 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, status
+
 from app.api.deps.auth import get_current_user
-from app.db.models.user import User
-from app.db.session import get_db_session
-from app.modules.collections.build_contracts import (
+from app.api.deps.services import get_collection_build_service
+from app.modules.auth.models import UserAccount
+from app.modules.research.build_contracts import (
     CollectionBuildError,
     CollectionBuildErrorCode,
     CollectionBuildResponse,
     CollectionDocumentRemovalResponse,
     CollectionDocumentsResponse,
 )
-from app.modules.collections.build_service import ResearchCollectionBuildService
-from app.modules.ingestion.job_queue import ArqIngestionJobQueue
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.modules.research.collection_build import CollectionBuildUseCases
 
 router = APIRouter(prefix="/collections", tags=["研究集合构建"])
 
@@ -50,12 +49,12 @@ def _build_error_response(error: CollectionBuildError) -> HTTPException:
 )
 async def list_collection_documents(
     collection_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[CollectionBuildUseCases, Depends(get_collection_build_service)],
 ) -> CollectionDocumentsResponse:
     """页面刷新时读取活动文献、失败原因与可以进入研究对话的文献数量。"""
     try:
-        return await ResearchCollectionBuildService(session).list_documents(
+        return await service.list_documents(
             owner_user_id=current_user.id,
             collection_id=collection_id,
         )
@@ -71,12 +70,12 @@ async def list_collection_documents(
 )
 async def build_collection(
     collection_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[CollectionBuildUseCases, Depends(get_collection_build_service)],
 ) -> CollectionBuildResponse:
     """将所有待确认文献投递到 RAG 入库 Worker；每篇文献独立报告投递结果。"""
     try:
-        return await ResearchCollectionBuildService(session, ArqIngestionJobQueue()).build(
+        return await service.build(
             owner_user_id=current_user.id,
             collection_id=collection_id,
         )
@@ -93,12 +92,12 @@ async def build_collection(
 async def retry_ingestion_run(
     collection_id: UUID,
     ingestion_run_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[CollectionBuildUseCases, Depends(get_collection_build_service)],
 ) -> CollectionBuildResponse:
     """新建入库运行而非覆盖失败记录，使错误和重试序号始终可审计。"""
     try:
-        return await ResearchCollectionBuildService(session, ArqIngestionJobQueue()).retry_run(
+        return await service.retry_run(
             owner_user_id=current_user.id,
             collection_id=collection_id,
             ingestion_run_id=ingestion_run_id,
@@ -115,12 +114,12 @@ async def retry_ingestion_run(
 async def remove_pending_document(
     collection_id: UUID,
     document_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[CollectionBuildUseCases, Depends(get_collection_build_service)],
 ) -> CollectionDocumentRemovalResponse:
     """仅归档 pending 文献，保留正式对象和审计记录以避免跨服务删除不一致。"""
     try:
-        return await ResearchCollectionBuildService(session).remove_pending_document(
+        return await service.remove_pending_document(
             owner_user_id=current_user.id,
             collection_id=collection_id,
             document_id=document_id,

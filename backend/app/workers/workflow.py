@@ -5,16 +5,18 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from app.db.session import async_session_factory
-from app.modules.workflow.intent_analysis import (
+from app.core.workflow_settings import get_workflow_settings
+from app.infra.db.repositories.research_plans import SqlAlchemyResearchPlanRepository
+from app.infra.db.session import async_session_factory
+from app.infra.llm.intent_analysis import build_intent_analysis_model
+from app.infra.redis.connection import redis_settings_from_environment
+from app.infra.redis.queues import WORKFLOW_QUEUE_NAME
+from app.modules.research.intent_analysis import (
     IntentAnalysisError,
-    OpenAICompatibleIntentAnalyzer,
+    ResearchIntentAnalyzer,
 )
-from app.modules.workflow.plan_service import ResearchPlanService
-from app.modules.workflow.settings import get_workflow_settings
+from app.modules.research.plan_service import ResearchPlanService
 from app.workers.fulltext import acquire_candidate_fulltext
-from app.workers.queues import WORKFLOW_QUEUE_NAME
-from app.workers.redis import redis_settings_from_environment
 from app.workers.search import run_search
 
 
@@ -29,14 +31,18 @@ async def analyze_research_plan(
         raise ValueError("arq 研究计划分析任务缺少合法的 research_plan_id。") from exc
 
     async with async_session_factory() as session:
-        service = ResearchPlanService(session)
+        service = ResearchPlanService(SqlAlchemyResearchPlanRepository(session))
         plan = await service.get_plan_for_analysis(plan_id)
         if plan is None:
             # 已完成、已替代或已删除计划的重复队列消息不应改写当前状态。
             return {"research_plan_id": str(plan_id), "status": "ignored"}
 
         try:
-            analyzer = OpenAICompatibleIntentAnalyzer(get_workflow_settings())
+            settings = get_workflow_settings()
+            analyzer = ResearchIntentAnalyzer(
+                settings,
+                model=build_intent_analysis_model(settings),
+            )
             result = await analyzer.analyze(plan.raw_request)
         except IntentAnalysisError as exc:
             await service.fail_analysis(

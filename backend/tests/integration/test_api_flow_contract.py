@@ -13,19 +13,15 @@ from uuid import UUID
 
 import httpx
 import pytest
+from app.api.deps import services
 from app.api.deps.auth import get_current_user
-from app.api.routers import research_plans, search_runs
-from app.db.models.collection import ResearchCollection
-from app.db.models.workflow import ResearchPlan, SearchRun
-from app.db.session import get_db_session
+from app.infra.db.models.collection import ResearchCollection
+from app.infra.db.models.workflow import ResearchPlan, SearchRun
+from app.infra.db.session import get_db_session
 from app.main import app
-from app.modules.workflow.contracts import ConfirmResearchPlanRequest
-from app.modules.workflow.state import (
-    ResearchPlanStatus,
-    SearchRunStage,
-    SearchRunStatus,
-    WorkspaceWorkflowStage,
-)
+from app.modules.research.plan_contracts import ConfirmResearchPlanRequest
+from app.modules.research.state import ResearchPlanStatus, WorkspaceWorkflowStage
+from app.modules.search.state import SearchRunStage, SearchRunStatus
 
 _USER_ID = UUID("00000000-0000-0000-0000-000000000601")
 _WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000602")
@@ -102,7 +98,7 @@ async def test_research_entry_to_search_run_preserves_resume_contract(
     collection, plan, run = _fixtures()
 
     class FakePlanService:
-        def __init__(self, _session: object, _queue: object | None = None) -> None:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         async def start_research(self, *, owner_user_id: UUID, request: object) -> object:
@@ -132,7 +128,7 @@ async def test_research_entry_to_search_run_preserves_resume_contract(
             return plan
 
     class FakeSearchRunService:
-        def __init__(self, _session: object, _queue: object | None = None) -> None:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         async def start_search(self, *, owner_user_id: UUID, collection_id: UUID) -> object:
@@ -146,10 +142,10 @@ async def test_research_entry_to_search_run_preserves_resume_contract(
     async def fake_session():
         yield object()
 
-    monkeypatch.setattr(research_plans, "ResearchPlanService", FakePlanService)
-    monkeypatch.setattr(research_plans, "ArqResearchPlanJobQueue", lambda: object())
-    monkeypatch.setattr(search_runs, "SearchRunService", FakeSearchRunService)
-    monkeypatch.setattr(search_runs, "ArqSearchRunJobQueue", lambda: object())
+    monkeypatch.setattr(services, "ResearchPlanService", FakePlanService)
+    monkeypatch.setattr(services, "ArqResearchPlanJobQueue", lambda: object())
+    monkeypatch.setattr(services, "SearchRunService", FakeSearchRunService)
+    monkeypatch.setattr(services, "ArqSearchRunJobQueue", lambda: object())
     app.dependency_overrides[get_current_user] = fake_current_user
     app.dependency_overrides[get_db_session] = fake_session
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import httpx
+
 from app.core.settings import ProviderNetworkSettings
 
 

@@ -10,16 +10,20 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from app.db.models.research import Conversation, ResearchRun
+from app.infra.db.models.research import Conversation, ResearchRun
+from app.infra.db.repositories.research_conversations import (
+    SqlAlchemyResearchConversationAdapter,
+)
+from app.infra.db.repositories.research_execution import (
+    SqlAlchemyResearchExecutionAdapter,
+)
+from app.modules.rag.retrieval import RetrievedEvidence
 from app.modules.research.contracts import (
     ResearchError,
     ResearchErrorCode,
     ResearchRunStage,
     ResearchRunStatus,
 )
-from app.modules.research.execution import ResearchExecutionService
-from app.modules.research.retrieval import RetrievedEvidence
-from app.modules.research.service import ResearchConversationService
 from app.modules.research.settings import ResearchSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -73,7 +77,7 @@ class FakeOutcome:
     mode: str = "single_rag"
 
 
-class RunAccessService(ResearchConversationService):
+class RunAccessService(SqlAlchemyResearchConversationAdapter):
     """让取消服务测试聚焦状态迁移，不依赖 SQL 查询细节。"""
 
     def __init__(self, session: AsyncSession, run: ResearchRun) -> None:
@@ -133,7 +137,7 @@ async def test_complete_closes_the_active_stage_before_persisting_completed() ->
     )
     session = FakeExecutionSession([run, conversation])
 
-    status = await ResearchExecutionService(cast(AsyncSession, session)).complete(
+    status = await SqlAlchemyResearchExecutionAdapter(cast(AsyncSession, session)).complete(
         _RUN_ID, FakeOutcome()
     )
 
@@ -149,7 +153,7 @@ async def test_fail_closes_the_active_stage_before_persisting_failed() -> None:
     run = _run(stage=ResearchRunStage.RERANKING)
     session = FakeExecutionSession([run])
 
-    status = await ResearchExecutionService(cast(AsyncSession, session)).fail(
+    status = await SqlAlchemyResearchExecutionAdapter(cast(AsyncSession, session)).fail(
         _RUN_ID, code="research_model_failed", message="模型响应无效"
     )
 
@@ -165,9 +169,9 @@ async def test_finalize_cancellation_closes_the_active_stage_before_cancelling()
     run.cancel_requested_at = datetime.now(UTC)
     session = FakeExecutionSession([run])
 
-    cancelled = await ResearchExecutionService(cast(AsyncSession, session)).finalize_cancellation(
-        _RUN_ID
-    )
+    cancelled = await SqlAlchemyResearchExecutionAdapter(
+        cast(AsyncSession, session)
+    ).finalize_cancellation(_RUN_ID)
 
     assert cancelled is True
     assert run.status == ResearchRunStatus.CANCELLED.value
@@ -203,10 +207,10 @@ async def test_submission_quota_rejects_user_and_global_limit_exhaustion() -> No
         rag_user_daily_research_run_limit=2,
         rag_global_daily_research_run_limit=3,
     )
-    user_limited = ResearchConversationService(
+    user_limited = SqlAlchemyResearchConversationAdapter(
         cast(AsyncSession, FakeExecutionSession([2])), settings=settings
     )
-    global_limited = ResearchConversationService(
+    global_limited = SqlAlchemyResearchConversationAdapter(
         cast(AsyncSession, FakeExecutionSession([1, 3])), settings=settings
     )
 

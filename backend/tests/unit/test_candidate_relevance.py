@@ -7,18 +7,17 @@ import json
 from uuid import uuid4
 
 import pytest
+from app.core.workflow_settings import WorkflowSettings
 from app.modules.search.contracts import RawCandidate, SourceName, TriageDecision, UnifiedCandidate
-from app.modules.workflow.candidate_relevance import (
-    CandidateRelevanceCancelled,
+from app.modules.search.relevance import (
     CandidateRelevanceClaimVerificationFailure,
     CandidateRelevanceClaimVerificationResult,
     CandidateRelevanceContext,
+    CandidateRelevanceEvaluator,
     CandidateRelevanceStreamIdleTimeout,
-    OpenAICompatibleCandidateRelevanceClaimVerifier,
-    OpenAICompatibleCandidateRelevanceEvaluator,
+    CandidateRelevanceTechnicalFailure,
     collect_streamed_json_object,
 )
-from app.modules.workflow.settings import WorkflowSettings
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import SecretStr
 
@@ -92,7 +91,7 @@ class RejectingClaimVerifier:
                 candidate_id: CandidateRelevanceClaimVerificationFailure(
                     code="candidate_relevance_claim_unsupported",
                     message="候选理由中的 reason 无法由标题或摘要直接支持，已拒绝展示。",
-                    retryable=True,
+                    retryable=False,
                 )
             },
         )
@@ -136,7 +135,7 @@ def test_payload_preserves_each_candidate_complete_abstract() -> None:
     """完整候选集合判断不能截断单篇摘要。"""
     candidate = _candidate("0123456789abcdef")
 
-    payload = OpenAICompatibleCandidateRelevanceEvaluator._build_payload(
+    payload = CandidateRelevanceEvaluator._build_payload(
         _context(),
         (candidate,),
     )
@@ -149,7 +148,7 @@ def test_complete_collection_output_budgets_scale_with_candidate_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """50 篇仍是单次集合调用，输出预算必须覆盖全部结构化结果。"""
-    import app.modules.workflow.candidate_relevance as candidate_relevance_module
+    import app.infra.llm.candidate_relevance as candidate_relevance_module
 
     CapturingChatOpenAI.calls = []
     monkeypatch.setattr(candidate_relevance_module, "ChatOpenAI", CapturingChatOpenAI)
@@ -159,9 +158,8 @@ def test_complete_collection_output_budgets_scale_with_candidate_count(
         workflow_relevance_verification_output_tokens_per_candidate=128,
     )
 
-    OpenAICompatibleCandidateRelevanceEvaluator._create_model(settings, candidate_count=50)
-    verifier = OpenAICompatibleCandidateRelevanceClaimVerifier(settings, model=FakeModel({}))
-    verifier._create_model(settings, candidate_count=50)
+    candidate_relevance_module.build_candidate_relevance_model(settings, 50)
+    candidate_relevance_module.build_candidate_relevance_verification_model(settings, 50)
 
     assert [call["max_tokens"] for call in CapturingChatOpenAI.calls] == [35_000, 6_400]
     assert all("timeout" not in call for call in CapturingChatOpenAI.calls)
@@ -210,39 +208,25 @@ async def test_stream_collector_treats_empty_chunks_as_activity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_collector_honors_cancellation_without_returning_model_text() -> None:
-    """取消在开始流前生效，调用方只能收到控制异常而不是模型正文。"""
-    with pytest.raises(CandidateRelevanceCancelled) as exc_info:
-        await collect_streamed_json_object(
-            StreamingModel([(0, '{"internal":"do not expose"}')]),
-            [],
-            idle_timeout_seconds=0.05,
-            cancellation_check=lambda: asyncio.sleep(0, result=True),
-        )
-    assert "do not expose" not in str(exc_info.value)
-
-
-@pytest.mark.asyncio
-async def test_invalid_stream_json_is_marked_without_exposing_model_content() -> None:
-    """流拼接失败只产生稳定错误码，候选理由和页面均不能得到模型正文。"""
+async def test_invalid_stream_json_becomes_a_safe_complete_collection_failure() -> None:
+    """流拼接失败交给 Worker 重投，异常中不包含模型正文。"""
     candidate = _candidate()
-    result = await OpenAICompatibleCandidateRelevanceEvaluator(
-        WorkflowSettings(deepseek_api_key=SecretStr("test")),
-        model=StreamingModel([(0, '{"assessments":')]),
-        claim_verifier=AcceptingClaimVerifier(),
-    ).assess(context=_context(), candidates=(candidate,))
+    with pytest.raises(CandidateRelevanceTechnicalFailure) as raised:
+        await CandidateRelevanceEvaluator(
+            WorkflowSettings(deepseek_api_key=SecretStr("test")),
+            model=StreamingModel([(0, '{"assessments":')]),
+            claim_verifier=AcceptingClaimVerifier(),
+        ).assess(context=_context(), candidates=(candidate,))
 
-    assert result[0].relevance_assessment is None
-    assert result[0].relevance_error is not None
-    assert result[0].relevance_error.code == "candidate_relevance_output_invalid"
-    assert "assessments" not in result[0].relevance_error.message
+    assert raised.value.code == "candidate_relevance_output_invalid"
+    assert "assessments" not in str(raised.value)
 
 
 @pytest.mark.asyncio
 async def test_model_evidence_must_be_found_in_unified_candidate() -> None:
     """模型引用不存在的原文时，候选必须明确失败而不是展示伪理由。"""
     candidate = _candidate()
-    evaluator = OpenAICompatibleCandidateRelevanceEvaluator(
+    evaluator = CandidateRelevanceEvaluator(
         WorkflowSettings(deepseek_api_key=SecretStr("test")),
         model=FakeModel(
             {
@@ -263,18 +247,18 @@ async def test_model_evidence_must_be_found_in_unified_candidate() -> None:
         claim_verifier=AcceptingClaimVerifier(),
     )
 
-    result = await evaluator.assess(context=_context(), candidates=(candidate,))
+    with pytest.raises(CandidateRelevanceTechnicalFailure) as raised:
+        await evaluator.assess(context=_context(), candidates=(candidate,))
 
-    assert result[0].relevance_state == "failed"
-    assert result[0].relevance_assessment is None
+    assert raised.value.code == "candidate_relevance_output_invalid"
 
 
 @pytest.mark.asyncio
-async def test_invalid_item_does_not_discard_another_verified_candidate() -> None:
-    """同一批次的一条坏证据只能让自身失败，不能抹掉其他已核验结果。"""
+async def test_invalid_item_retries_the_complete_collection() -> None:
+    """任一候选结构无效时，不能把不完整集合当作已完成结果。"""
     first = _candidate()
     second = _candidate("The study examines sleep quality and student wellbeing.")
-    evaluator = OpenAICompatibleCandidateRelevanceEvaluator(
+    evaluator = CandidateRelevanceEvaluator(
         WorkflowSettings(deepseek_api_key=SecretStr("test")),
         model=FakeModel(
             {
@@ -310,21 +294,17 @@ async def test_invalid_item_does_not_discard_another_verified_candidate() -> Non
         claim_verifier=AcceptingClaimVerifier(),
     )
 
-    result = await evaluator.assess(context=_context(), candidates=(first, second))
+    with pytest.raises(CandidateRelevanceTechnicalFailure) as raised:
+        await evaluator.assess(context=_context(), candidates=(first, second))
 
-    assert result[0].relevance_state == "completed"
-    assert result[0].relevance_assessment is not None
-    assert result[0].relevance_assessment.study_focus.startswith("考察睡眠质量")
-    assert result[1].relevance_state == "failed"
-    assert result[1].relevance_error is not None
-    assert result[1].relevance_error.code == "candidate_relevance_output_invalid"
+    assert raised.value.code == "candidate_relevance_output_invalid"
 
 
 @pytest.mark.asyncio
 async def test_candidate_without_abstract_is_explicitly_insufficient() -> None:
     """缺摘要时不让模型猜测，直接返回信息不足状态。"""
     candidate = _candidate(abstract=None)
-    evaluator = OpenAICompatibleCandidateRelevanceEvaluator(
+    evaluator = CandidateRelevanceEvaluator(
         WorkflowSettings(deepseek_api_key=SecretStr("test")),
         model=FakeModel({"assessments": []}),
         claim_verifier=AcceptingClaimVerifier(),
@@ -332,7 +312,7 @@ async def test_candidate_without_abstract_is_explicitly_insufficient() -> None:
 
     result = await evaluator.assess(context=_context(), candidates=(candidate,))
 
-    assert result[0].relevance_state == "completed"
+    assert result[0].relevance_state == "excluded"
     assert result[0].relevance_assessment is not None
     assert result[0].relevance_assessment.level == "insufficient_information"
     assert result[0].relevance_assessment.study_focus.startswith("目前只能从题目确认")
@@ -364,7 +344,7 @@ async def test_model_sees_complete_collection_and_keeps_missing_abstract_determi
             ]
         }
     )
-    evaluator = OpenAICompatibleCandidateRelevanceEvaluator(
+    evaluator = CandidateRelevanceEvaluator(
         WorkflowSettings(deepseek_api_key=SecretStr("test")),
         model=model,
         claim_verifier=AcceptingClaimVerifier(),
@@ -391,7 +371,7 @@ async def test_model_sees_complete_collection_and_keeps_missing_abstract_determi
 async def test_unverified_candidate_claims_are_rejected_instead_of_being_displayed() -> None:
     """理由的原文引文存在也不足以证明其中的扩大解释。"""
     candidate = _candidate()
-    evaluator = OpenAICompatibleCandidateRelevanceEvaluator(
+    evaluator = CandidateRelevanceEvaluator(
         WorkflowSettings(deepseek_api_key=SecretStr("test")),
         model=FakeModel(
             {
@@ -419,7 +399,8 @@ async def test_unverified_candidate_claims_are_rejected_instead_of_being_display
 
     result = await evaluator.assess(context=_context(), candidates=(candidate,))
 
-    assert result[0].relevance_state == "failed"
+    assert result[0].relevance_state == "excluded"
     assert result[0].relevance_assessment is None
     assert result[0].relevance_error is not None
     assert result[0].relevance_error.code == "candidate_relevance_claim_unsupported"
+    assert result[0].relevance_error.retryable is False

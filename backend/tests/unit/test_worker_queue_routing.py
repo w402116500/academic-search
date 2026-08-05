@@ -6,9 +6,12 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from app.modules.ingestion.job_queue import ArqIngestionJobQueue
-from app.modules.workflow.job_queue import ArqCandidateFulltextJobQueue, ArqSearchRunJobQueue
-from app.workers.queues import INGESTION_QUEUE_NAME, WORKFLOW_QUEUE_NAME
+from app.infra.redis.job_queues import (
+    ArqCandidateFulltextJobQueue,
+    ArqIngestionJobQueue,
+    ArqSearchRunJobQueue,
+)
+from app.infra.redis.queues import INGESTION_QUEUE_NAME, WORKFLOW_QUEUE_NAME
 
 
 class FakeJob:
@@ -37,17 +40,12 @@ async def test_workflow_and_ingestion_queues_are_explicitly_isolated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """不同 Worker 不能消费默认队列中的彼此任务。"""
-    workflow_redis = FakeRedis()
-    ingestion_redis = FakeRedis()
+    redis = FakeRedis()
 
-    async def workflow_pool(_settings: object) -> FakeRedis:
-        return workflow_redis
+    async def create_pool(_settings: object) -> FakeRedis:
+        return redis
 
-    async def ingestion_pool(_settings: object) -> FakeRedis:
-        return ingestion_redis
-
-    monkeypatch.setattr("app.modules.workflow.job_queue.create_pool", workflow_pool)
-    monkeypatch.setattr("app.modules.ingestion.job_queue.create_pool", ingestion_pool)
+    monkeypatch.setattr("app.infra.redis.job_queues.create_pool", create_pool)
 
     search_run_id = uuid4()
     candidate_id = uuid4()
@@ -60,10 +58,8 @@ async def test_workflow_and_ingestion_queues_are_explicitly_isolated(
     )
     await ArqIngestionJobQueue().enqueue_ingestion(ingestion_run_id)
 
-    assert [call[2]["_queue_name"] for call in workflow_redis.calls] == [
+    assert [call[2]["_queue_name"] for call in redis.calls] == [
         WORKFLOW_QUEUE_NAME,
         WORKFLOW_QUEUE_NAME,
-    ]
-    assert [call[2]["_queue_name"] for call in ingestion_redis.calls] == [
         INGESTION_QUEUE_NAME,
     ]

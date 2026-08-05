@@ -11,24 +11,22 @@ from uuid import UUID
 
 import httpx
 import pytest
+from app.core.fulltext_settings import FulltextAcquisitionSettings
 from app.core.settings import NetworkMode
-from app.modules.fulltext.acquisition import AuthorizedPdfUploader, OpenAccessPdfAcquirer
-from app.modules.fulltext.contracts import (
+from app.infra.storage.documents import Boto3StagingObjectStorage
+from app.modules.documents.acquisition import AuthorizedPdfUploader, OpenAccessPdfAcquirer
+from app.modules.documents.contracts import (
     FulltextAcquisitionErrorCode,
     FulltextAcquisitionStatus,
+    FulltextCandidate,
+    FulltextCandidateLinks,
 )
-from app.modules.fulltext.settings import FulltextAcquisitionSettings
-from app.modules.fulltext.storage import Boto3StagingObjectStorage, FulltextStorageError
-from app.modules.search.contracts import (
-    CandidateAuthor,
-    CandidateLinks,
+from app.modules.documents.storage import FulltextStorageError
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
-    RawCandidate,
-    SourceName,
-    UnifiedCandidate,
 )
 from boto3.exceptions import S3UploadFailedError
 from pydantic import SecretStr
@@ -95,7 +93,7 @@ def _candidate(
     citation_status: CitationMetadataStatus = CitationMetadataStatus.READY,
     is_open_access: bool | None = True,
     fulltext_url: str | None = "https://downloads.example.test/paper.pdf",
-) -> UnifiedCandidate:
+) -> FulltextCandidate:
     """构造具备最小正式题录的内部候选，不通过外部 API 生成测试数据。"""
     citation = CitationMetadata(
         status=citation_status,
@@ -109,23 +107,11 @@ def _candidate(
         doi=citation_doi,
         url="https://doi.org/10.1000/fulltext.example",
     )
-    raw = RawCandidate(
-        source=SourceName.OPENALEX,
-        source_record_id="W123",
-        title="A verified open access paper",
-        authors=(CandidateAuthor(name="Ada Lovelace"),),
-        doi=doi,
-    )
-
-    return UnifiedCandidate(
+    return FulltextCandidate(
         candidate_id=_CANDIDATE_ID,
         doi=doi,
-        title="A verified open access paper",
-        title_key="a verified open access paper",
-        authors=(CandidateAuthor(name="Ada Lovelace"),),
-        links=CandidateLinks(fulltext_url=fulltext_url),
+        links=FulltextCandidateLinks(fulltext_url=fulltext_url),
         is_open_access=is_open_access,
-        source_records=(raw,),
         citation=citation,
     )
 

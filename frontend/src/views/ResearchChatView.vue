@@ -1,8 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
+import { computed, nextTick, ref, watch } from "vue";
 import {
-  ArrowLeft,
   ArrowUp,
   BookOpenCheck,
   ChevronDown,
@@ -11,9 +9,6 @@ import {
   LoaderCircle,
   LogOut,
   MessageSquareText,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Plus,
   RotateCcw,
   ShieldCheck,
   Sparkles,
@@ -22,67 +17,57 @@ import {
 } from "@lucide/vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
-import { getWorkspace, getCollectionDocuments } from "@/api/collections";
-import { apiUrl, getAccessToken } from "@/api/client";
+import { useResearchQueries } from "@/api/hooks/research";
 import {
-  askResearchQuestion,
-  cancelResearchRun,
-  createConversation,
-  deleteConversation,
-  getConversation,
-  getResearchRun,
-  listConversations,
-  retryResearchRun,
-} from "@/api/research";
-import type {
-  Conversation,
-  ResearchEvidence,
-  ResearchProgressEvent,
-  ResearchRun,
-} from "@/api/types";
+  isResearchRunTerminal,
+  useResearchProgress,
+} from "@/features/research/use-research-progress";
+import ConversationSidebar from "@/features/research/ConversationSidebar.vue";
+import {
+  cancellationRequested,
+  conversationTitle,
+  evidenceAuthors,
+  evidenceLocation,
+  governanceSummary,
+  rerankerDisabled,
+  researchRunForOutputMessage,
+} from "@/features/research/research-chat-presentation";
 import { useAuthStore } from "@/stores/auth";
 
 const route = useRoute();
 const router = useRouter();
-const queryClient = useQueryClient();
 const auth = useAuthStore();
 
 const workspaceId = computed(() => String(route.params.workspaceId));
 const selectedConversationId = ref("");
 const question = ref("");
-const operationError = ref<string | null>(null);
 const accountMenuOpen = ref(false);
 const sidebarCollapsed = ref(false);
 // 窄屏下侧栏以抽屉呈现，避免会话历史因布局压缩而不可访问。
 const mobileSidebarOpen = ref(false);
 const deleteConfirmId = ref<string | null>(null);
-const activeRun = ref<ResearchRun | null>(null);
-const progressEvent = ref<ResearchProgressEvent | null>(null);
-const eventController = ref<AbortController | null>(null);
-const streamedRunId = ref<string | null>(null);
-let reconnectTimer: number | null = null;
-
-const workspaceQuery = useQuery({
-  queryKey: computed(() => ["workspace", workspaceId.value]),
-  queryFn: () => getWorkspace(workspaceId.value),
+const researchQueries = useResearchQueries(workspaceId, selectedConversationId);
+const {
+  workspaceQuery,
+  documentsQuery,
+  conversationsQuery,
+  conversationQuery,
+  createConversationMutation,
+  askQuestionMutation,
+  retryRunMutation,
+  cancelRunMutation,
+  deleteConversationMutation,
+  refreshConversations,
+  refreshConversation: refreshResearchQueries,
+} = researchQueries;
+const operationError = ref<string | null>(null);
+const researchProgress = useResearchProgress(workspaceId, selectedConversationId, {
+  onRefresh: async () => refreshConversation(),
+  onError: (message) => {
+    if (message) operationError.value = message;
+  },
 });
-const documentsQuery = useQuery({
-  queryKey: computed(() => ["collection-documents", workspaceId.value]),
-  queryFn: () => getCollectionDocuments(workspaceId.value),
-});
-const conversationsQuery = useQuery({
-  queryKey: computed(() => ["research-conversations", workspaceId.value]),
-  queryFn: () => listConversations(workspaceId.value),
-});
-const conversationQuery = useQuery({
-  queryKey: computed(() => [
-    "research-conversation",
-    workspaceId.value,
-    selectedConversationId.value,
-  ]),
-  queryFn: () => getConversation(workspaceId.value, selectedConversationId.value),
-  enabled: computed(() => Boolean(selectedConversationId.value)),
-});
+const { activeRun, progressEvent, streamRun } = researchProgress;
 
 const readyCount = computed(
   () => documentsQuery.data.value?.summary.researchable_document_count ?? 0,
@@ -103,139 +88,28 @@ const composerDisabled = computed(
 );
 const accountInitial = computed(() => (auth.user?.display_name ?? "研").slice(0, 1).toUpperCase());
 
-const createConversationMutation = useMutation({
-  mutationFn: () => createConversation(workspaceId.value),
-});
-const askQuestionMutation = useMutation({
-  mutationFn: ({ conversationId, content }: { conversationId: string; content: string }) =>
-    askResearchQuestion(workspaceId.value, conversationId, content),
-});
-const retryRunMutation = useMutation({
-  mutationFn: ({ conversationId, runId }: { conversationId: string; runId: string }) =>
-    retryResearchRun(workspaceId.value, conversationId, runId),
-});
-const cancelRunMutation = useMutation({
-  mutationFn: ({ conversationId, runId }: { conversationId: string; runId: string }) =>
-    cancelResearchRun(workspaceId.value, conversationId, runId),
-});
-const deleteConversationMutation = useMutation({
-  mutationFn: (conversationId: string) => deleteConversation(workspaceId.value, conversationId),
-});
+const isTerminal = isResearchRunTerminal;
 
-function isTerminal(status: ResearchRun["status"]): boolean {
-  return ["awaiting_clarification", "completed", "failed", "cancelled"].includes(status);
-}
-
-function conversationTitle(conversation: Conversation | null): string {
-  return conversation?.title?.trim() || "新建研究对话";
-}
-
-function conversationTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "刚刚";
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(date);
-}
-
-function evidenceAuthors(evidence: ResearchEvidence): string {
-  const authors = evidence.authors
-    .map((author) => (typeof author.name === "string" ? author.name : ""))
-    .filter(Boolean);
-  return authors.length ? authors.slice(0, 3).join("、") : "作者信息待补全";
-}
-
-function evidenceLocation(evidence: ResearchEvidence): string {
-  const locator = evidence.locator_snapshot ?? {};
-  const pageStart = typeof locator.page_start === "number" ? locator.page_start : null;
-  const pageEnd = typeof locator.page_end === "number" ? locator.page_end : null;
-  const pages = pageStart
-    ? pageEnd && pageEnd !== pageStart
-      ? `第 ${pageStart}-${pageEnd} 页`
-      : `第 ${pageStart} 页`
-    : null;
-  const sectionPath = Array.isArray(locator.section_path)
-    ? locator.section_path.filter((item): item is string => typeof item === "string").join(" / ")
-    : "";
-  return [pages, sectionPath || null].filter(Boolean).join(" · ") || "原文定位已保存";
-}
-
-function runForOutputMessage(messageId: string): ResearchRun | null {
-  return conversationDetail.value?.runs.find((run) => run.output_message_id === messageId) ?? null;
-}
-
-function rerankerDisabled(run: ResearchRun | null): boolean {
-  const reranker = run?.retrieval_trace.reranker;
-  return (
-    typeof reranker === "object" &&
-    reranker !== null &&
-    "enabled" in reranker &&
-    reranker.enabled === false
-  );
-}
-
-function isTraceRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function cancellationRequested(run: ResearchRun | null): boolean {
-  return run?.status === "running" && run.cancel_requested_at !== null;
-}
-
-function governanceSummary(run: ResearchRun | null): string | null {
-  const trace = run?.retrieval_trace;
-  if (!trace) return null;
-  const routing = trace.routing;
-  const budget = trace.budget;
-  const timing = trace.timing;
-  const parts: string[] = [];
-  if (isTraceRecord(routing)) {
-    const reason = routing.reason;
-    if (typeof reason === "string") parts.push(reason);
-  }
-  if (isTraceRecord(budget)) {
-    const modelCalls = budget.model_calls;
-    const modelLimit = budget.model_call_limit;
-    const toolCalls = budget.tool_calls;
-    const toolLimit = budget.tool_call_limit;
-    if (
-      typeof modelCalls === "number" &&
-      typeof modelLimit === "number" &&
-      typeof toolCalls === "number" &&
-      typeof toolLimit === "number"
-    ) {
-      parts.push(`模型 ${modelCalls}/${modelLimit} 次，检索 ${toolCalls}/${toolLimit} 次`);
-    }
-  }
-  if (isTraceRecord(timing)) {
-    const duration = timing.total_duration_ms;
-    if (typeof duration === "number") parts.push(`耗时 ${(duration / 1_000).toFixed(1)} 秒`);
-  }
-  return parts.length ? parts.join("；") : null;
+function runForOutputMessage(messageId: string) {
+  return researchRunForOutputMessage(conversationDetail.value?.runs ?? [], messageId);
 }
 
 async function refreshConversation(): Promise<void> {
-  await Promise.all([
-    queryClient.invalidateQueries({ queryKey: ["research-conversations", workspaceId.value] }),
-    queryClient.invalidateQueries({
-      queryKey: ["research-conversation", workspaceId.value, selectedConversationId.value],
-    }),
-  ]);
-  if (selectedConversationId.value) await conversationQuery.refetch();
+  await refreshResearchQueries();
   if (activeRun.value && isTerminal(activeRun.value.status)) activeRun.value = null;
 }
 
 async function chooseConversation(conversationId: string): Promise<void> {
   if (selectedConversationId.value === conversationId) return;
-  eventController.value?.abort();
+  researchProgress.reset();
   selectedConversationId.value = conversationId;
   mobileSidebarOpen.value = false;
-  activeRun.value = null;
-  progressEvent.value = null;
   await router.replace({ query: { conversation: conversationId } });
 }
 
 async function createAndSelectConversation(): Promise<string> {
   const conversation = await createConversationMutation.mutateAsync();
-  await queryClient.invalidateQueries({ queryKey: ["research-conversations", workspaceId.value] });
+  await refreshConversations();
   await chooseConversation(conversation.id);
   return conversation.id;
 }
@@ -275,85 +149,6 @@ function handleComposerKeydown(event: KeyboardEvent): void {
   }
 }
 
-async function updateRunFromDatabase(runId: string): Promise<ResearchRun | null> {
-  if (!selectedConversationId.value) return null;
-  const run = await getResearchRun(workspaceId.value, selectedConversationId.value, runId);
-  activeRun.value = run;
-  return run;
-}
-
-async function streamRun(run: ResearchRun): Promise<void> {
-  if (isTerminal(run.status) || streamedRunId.value === run.id) return;
-  eventController.value?.abort();
-  if (reconnectTimer !== null) {
-    window.clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
-  const controller = new AbortController();
-  eventController.value = controller;
-  streamedRunId.value = run.id;
-  try {
-    const response = await fetch(
-      apiUrl(
-        `/api/v1/collections/${workspaceId.value}/conversations/${run.conversation_id}/research-runs/${run.id}/events`,
-      ),
-      {
-        headers: { Authorization: `Bearer ${getAccessToken() ?? ""}` },
-        signal: controller.signal,
-      },
-    );
-    if (!response.ok || !response.body) throw new Error("无法建立研究进度流。");
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    // SSE 分片不保证与事件边界对齐，必须先缓冲到空行再解析。
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const packets = buffer.split("\n\n");
-      buffer = packets.pop() ?? "";
-      for (const packet of packets) {
-        const dataLine = packet.split("\n").find((line) => line.startsWith("data:"));
-        if (!dataLine) continue;
-        try {
-          const event = JSON.parse(dataLine.slice(5).trim()) as ResearchProgressEvent;
-          progressEvent.value = event;
-          activeRun.value = {
-            ...run,
-            ...activeRun.value,
-            status: event.status,
-            stage: event.stage,
-          };
-          if (isTerminal(event.status)) {
-            await refreshConversation();
-            return;
-          }
-        } catch {
-          // 心跳和不完整事件不应中断已建立的进度流，数据库轮询会负责恢复最终状态。
-        }
-      }
-    }
-  } catch (error) {
-    if (controller.signal.aborted) return;
-    operationError.value = error instanceof Error ? error.message : "研究进度连接中断。";
-    try {
-      const persisted = await updateRunFromDatabase(run.id);
-      if (persisted && !isTerminal(persisted.status)) {
-        reconnectTimer = window.setTimeout(() => void streamRun(persisted), 1_500);
-      } else {
-        await refreshConversation();
-      }
-    } catch {
-      // 下一次用户操作或页面刷新仍会从 PostgreSQL 恢复，不保留浏览器内存作为状态真相。
-    }
-  } finally {
-    if (streamedRunId.value === run.id) streamedRunId.value = null;
-  }
-}
-
 async function retryCurrentRun(): Promise<void> {
   const run = pendingRun.value;
   if (!run || !selectedConversationId.value) return;
@@ -382,7 +177,7 @@ async function cancelCurrentRun(): Promise<void> {
       runId: run.id,
     });
     activeRun.value = cancelled;
-    if (cancelled.status === "cancelled") eventController.value?.abort();
+    if (cancelled.status === "cancelled") researchProgress.stop();
     await refreshConversation();
   } catch (error) {
     operationError.value = error instanceof Error ? error.message : "取消请求暂时无法提交。";
@@ -396,12 +191,9 @@ async function confirmDeleteConversation(): Promise<void> {
   try {
     await deleteConversationMutation.mutateAsync(conversationId);
     deleteConfirmId.value = null;
-    eventController.value?.abort();
+    researchProgress.reset();
     selectedConversationId.value = "";
-    activeRun.value = null;
-    await queryClient.invalidateQueries({
-      queryKey: ["research-conversations", workspaceId.value],
-    });
+    await refreshConversations();
     const nextConversation = conversations.value.find((item) => item.id !== conversationId);
     if (nextConversation) await chooseConversation(nextConversation.id);
     else await router.replace({ query: {} });
@@ -444,11 +236,6 @@ watch(
   },
   { deep: true },
 );
-
-onBeforeUnmount(() => {
-  eventController.value?.abort();
-  if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-});
 </script>
 
 <template>
@@ -466,96 +253,18 @@ onBeforeUnmount(() => {
       aria-label="关闭研究会话侧栏"
       @click="mobileSidebarOpen = false"
     />
-    <aside
-      id="research-chat-sidebar"
-      class="research-chat-sidebar"
-      aria-label="当前工作区的研究会话"
-    >
-      <RouterLink class="research-chat-brand" to="/" aria-label="返回研究入口">
-        <span class="brand-mark">AS</span
-        ><span class="research-chat-brand-copy">Academic Search</span>
-      </RouterLink>
-      <div class="research-chat-sidebar-context">
-        <span class="eyebrow">当前工作区</span>
-        <strong>{{ workspaceQuery.data.value?.name ?? "正在读取工作区…" }}</strong>
-        <small>{{ readyCount }} 篇全文可问答</small>
-      </div>
-      <div class="research-chat-sidebar-actions">
-        <button
-          class="primary-button research-chat-new-button"
-          type="button"
-          aria-label="新建研究对话"
-          @click="newConversation"
-        >
-          <Plus :size="16" /><span>新建研究对话</span>
-        </button>
-        <RouterLink
-          class="research-chat-collection-link"
-          :to="{ name: 'workspace-collection', params: { workspaceId } }"
-          aria-label="打开研究集合"
-          title="打开研究集合"
-        >
-          <FileStack :size="16" />
-          <span><strong>研究集合</strong><small>查看全文、索引与范围</small></span>
-        </RouterLink>
-      </div>
-      <nav class="research-chat-session-list" aria-label="会话记录">
-        <span class="research-chat-session-label">当前工作区</span>
-        <div
-          v-for="conversation in conversations"
-          :key="conversation.id"
-          class="research-chat-session-row"
-          :class="{ active: conversation.id === selectedConversationId }"
-        >
-          <button
-            class="research-chat-session-item"
-            type="button"
-            :aria-current="conversation.id === selectedConversationId ? 'page' : undefined"
-            @click="chooseConversation(conversation.id)"
-          >
-            <MessageSquareText :size="16" />
-            <span class="research-chat-session-copy">
-              <strong>{{ conversationTitle(conversation) }}</strong>
-              <small
-                >{{
-                  conversation.message_count ? `${conversation.message_count} 条消息` : "尚未提问"
-                }}
-                · {{ conversationTime(conversation.updated_at) }}</small
-              >
-            </span>
-          </button>
-          <button
-            class="research-chat-delete-session"
-            type="button"
-            title="删除会话"
-            aria-label="删除会话"
-            @click="deleteConfirmId = conversation.id"
-          >
-            <Trash2 :size="14" />
-          </button>
-        </div>
-        <div v-if="conversationsQuery.isPending.value" class="research-chat-sidebar-empty">
-          <LoaderCircle class="spin" :size="16" />正在读取会话…
-        </div>
-        <div v-else-if="!conversations.length" class="research-chat-sidebar-empty">
-          <MessageSquareText :size="17" />从一个问题开始研究
-        </div>
-      </nav>
-      <div class="research-chat-sidebar-footer">
-        <RouterLink class="icon-button" to="/" title="返回研究入口" aria-label="返回研究入口"
-          ><ArrowLeft :size="17"
-        /></RouterLink>
-        <button
-          class="icon-button"
-          type="button"
-          :aria-label="sidebarCollapsed ? '展开研究会话侧栏' : '收起研究会话侧栏'"
-          :title="sidebarCollapsed ? '展开研究会话侧栏' : '收起研究会话侧栏'"
-          @click="sidebarCollapsed = !sidebarCollapsed"
-        >
-          <PanelLeftOpen v-if="sidebarCollapsed" :size="17" /><PanelLeftClose v-else :size="17" />
-        </button>
-      </div>
-    </aside>
+    <ConversationSidebar
+      v-model:collapsed="sidebarCollapsed"
+      :workspace-id="workspaceId"
+      :workspace-name="workspaceQuery.data.value?.name ?? '正在读取工作区…'"
+      :ready-count="readyCount"
+      :conversations="conversations"
+      :selected-conversation-id="selectedConversationId"
+      :loading="conversationsQuery.isPending.value"
+      @choose="chooseConversation"
+      @create="newConversation"
+      @delete="deleteConfirmId = $event"
+    />
 
     <main class="research-chat-main">
       <header class="research-chat-header">
@@ -677,10 +386,10 @@ onBeforeUnmount(() => {
                   <span
                     v-if="
                       message.role === 'assistant' &&
-                      runForOutputMessage(message.id)?.evidences.length
+                      runForOutputMessage(message.id)?.evidences?.length
                     "
                     ><ShieldCheck :size="13" />{{
-                      runForOutputMessage(message.id)?.evidences.length
+                      runForOutputMessage(message.id)?.evidences?.length
                     }}
                     条引用已核验</span
                   >
@@ -702,18 +411,18 @@ onBeforeUnmount(() => {
                 </div>
                 <p class="research-chat-message-body">{{ message.content }}</p>
                 <details
-                  v-if="runForOutputMessage(message.id)?.evidences.length"
+                  v-if="runForOutputMessage(message.id)?.evidences?.length"
                   class="research-chat-evidence-details"
                 >
                   <summary>
                     <span><BookOpenCheck :size="16" />引用来源</span
                     ><small
-                      >{{ runForOutputMessage(message.id)?.evidences.length }} 个证据片段</small
+                      >{{ runForOutputMessage(message.id)?.evidences?.length }} 个证据片段</small
                     >
                   </summary>
                   <ol class="research-chat-evidence-list">
                     <li
-                      v-for="(evidence, index) in runForOutputMessage(message.id)?.evidences"
+                      v-for="(evidence, index) in runForOutputMessage(message.id)?.evidences ?? []"
                       :key="evidence.id"
                     >
                       <span class="research-chat-evidence-index">{{ index + 1 }}</span>

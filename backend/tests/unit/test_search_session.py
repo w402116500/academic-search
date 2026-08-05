@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 import pytest
-from app.modules.workflow.search_session import SearchSessionStore
+from app.infra.redis.search_session import RedisSearchSessionStore
 
 
 class FakeRedis:
@@ -77,7 +77,7 @@ class FakeRedis:
 async def test_snapshot_round_trip_refreshes_ttl() -> None:
     """候选快照以 JSON 保存，并在每次覆盖时刷新会话 TTL。"""
     redis = FakeRedis()
-    store = SearchSessionStore(redis, ttl_seconds=7200)  # type: ignore[arg-type]
+    store = RedisSearchSessionStore(redis, ttl_seconds=7200)  # type: ignore[arg-type]
     snapshot: dict[str, Any] = {"status": "running", "candidates": [{"title": "绿地"}]}
 
     await store.write_snapshot("search:1", snapshot)
@@ -91,7 +91,7 @@ async def test_snapshot_round_trip_refreshes_ttl() -> None:
 async def test_events_are_read_after_cursor_and_refresh_stream_ttl() -> None:
     """事件读取只返回游标之后的记录，适配 SSE 断线重连。"""
     redis = FakeRedis()
-    store = SearchSessionStore(redis, ttl_seconds=300)  # type: ignore[arg-type]
+    store = RedisSearchSessionStore(redis, ttl_seconds=300)  # type: ignore[arg-type]
     first_id = await store.append_event("search:1", {"stage": "provider_search"})
     second_id = await store.append_event("search:1", {"stage": "completed"})
 
@@ -104,7 +104,7 @@ async def test_events_are_read_after_cursor_and_refresh_stream_ttl() -> None:
 @pytest.mark.asyncio
 async def test_events_reject_invalid_cursor() -> None:
     """不接受任意字符串作为 Redis Stream 游标，避免注入错误读取语义。"""
-    store = SearchSessionStore(FakeRedis(), ttl_seconds=300)  # type: ignore[arg-type]
+    store = RedisSearchSessionStore(FakeRedis(), ttl_seconds=300)  # type: ignore[arg-type]
 
     with pytest.raises(ValueError, match="无效的 Redis Stream 事件 ID"):
         await store.read_events("search:1", last_event_id="latest")
@@ -114,7 +114,7 @@ async def test_events_reject_invalid_cursor() -> None:
 async def test_read_many_snapshots_preserves_requested_key_mapping() -> None:
     """候选分页批量读取全文状态时，缺失键不能错位到其他候选。"""
     redis = FakeRedis()
-    store = SearchSessionStore(redis, ttl_seconds=300)  # type: ignore[arg-type]
+    store = RedisSearchSessionStore(redis, ttl_seconds=300)  # type: ignore[arg-type]
     await store.write_snapshot("search:1", {"candidate_id": "first"})
     await store.write_snapshot("search:3", {"candidate_id": "third"})
 

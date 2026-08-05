@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { RouterLink, useRouter } from "vue-router";
-import { useInfiniteQuery } from "@tanstack/vue-query";
 import { ChevronDown, LogOut, Search, Workflow } from "@lucide/vue";
 
-import { listWorkspaces } from "@/api/collections";
+import { useWorkspaceSearchQuery } from "@/api/hooks/research";
 import { workspaceRouteForStage } from "@/router/workspace-route";
 import { useAuthStore } from "@/stores/auth";
 
@@ -21,13 +20,7 @@ const router = useRouter();
 const workspaceMenuOpen = ref(false);
 const accountMenuOpen = ref(false);
 const search = ref("");
-const workspaceQuery = useInfiniteQuery({
-  queryKey: computed(() => ["workspaces", search.value]),
-  queryFn: ({ pageParam }) => listWorkspaces(search.value, pageParam),
-  initialPageParam: null as string | null,
-  getNextPageParam: (lastPage) => lastPage.next_cursor,
-  enabled: workspaceMenuOpen,
-});
+const workspaceQuery = useWorkspaceSearchQuery(search, workspaceMenuOpen);
 const workspaces = computed(
   () => workspaceQuery.data.value?.pages.flatMap((page) => page.items) ?? [],
 );

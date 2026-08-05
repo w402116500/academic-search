@@ -6,8 +6,8 @@ from typing import cast
 
 from app.api.routers.collection_documents import _build_error_response
 from app.api.routers.search_runs import _search_error_response
-from app.modules.collections.build_contracts import CollectionBuildError, CollectionBuildErrorCode
-from app.modules.workflow.contracts import SearchRunError, SearchRunErrorCode
+from app.modules.research.build_contracts import CollectionBuildError, CollectionBuildErrorCode
+from app.modules.search.api_contracts import SearchRunError, SearchRunErrorCode
 
 
 def test_search_submission_quota_errors_map_to_http_429() -> None:

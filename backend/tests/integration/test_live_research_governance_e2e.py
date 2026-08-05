@@ -11,15 +11,24 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
-from app.db.models.collection import CollectionPaper, ResearchCollection
-from app.db.models.document import Document, IngestionRun
-from app.db.models.paper import Paper
-from app.db.models.user import User
-from app.db.models.workflow import ResearchPlan, SearchRun
-from app.db.session import async_session_factory
-from app.modules.collections.build_contracts import CollectionBuildError, CollectionBuildErrorCode
-from app.modules.collections.build_service import ResearchCollectionBuildService
-from app.modules.ingestion.settings import IngestionSettings
+from app.core.ingestion_settings import IngestionSettings
+from app.core.workflow_settings import WorkflowSettings, get_workflow_settings
+from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.document import Document, IngestionRun
+from app.infra.db.models.paper import Paper
+from app.infra.db.models.user import User
+from app.infra.db.models.workflow import ResearchPlan, SearchRun
+from app.infra.db.repositories.collection_builds import SqlAlchemyCollectionBuildAdapter
+from app.infra.db.repositories.research_conversations import (
+    SqlAlchemyResearchConversationAdapter,
+)
+from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
+from app.infra.db.session import async_session_factory
+from app.infra.llm.research_model import OpenAICompatibleResearchModel
+from app.infra.redis.connection import redis_client_from_environment
+from app.infra.redis.research_events import RedisResearchEventStore
+from app.modules.agents.contracts import ResearchRouteDecision
+from app.modules.research.build_contracts import CollectionBuildError, CollectionBuildErrorCode
 from app.modules.research.contracts import (
     CreateConversationRequest,
     ResearchError,
@@ -27,15 +36,12 @@ from app.modules.research.contracts import (
     ResearchRunStage,
     ResearchRunStatus,
 )
-from app.modules.research.events import ResearchEventStore
-from app.modules.research.graph import OpenAICompatibleResearchModel, ResearchRouteDecision
-from app.modules.research.service import ResearchConversationService
+from app.modules.research.events import build_research_event_stream_key
 from app.modules.research.settings import ResearchSettings
-from app.modules.workflow.contracts import SearchRunError, SearchRunErrorCode
-from app.modules.workflow.search_run_service import SearchRunService
-from app.modules.workflow.settings import WorkflowSettings, get_workflow_settings
-from app.modules.workflow.state import ResearchPlanStatus, SearchRunStatus, WorkspaceWorkflowStage
-from app.workers.redis import redis_client_from_environment
+from app.modules.research.state import ResearchPlanStatus, WorkspaceWorkflowStage
+from app.modules.search.api_contracts import SearchRunError, SearchRunErrorCode
+from app.modules.search.run_service import SearchRunService
+from app.modules.search.state import SearchRunStatus
 from app.workers.research import ResearchWorkerDependencies, run_research, startup
 from sqlalchemy import delete, select
 
@@ -193,7 +199,7 @@ async def test_live_worker_confirms_cancellation_and_enforces_daily_governance()
 
         queue = CapturingResearchQueue()
         async with async_session_factory() as session:
-            service = ResearchConversationService(session, queue, settings=settings)
+            service = SqlAlchemyResearchConversationAdapter(session, queue, settings=settings)
             conversation = await service.create_conversation(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
@@ -225,7 +231,9 @@ async def test_live_worker_confirms_cancellation_and_enforces_daily_governance()
         await asyncio.wait_for(model.started.wait(), timeout=10)
 
         async with async_session_factory() as session:
-            cancelled = await ResearchConversationService(session, settings=settings).cancel_run(
+            cancelled = await SqlAlchemyResearchConversationAdapter(
+                session, settings=settings
+            ).cancel_run(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
                 conversation_id=conversation_id,
@@ -239,7 +247,7 @@ async def test_live_worker_confirms_cancellation_and_enforces_daily_governance()
         assert outcome["status"] == ResearchRunStatus.CANCELLED.value
 
         async with async_session_factory() as session:
-            service = ResearchConversationService(session, settings=settings)
+            service = SqlAlchemyResearchConversationAdapter(session, settings=settings)
             run = await service.get_run(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
@@ -258,7 +266,7 @@ async def test_live_worker_confirms_cancellation_and_enforces_daily_governance()
 
         redis = redis_client_from_environment()
         try:
-            events = await ResearchEventStore(
+            events = await RedisResearchEventStore(
                 redis, ttl_seconds=settings.rag_event_ttl_seconds
             ).read_events(research_run_id, last_event_id="0-0", block_milliseconds=1)
         finally:
@@ -266,7 +274,7 @@ async def test_live_worker_confirms_cancellation_and_enforces_daily_governance()
         assert any(event[1].get("status") == ResearchRunStatus.CANCELLED.value for event in events)
 
         async with async_session_factory() as session:
-            user_limited = ResearchConversationService(session, queue, settings=settings)
+            user_limited = SqlAlchemyResearchConversationAdapter(session, queue, settings=settings)
             with pytest.raises(ResearchError) as user_error:
                 await user_limited.ask_question(
                     owner_user_id=owner_user_id,
@@ -277,7 +285,7 @@ async def test_live_worker_confirms_cancellation_and_enforces_daily_governance()
                 )
             assert user_error.value.code is ResearchErrorCode.USER_QUOTA_EXCEEDED
 
-            global_limited = ResearchConversationService(
+            global_limited = SqlAlchemyResearchConversationAdapter(
                 session,
                 queue,
                 settings=ResearchSettings(
@@ -302,7 +310,7 @@ async def test_live_worker_confirms_cancellation_and_enforces_daily_governance()
         if research_run_id is not None:
             redis = redis_client_from_environment()
             try:
-                await redis.delete(ResearchEventStore.stream_key(research_run_id))
+                await redis.delete(build_research_event_stream_key(research_run_id))
             finally:
                 await redis.aclose()
         async with async_session_factory() as session:
@@ -455,7 +463,7 @@ async def test_live_postgresql_rejects_search_and_ingestion_submission_budget_ov
         async with async_session_factory() as session:
             with pytest.raises(SearchRunError) as user_error:
                 await SearchRunService(
-                    session,
+                    SqlAlchemySearchRunRepository(session),
                     UnexpectedSearchQueue(),
                     settings=WorkflowSettings.model_construct(
                         workflow_user_daily_search_run_limit=1,
@@ -468,7 +476,7 @@ async def test_live_postgresql_rejects_search_and_ingestion_submission_budget_ov
         async with async_session_factory() as session:
             with pytest.raises(SearchRunError) as global_error:
                 await SearchRunService(
-                    session,
+                    SqlAlchemySearchRunRepository(session),
                     UnexpectedSearchQueue(),
                     settings=WorkflowSettings.model_construct(
                         workflow_user_daily_search_run_limit=100,
@@ -480,7 +488,7 @@ async def test_live_postgresql_rejects_search_and_ingestion_submission_budget_ov
 
         async with async_session_factory() as session:
             with pytest.raises(CollectionBuildError) as user_error:
-                await ResearchCollectionBuildService(
+                await SqlAlchemyCollectionBuildAdapter(
                     session,
                     UnexpectedIngestionQueue(),
                     settings=IngestionSettings.model_construct(
@@ -493,7 +501,7 @@ async def test_live_postgresql_rejects_search_and_ingestion_submission_budget_ov
 
         async with async_session_factory() as session:
             with pytest.raises(CollectionBuildError) as global_error:
-                await ResearchCollectionBuildService(
+                await SqlAlchemyCollectionBuildAdapter(
                     session,
                     UnexpectedIngestionQueue(),
                     settings=IngestionSettings.model_construct(

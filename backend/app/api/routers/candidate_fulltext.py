@@ -5,38 +5,35 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+
 from app.api.deps.auth import get_current_user
-from app.core.settings import get_literature_source_settings
-from app.db.models.user import User
-from app.db.session import get_db_session
-from app.modules.collections import (
-    CollectionAdmissionError,
-    CollectionAdmissionErrorCode,
-    CollectionAdmissionResult,
-    ResearchCollectionAdmissionService,
+from app.api.deps.services import (
+    get_candidate_fulltext_service,
+    get_candidate_upload_service,
+    get_collection_admission_service,
 )
-from app.modules.fulltext import (
-    AuthorizedPdfUploader,
-    Boto3StagingObjectStorage,
-    get_fulltext_acquisition_settings,
-)
-from app.modules.workflow.contracts import (
+from app.modules.auth.models import UserAccount
+from app.modules.documents.api_contracts import (
     CandidateFulltextError,
     CandidateFulltextErrorCode,
     CandidateFulltextResponse,
-    SearchRunError,
-    SearchRunErrorCode,
 )
-from app.modules.workflow.fulltext_service import (
+from app.modules.documents.service import (
     CandidateFulltextService,
     CandidateFulltextSubmission,
 )
-from app.modules.workflow.job_queue import ArqCandidateFulltextJobQueue
-from app.modules.workflow.search_session import SearchSessionStore
-from app.workers.redis import redis_client_from_environment
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.modules.literature.admission import (
+    CollectionAdmissionError,
+    CollectionAdmissionErrorCode,
+    CollectionAdmissionResult,
+    LiteratureAdmissionCandidate,
+    LiteratureAdmissionPort,
+)
+from app.modules.search.api_contracts import (
+    SearchRunError,
+    SearchRunErrorCode,
+)
 
 router = APIRouter(prefix="/collections", tags=["全文获取"])
 
@@ -106,25 +103,6 @@ def _response(submission: CandidateFulltextSubmission) -> CandidateFulltextRespo
     )
 
 
-async def _service_with_redis(
-    session: AsyncSession,
-    *,
-    uploader: AuthorizedPdfUploader | None = None,
-) -> tuple[CandidateFulltextService, Redis]:
-    """创建一次请求范围的 Redis 会话存储，并把连接交给路由 finally 关闭。"""
-    settings = get_literature_source_settings()
-    redis = redis_client_from_environment()
-    return (
-        CandidateFulltextService(
-            session,
-            SearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds),
-            ArqCandidateFulltextJobQueue(),
-            uploader=uploader,
-        ),
-        redis,
-    )
-
-
 @router.post(
     "/{collection_id}/search-runs/{search_run_id}/candidates/{candidate_id}/fulltext",
     response_model=CandidateFulltextResponse,
@@ -135,11 +113,10 @@ async def request_candidate_fulltext(
     collection_id: UUID,
     search_run_id: UUID,
     candidate_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[CandidateFulltextService, Depends(get_candidate_fulltext_service)],
 ) -> CandidateFulltextResponse:
     """创建全文异步任务；候选、URL 和题录均从服务端检索会话读取。"""
-    service, redis = await _service_with_redis(session)
     try:
         submission = await service.request(
             owner_user_id=current_user.id,
@@ -151,8 +128,6 @@ async def request_candidate_fulltext(
         raise _fulltext_error_response(exc) from exc
     except SearchRunError as exc:
         raise _search_run_error_response(exc) from exc
-    finally:
-        await redis.aclose()
     return _response(submission)
 
 
@@ -166,11 +141,10 @@ async def retry_candidate_fulltext(
     collection_id: UUID,
     search_run_id: UUID,
     candidate_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[CandidateFulltextService, Depends(get_candidate_fulltext_service)],
 ) -> CandidateFulltextResponse:
     """仅为可重试的终态失败创建新的全文下载尝试。"""
-    service, redis = await _service_with_redis(session)
     try:
         submission = await service.request(
             owner_user_id=current_user.id,
@@ -183,8 +157,6 @@ async def retry_candidate_fulltext(
         raise _fulltext_error_response(exc) from exc
     except SearchRunError as exc:
         raise _search_run_error_response(exc) from exc
-    finally:
-        await redis.aclose()
     return _response(submission)
 
 
@@ -198,19 +170,11 @@ async def upload_candidate_fulltext(
     search_run_id: UUID,
     candidate_id: UUID,
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[CandidateFulltextService, Depends(get_candidate_upload_service)],
     x_upload_authorized: Annotated[str | None, Header()] = None,
 ) -> CandidateFulltextResponse:
     """只接收二进制 PDF 流；授权、候选、DOI 和暂存对象键都由服务端控制。"""
-    acquisition_settings = get_fulltext_acquisition_settings()
-    service, redis = await _service_with_redis(
-        session,
-        uploader=AuthorizedPdfUploader(
-            acquisition_settings,
-            Boto3StagingObjectStorage(acquisition_settings),
-        ),
-    )
     try:
         submission = await service.upload(
             owner_user_id=current_user.id,
@@ -225,8 +189,6 @@ async def upload_candidate_fulltext(
         raise _fulltext_error_response(exc) from exc
     except SearchRunError as exc:
         raise _search_run_error_response(exc) from exc
-    finally:
-        await redis.aclose()
     return _response(submission)
 
 
@@ -239,11 +201,10 @@ async def get_candidate_fulltext(
     collection_id: UUID,
     search_run_id: UUID,
     candidate_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[CandidateFulltextService, Depends(get_candidate_fulltext_service)],
 ) -> CandidateFulltextResponse:
     """供前端轮询正在下载、校验或已可加入集合的候选全文。"""
-    service, redis = await _service_with_redis(session)
     try:
         submission = await service.get_state(
             owner_user_id=current_user.id,
@@ -255,8 +216,6 @@ async def get_candidate_fulltext(
         raise _fulltext_error_response(exc) from exc
     except SearchRunError as exc:
         raise _search_run_error_response(exc) from exc
-    finally:
-        await redis.aclose()
     return _response(submission)
 
 
@@ -270,13 +229,13 @@ async def admit_candidate_fulltext(
     collection_id: UUID,
     search_run_id: UUID,
     candidate_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[CandidateFulltextService, Depends(get_candidate_fulltext_service)],
+    admission_service: Annotated[
+        LiteratureAdmissionPort, Depends(get_collection_admission_service)
+    ],
 ) -> CollectionAdmissionResult:
     """只接受当前搜索会话中已校验 PDF，创建不会被 Worker 提前领取的 pending 运行。"""
-    service, redis = await _service_with_redis(session)
-    # rollback 会使 ORM 实体过期；在结束只读事务前保留纯 UUID，之后不能再访问
-    # current_user 的懒加载属性，以免异步请求中触发额外的数据库 IO。
     owner_user_id = current_user.id
     try:
         submission = await service.get_state(
@@ -285,17 +244,19 @@ async def admit_candidate_fulltext(
             search_run_id=search_run_id,
             candidate_id=candidate_id,
         )
-        # get_state 只读查询会让 AsyncSession 自动开启事务；准入服务
-        # 需要建立自己的事务边界，先回滚这次无写入的读取事务，避免
-        # SQLAlchemy 抛出 "A transaction is already begun"。
-        await session.rollback()
-        return await ResearchCollectionAdmissionService(
-            session,
-            Boto3StagingObjectStorage(get_fulltext_acquisition_settings()),
-        ).admit(
+        return await admission_service.admit(
             owner_user_id=owner_user_id,
             collection_id=collection_id,
-            candidate=submission.state.candidate,
+            candidate=LiteratureAdmissionCandidate(
+                candidate_id=submission.state.candidate.candidate_id,
+                doi=submission.state.candidate.doi,
+                abstract=submission.state.candidate.abstract,
+                official_url=(
+                    submission.state.candidate.links.landing_url
+                    or submission.state.candidate.links.open_access_url
+                ),
+                citation=submission.state.candidate.citation,
+            ),
             fulltext_result=submission.state.result,
         )
     except CandidateFulltextError as exc:
@@ -304,5 +265,3 @@ async def admit_candidate_fulltext(
         raise _search_run_error_response(exc) from exc
     except CollectionAdmissionError as exc:
         raise _admission_error_response(exc) from exc
-    finally:
-        await redis.aclose()

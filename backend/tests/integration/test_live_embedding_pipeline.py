@@ -9,10 +9,10 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
-from app.modules.ingestion.contracts import EmbeddedVectorChunk, VectorChunk
-from app.modules.ingestion.embedding import OpenAICompatibleTextEmbedder
-from app.modules.ingestion.milvus import MilvusDocumentChunkIndex
-from app.modules.ingestion.settings import IngestionSettings, get_ingestion_settings
+from app.core.ingestion_settings import IngestionSettings, get_ingestion_settings
+from app.infra.llm.embeddings import OpenAICompatibleTextEmbedder
+from app.infra.milvus.document_chunks import MilvusDocumentChunkIndex
+from app.modules.rag.ingestion.contracts import EmbeddedVectorChunk, VectorChunk
 from pymilvus import MilvusClient
 
 _LIVE_TEST_ENVIRONMENT_FLAG = "RUN_LIVE_EMBEDDING_TESTS"

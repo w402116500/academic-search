@@ -6,32 +6,12 @@ import html
 import re
 import unicodedata
 from dataclasses import dataclass
-from urllib.parse import unquote
 
+from app.modules.literature.normalization import normalize_document_type, normalize_doi
 from app.modules.search.contracts import CandidateAuthor, CandidateLanguage, RawCandidate
 
-_DOI_PREFIX_PATTERN = re.compile(r"^(?:doi\s*:\s*|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
-_DOI_TRAILING_PUNCTUATION = ".,;:"
 _NON_WORD_PATTERN = re.compile(r"[^\w]+", re.UNICODE)
 _WHITESPACE_PATTERN = re.compile(r"\s+", re.UNICODE)
-_DOCUMENT_TYPE_ALIASES = {
-    "article": "journal_article",
-    "journalarticle": "journal_article",
-    "proceedingsarticle": "conference_paper",
-    "conferencepaper": "conference_paper",
-    "book": "book",
-    "bookchapter": "book_chapter",
-    "preprint": "preprint",
-    "postedcontent": "posted_content",
-    "dataset": "dataset",
-    "dissertation": "dissertation",
-    "editorial": "editorial",
-    "correction": "correction",
-    "grant": "grant",
-    "peerreview": "peer_review",
-    "referenceentry": "reference_entry",
-    "retraction": "retraction",
-}
 _CHINESE_CHARACTER_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _LATIN_CHARACTER_PATTERN = re.compile(r"[A-Za-z]")
 _CHINESE_LANGUAGE_ALIASES = frozenset({"zh", "zh-cn", "zh-hans", "chi", "zho", "chinese"})
@@ -62,17 +42,6 @@ def normalize_optional_text(value: str | None) -> str | None:
 
     normalized = normalize_text(value)
     return normalized or None
-
-
-def normalize_document_type(value: str | None) -> str | None:
-    """将各来源不同的文献类型名称归一为稳定内部枚举值。"""
-    normalized = normalize_optional_text(value)
-
-    if normalized is None:
-        return None
-
-    key = _NON_WORD_PATTERN.sub("", normalized.casefold())
-    return _DOCUMENT_TYPE_ALIASES.get(key, "other")
 
 
 def normalize_candidate_language(value: CandidateLanguage | str | None) -> CandidateLanguage | None:
@@ -157,31 +126,6 @@ def normalize_raw_candidate(candidate: RawCandidate) -> RawCandidate:
             "fulltext_url": normalize_optional_text(candidate.fulltext_url),
         }
     )
-
-
-def normalize_doi(value: str | None) -> str | None:
-    """规范化 DOI 的常见前缀、URL 编码和大小写，返回可用于精确去重的键。"""
-    if value is None:
-        return None
-
-    normalized = unicodedata.normalize("NFKC", value).strip()
-
-    # 用户或来源可能同时给出 ``doi: https://doi.org/...``，因此要重复移除前缀。
-    while True:
-        without_prefix = _DOI_PREFIX_PATTERN.sub("", normalized).strip()
-
-        if without_prefix == normalized:
-            break
-
-        normalized = without_prefix
-
-    normalized = unquote(normalized).strip().rstrip(_DOI_TRAILING_PUNCTUATION).casefold()
-
-    # DOI 必须具有注册机构前缀和斜杠；不符合该形态的数据保留在原记录但不参与 DOI 去重。
-    if not re.match(r"^10\.\d{4,9}/\S+$", normalized):
-        return None
-
-    return normalized
 
 
 def normalize_title_key(value: str) -> str:

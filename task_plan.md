@@ -6,11 +6,11 @@
 
 ## Current Phase
 
-全部计划阶段已完成
+Phase 39 进行中：最终验证与文档收口
 
 ## Current Objective
 
-相关性 Agent 现以完整候选集合和完整摘要一次进入共享上下文；候选数量与摘要长度均不再触发截断、容量失败或串行分批。
+以当前工作树为基线完成全栈架构整改：先固化 AGENT 规则与静态边界，再消除后端依赖环、归位 Infra/RAG/Agent、拆分前端 feature 并接入 OpenAPI 生成类型；保持现有 HTTP/SSE、数据库、Redis 和队列契约兼容。
 
 ## Phases
 
@@ -429,6 +429,81 @@ Phase 24 notes: 本地执行策略拒绝 `Stop-Process` 与 `Start-Process`，�
 - [x] 执行最终差异和质量检查，并创建一个完整的本地 Git 提交。
 - **Status:** complete
 
+### Phase 30: 候选相关性正向纳入与自动恢复
+
+- [x] 将相关性候选状态、统计和最终运行状态调整为“已纳入 / 已排除”的内部语义。
+- [x] 将完整集合技术失败改为一次无感自动重投；第二次失败安全排除并记录服务端诊断。
+- [x] 让候选分页、详情与选择仅返回通过校验的 `core`、`related`、`background` 候选，并清理旧选择。
+- [x] 删除公开 relevance retry/cancel API、前端控制入口与相关提示。
+- [x] 更新进度文案并完成后端、前端和真实浏览器验收。
+- **Status:** complete
+
+### Phase 31: 完整开发环境重启
+
+- [x] 精确停止前端、受控 API 与四类 ARQ Worker 进程树，保留未知服务与数据卷。
+- [x] 完整重启 Docker Compose 基础设施，不删除卷或业务数据。
+- [x] 从当前工作区重新启动 API、四类 Worker 与前端，并确认配置指向 `8002`。
+- [x] 验证基础设施健康、前后端连通性、CORS、Worker 加载和 OpenAPI 路由。
+- **Status:** complete
+
+### Phase 32: 75 条候选全部排除的运行审计
+
+- [x] 读取指定运行的持久化审计、Redis 快照、相关性统计与任务日志。
+- [x] 区分模型负向判断、证据核验排除、技术失败安全排除与快照合并异常。
+- [x] 向用户报告本次全部排除的实际触发原因，不修改运行数据或业务实现。
+- **Status:** complete
+
+### Phase 33: 真实模型输出无效深度诊断
+
+- [x] 审计当前模型配置、请求构造、流式收集与集合校验边界。
+- [x] 在不写 Redis、数据库或模型原文的前提下，复用该运行的有摘要候选执行一次真实流式探针。
+- [x] 记录流活动、JSON、schema、候选 ID、逐字证据和独立核验的安全诊断，并定位实际失败环节。
+- [x] 向用户报告根因与可行的修正方向，本阶段不直接修改业务实现。
+- **Status:** complete
+
+### Phase 34: 架构规则与静态守门线
+
+- [x] 将模块所有权、允许依赖方向、composition root、前端分层和 1000 行上限写入 `AGENT.md`。
+- [x] 新增 ADR，记录后端模块、Infra、API、Worker、RAG/Agent 与前端职责。
+- [x] 增加依赖方向与文件重量检查入口，现有超限文件仅锁定不得增长；OpenAPI 漂移检查随 Phase 37 的生成契约接入。
+- [x] 将检查接入现有 CI，不新增重复业务测试作业。
+- **Status:** complete
+
+### Phase 35: 后端依赖反转与装配边界
+
+- [x] 将状态、队列、Session/Event Store 端口归还真实业务所有者。
+- [x] 将 Redis/arq、数据库、对象存储、Milvus、Reranker、LLM 与 checkpoint 实现迁入 `infra`。
+- [x] 使用具名 `api/deps` 和 Worker composition root 装配依赖，消除 `modules -> workers` 与业务模块双向依赖。
+- **Status:** complete
+
+### Phase 36: 业务模块、RAG 与 Agent 归位
+
+- [x] 将 workspace/plan/conversation、search run/relevance/review、literature、documents 职责迁入目标模块。
+- [x] 将候选审核拆为共享 `CandidateReviewSession` 与具名 Query、Selection、Preparation、Admission 用例；Router/DI 显式注入具体所有者，删除旧聚合 `review_service.py`。
+- [x] 将 ingestion/retrieval/evidence 迁入 `modules/rag`，将 LangGraph 状态、图和节点迁入 `modules/agents`。
+- [x] 删除被替代的 `workflow`、`fulltext` 和顶层 `ingestion` 实现，不保留第二套事实来源。
+- **Status:** complete
+
+### Phase 37: OpenAPI 单一类型契约
+
+- [x] 从 FastAPI 确定性导出 OpenAPI，并使用 `openapi-typescript` 生成前端 schema。
+- [x] 将手写 DTO 替换为生成类型或纯重导出，增加 `api:generate` 与 `api:check`。
+- **Status:** complete
+
+### Phase 38: 前端 Feature 分层
+
+- [x] 按 auth/search/literature/research 建立 Query hooks、query keys、feature composable 与组件。
+- [x] 将 Query、Mutation、轮询、SSE 和业务格式化移出路由级 views。
+- [x] 拆分全局 CSS，保留 token/reset，并保持现有用户流程和刷新恢复语义。
+- **Status:** complete
+
+### Phase 39: 最终验证与文档收口
+
+- [x] 运行依赖、文件重量、OpenAPI、Compose 静态检查。
+- [x] 运行一次完整后端门禁和一次完整前端门禁，不运行 `RUN_LIVE_*`。
+- [x] 同步产品目录说明、开发命令、findings 与 progress，并完成最终差异审计。
+- **Status:** complete
+
 ## 2026-08-02 实施对齐
 
 已落地并待真实验收的后端实现：`c3e7a1b9d426` 迁移、研究会话 API、受限混合检索、LangGraph、ARQ 研究 Worker、Redis Stream 和 PostgreSQL checkpoint。Phase 8.1 至 8.4 的代码和离线测试均已完成；本轮以 Phase 8.5 和 Phase 9 的真实验收及前端接入为执行范围。
@@ -522,6 +597,10 @@ Phase 24 notes: 本地执行策略拒绝 `Stop-Process` 与 `Start-Process`，�
 | Phase 12 发布前 Ruff 检查失败                                     | 1       | 新增真实专项测试保留了未使用的 `AsyncSession` 导入，并有一行超过 100 字符；已删除导入并换行，待重新执行静态检查。                                                     |
 | 发布前审计脚本首次未输出结果                                      | 1       | PowerShell 中含引号的密钥正则表达式转义失败；改为无引号的固定密钥前缀模式后，已完成差异、`.env` 跟踪和密钥扫描。                                                      |
 | P0 差异审计的空匹配处理失败                                       | 1       | PowerShell 不支持 Bash 风格的 `|| exit 0`；改为检查 `$LASTEXITCODE` 并输出无匹配结果后完成审计。                                                                    |
+| `rg` 把文件通配符写入 Windows 目录路径                            | 2       | `workspace*` 与 `plan_*` 均会触发路径语法错误；后续固定扫描目录，任何文件筛选只使用 `-g`。                                                                          |
+| PowerShell `foreach` 结果直接接排序管道                           | 1       | 解析器报告空管道元素；改为先把循环结果赋给数组，再将数组传给 `Sort-Object`。                                                                                       |
+| 计划领域测试夹具缺少 `selected_direction_id`                     | 1       | focused test 的 3 个失败同源于 `ResearchPlanRecord` 构造参数缺失；补 `None` 后重跑同一测试文件。                                                                    |
+| 计划确认测试仍断言旧 ORM 对象原地变更                            | 1       | 不可变领域快照返回新值；把状态和 query plan 断言改到 `confirmed` 返回值，保留幂等断言。                                                                             |
 
 ## Notes
 

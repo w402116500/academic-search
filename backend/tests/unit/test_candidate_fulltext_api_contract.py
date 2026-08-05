@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from app.api.routers.candidate_fulltext import _fulltext_error_response, _search_run_error_response
 from app.main import app
-from app.modules.workflow.contracts import (
+from app.modules.documents.api_contracts import (
     CandidateFulltextError,
     CandidateFulltextErrorCode,
+)
+from app.modules.search.api_contracts import (
     SearchRunError,
     SearchRunErrorCode,
 )

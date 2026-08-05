@@ -8,18 +8,18 @@ from typing import cast
 from uuid import UUID
 
 import pytest
-from app.db.models.collection import CollectionPaper, ResearchCollection
-from app.db.models.document import Document, IngestionRun
-from app.db.models.paper import Paper
-from app.modules.collections.build_contracts import (
+from app.core.ingestion_settings import IngestionSettings
+from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.document import Document, IngestionRun
+from app.infra.db.models.paper import Paper
+from app.infra.db.repositories.collection_builds import SqlAlchemyCollectionBuildAdapter
+from app.modules.rag.ingestion.queue import IngestionQueueError
+from app.modules.research.build_contracts import (
     CollectionBuildError,
     CollectionBuildErrorCode,
     IngestionRunStatus,
 )
-from app.modules.collections.build_service import ResearchCollectionBuildService
-from app.modules.ingestion.job_queue import IngestionQueueError
-from app.modules.ingestion.settings import IngestionSettings
-from app.modules.workflow.state import WorkspaceWorkflowStage
+from app.modules.research.state import WorkspaceWorkflowStage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000000701")
@@ -173,7 +173,7 @@ async def test_build_promotes_all_pending_runs_before_dispatching_workers() -> N
     )
     queue = FakeQueue()
 
-    result = await ResearchCollectionBuildService(
+    result = await SqlAlchemyCollectionBuildAdapter(
         cast(AsyncSession, session), queue, settings=_ingestion_settings()
     ).build(
         owner_user_id=_OWNER_ID,
@@ -199,7 +199,7 @@ async def test_build_marks_only_the_unavailable_queue_run_as_failed() -> None:
         execute_values=[[(IngestionRunStatus.FAILED.value, False)]],
     )
 
-    result = await ResearchCollectionBuildService(
+    result = await SqlAlchemyCollectionBuildAdapter(
         cast(AsyncSession, session), FakeQueue(fail=True), settings=_ingestion_settings()
     ).build(owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID)
 
@@ -225,7 +225,7 @@ async def test_retry_creates_new_queued_run_without_overwriting_failure() -> Non
     )
     queue = FakeQueue()
 
-    result = await ResearchCollectionBuildService(
+    result = await SqlAlchemyCollectionBuildAdapter(
         cast(AsyncSession, session), queue, settings=_ingestion_settings()
     ).retry_run(
         owner_user_id=_OWNER_ID,
@@ -255,7 +255,7 @@ async def test_build_rejects_a_batch_that_exceeds_the_user_daily_submission_limi
     )
 
     with pytest.raises(CollectionBuildError) as error:
-        await ResearchCollectionBuildService(
+        await SqlAlchemyCollectionBuildAdapter(
             cast(AsyncSession, session),
             FakeQueue(),
             settings=_ingestion_settings(user_limit=1),
@@ -279,7 +279,7 @@ async def test_retry_rejects_the_global_daily_submission_limit_before_creating_a
     )
 
     with pytest.raises(CollectionBuildError) as error:
-        await ResearchCollectionBuildService(
+        await SqlAlchemyCollectionBuildAdapter(
             cast(AsyncSession, session),
             FakeQueue(),
             settings=_ingestion_settings(global_limit=1),
@@ -307,7 +307,7 @@ async def test_remove_pending_document_archives_metadata_without_deleting_file()
         execute_values=[[FakeRow((collection_paper, document))]],
     )
 
-    result = await ResearchCollectionBuildService(
+    result = await SqlAlchemyCollectionBuildAdapter(
         cast(AsyncSession, session)
     ).remove_pending_document(
         owner_user_id=_OWNER_ID,
@@ -344,7 +344,7 @@ async def test_list_documents_counts_only_current_completed_runs_as_researchable
         execute_values=[[FakeRow((collection_paper, paper, document, run))]],
     )
 
-    response = await ResearchCollectionBuildService(cast(AsyncSession, session)).list_documents(
+    response = await SqlAlchemyCollectionBuildAdapter(cast(AsyncSession, session)).list_documents(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
     )

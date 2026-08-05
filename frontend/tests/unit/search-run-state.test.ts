@@ -12,7 +12,7 @@ import {
   searchRunCandidateCount,
   searchRunRelevanceProgress,
   shouldRestoreCurrentSearchRun,
-} from "@/features/research/search-run-state";
+} from "@/features/search/search-run-state";
 
 function createCandidate(citationStatus: NonNullable<Candidate["citation"]>["status"]): Candidate {
   return {
@@ -29,7 +29,14 @@ function createCandidate(citationStatus: NonNullable<Candidate["citation"]>["sta
     links: { landing_url: null, open_access_url: null, fulltext_url: null },
     is_open_access: true,
     triage: null,
-    citation: { status: citationStatus, doi: "10.1000/example", url: null },
+    citation: {
+      status: citationStatus,
+      title: "Example paper",
+      authors: [],
+      missing_fields: [],
+      doi: "10.1000/example",
+      url: null,
+    },
   };
 }
 
@@ -60,11 +67,11 @@ describe("检索与全文状态", () => {
     expect(
       searchRunRelevanceProgress({
         relevance_total_count: 50,
-        relevance_completed_count: 18,
-        relevance_failed_count: 2,
+        relevance_analyzed_count: 18,
+        relevance_excluded_count: 2,
       }),
-    ).toEqual({ total: 50, completed: 18, failed: 2 });
-    expect(searchRunRelevanceProgress({})).toEqual({ total: 0, completed: 0, failed: 0 });
+    ).toEqual({ total: 50, analyzed: 18, excluded: 2 });
+    expect(searchRunRelevanceProgress({})).toEqual({ total: 0, analyzed: 0, excluded: 0 });
   });
 
   it("首次事件未到达时也会提示检索进度静默", () => {

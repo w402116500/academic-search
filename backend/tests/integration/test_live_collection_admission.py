@@ -15,28 +15,30 @@ from io import BytesIO
 from uuid import UUID, uuid4
 
 import pytest
-from app.db.models.collection import CollectionPaper, ResearchCollection
-from app.db.models.document import Document, IngestionRun
-from app.db.models.paper import Paper
-from app.db.models.user import User
-from app.db.session import async_session_factory
-from app.modules.collections import CollectionAdmissionStatus, ResearchCollectionAdmissionService
-from app.modules.fulltext import Boto3StagingObjectStorage, get_fulltext_acquisition_settings
-from app.modules.fulltext.contracts import (
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
+from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.document import Document, IngestionRun
+from app.infra.db.models.paper import Paper
+from app.infra.db.models.user import User
+from app.infra.db.repositories.literature_admission import (
+    SqlAlchemyLiteratureAdmissionAdapter,
+)
+from app.infra.db.session import async_session_factory
+from app.infra.storage.documents import Boto3StagingObjectStorage
+from app.modules.documents.contracts import (
     AcquiredFulltext,
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
 )
-from app.modules.search.contracts import (
-    CandidateAuthor,
-    CandidateLinks,
+from app.modules.literature.admission import (
+    CollectionAdmissionStatus,
+    LiteratureAdmissionCandidate,
+)
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
-    RawCandidate,
-    SourceName,
-    UnifiedCandidate,
 )
 from botocore.exceptions import ClientError
 
@@ -49,9 +51,8 @@ def _live_test_is_enabled() -> bool:
     return os.getenv(_LIVE_TEST_ENVIRONMENT_FLAG) == "1"
 
 
-def _candidate(candidate_id: UUID, doi: str) -> UnifiedCandidate:
-    """构造已通过 DOI 题录核验、可被准入服务接受的候选。"""
-    author = CandidateAuthor(name="Ada Lovelace")
+def _candidate(candidate_id: UUID, doi: str) -> LiteratureAdmissionCandidate:
+    """构造已通过 DOI 题录核验的最小准入命令。"""
     citation = CitationMetadata(
         status=CitationMetadataStatus.READY,
         authors=(CitationAuthor(given="Ada", family="Lovelace"),),
@@ -66,24 +67,11 @@ def _candidate(candidate_id: UUID, doi: str) -> UnifiedCandidate:
         field_provenance={"doi": "doi_content_negotiation"},
     )
 
-    return UnifiedCandidate(
+    return LiteratureAdmissionCandidate(
         candidate_id=candidate_id,
         doi=doi,
-        title=citation.title,
-        title_key="local collection admission integration test",
-        authors=(author,),
         abstract="A local integration-test record; it is not a real publication.",
-        links=CandidateLinks(landing_url=f"https://doi.org/{doi}"),
-        is_open_access=True,
-        source_records=(
-            RawCandidate(
-                source=SourceName.OPENALEX,
-                source_record_id=f"local-{candidate_id}",
-                title=citation.title,
-                authors=(author,),
-                doi=doi,
-            ),
-        ),
+        official_url=f"https://doi.org/{doi}",
         citation=citation,
     )
 
@@ -129,7 +117,7 @@ async def test_live_admission_promotes_object_and_persists_research_records() ->
                     )
                 )
 
-            result = await ResearchCollectionAdmissionService(session, storage).admit(
+            result = await SqlAlchemyLiteratureAdmissionAdapter(session, storage).admit(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
                 candidate=_candidate(candidate_id, doi),

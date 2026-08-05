@@ -1,5 +1,11 @@
 # Progress Log
 
+## Session: 2026-08-04 候选相关性正向纳入与自动恢复
+
+- 已复核上轮流式相关性实现、真实运行审计和当前工作区；本轮从干净工作树开始，基线提交为 `2cf77c0`。
+- 已确认产品边界：`core`、`related`、`background` 进入文献筛选；技术故障在 Worker 内最多自动重投一次；公开 retry/cancel 接口与页面控制全部移除。
+- 当前进入 Phase 30 实施：先调整后端状态、计数和候选可见性，再收口前端与 API，最后执行定向和真实浏览器验收。
+
 ## Session: 2026-08-02 RAG 研究会话完整实施
 
 - 恢复并审计 RAG 后端、前端 API 客户端和规划文件。确认后端代码、迁移和两组离线单测已经存在；计划文件此前未反映实际完成状态，已新增实施对齐清单。
@@ -781,3 +787,192 @@
 - 用户请求重启项目。已精确停止前端 `5173`、API `8002` 和 workflow/relevance/ingestion/research 四类 Worker 的可归属进程树，未停止健康的 PostgreSQL、Redis、Milvus、MinIO 或 etcd 容器。所有应用进程在 2026-08-04 19:06:02 以当前源码启动；`5173`、`8002/healthz` 和 `5173 -> 8002` CORS 均返回 200，workflow 与 relevance 日志确认各自任务配置已加载。Phase 27 完成。
 - 用户询问新运行 `2ba55e7f-05b9-4533-bbb0-f64aa6c892ce` 为何仍有 1 条需要重试。审计确认新链路已执行约 170 秒并完成 49/50；唯一失败为 `candidate_relevance_claim_unsupported`，独立核验拒绝模型的 `helpful_aspect` 超出该论文标题/摘要可见证据。未修改候选、未放宽核验规则、未重投任务。Phase 28 完成。
 - 用户请求提交本轮工作区。审计得到 97 个项目文件（源码、两条迁移、测试、文档和规划记录），无已有暂存；根目录 `.vite/` 是唯一未跟踪生成物，已写入 `.gitignore`。`git diff --cached --check` 通过，暂存差异的字面量密钥扫描无命中；已创建“完善研究工作流与候选审核”本地提交，并通过仓库 pre-commit 的 merge conflict、文件结尾、空白字符、Ruff、Ruff format 与 Prettier 检查。
+# 2026-08-04 — Phase 30 正向纳入与无用户重试续接
+
+- 已恢复当前实现上下文：工作区基线为提交 `2cf77c0`，存在 Phase 30 未提交源码、前端、测试与规划改动；`.codegraph/` 不存在，因此后续按常规源码导航。
+- 当前已落地候选 `excluded` 内部终态、正向筛选谓词、运行级统计与前端重试/取消入口移除的主体；测试仍有旧的失败/重试与全候选可见性断言，下一步先完成服务端接口清理和回归覆盖，再执行前端与真实链路验收。
+- 已删除旧的公开运行级相关性重试/取消服务、SearchRun 重开/取消方法和 Redis 取消标记；流式收集、评估器与独立核验器不再接收取消回调。执行器自身保留候选快照反序列化与统计，自动两次完整集合尝试保持不变。
+- 已同步 OpenAPI 契约测试、前端相关性状态和进度统计字段；候选审核测试正在切换为仅正向已核验候选可见。检索 Worker 的 relevance 队列投递兜底现按 Provider 结果决定运行最终状态，相关性任务不可用仅安全排除候选并保留服务端诊断语义。
+- 定向后端验证通过：Ruff 与相关单元/API 契约测试共 `31 passed`。新增覆盖首轮技术失败只投递 attempt 2、旧 attempt 被忽略、第二次失败安全排除 pending、`background` 进入题录预取；审核服务测试改为只返回 `core`/`related`/`background`，隐藏项详情和选择均返回不存在。
+- 已清理正式开发文档中遗留的公开相关性重试说明，并让首个 relevance 快照显式记录 `relevance_attempt_no=1`；后续自动恢复的 attempt 2 继续由 Redis 字段级合并写入，旧任务不会覆盖新尝试。
+- 全量 Pyright 首次仅报告新增 Worker 测试的 `FakeWorkflowService` 未被视为 `SearchRunService`；已用测试边界的显式类型收窄修正，不更改生产代码。
+- 后端全量质量门禁已通过：Ruff、Pyright `0 errors`、Alembic check 与 `190 passed, 15 skipped`。前端已确认使用 Node `20.19.6` / pnpm `10.34.5`；首次 Prettier 仅报告 `ResultsView.vue` 格式，已按仓库格式化规则修正，尚未执行前端其余门禁。
+- 前端格式、ESLint、Vue 类型检查、单元测试 `19 passed` 与生产构建已通过。隔离 Playwright E2E 首轮为 `10 passed, 1 failed`：完成态页面把缺少新 `screening_candidate_count` 的历史快照显示为 0；下一步以旧 `candidate_count`/`included_candidate_count` 兼容回退修正后重跑，不能把它误判为相关性筛选结果为空。
+- 已在 `5175` 隔离 Vite 和 mock API 基址下重跑 Playwright：`11 passed`。`searchRunScreeningCandidateCount()` 现在仅在新统计不存在时回退旧候选数，避免历史运行错误显示 0 篇；新运行仍只展示已核验正向纳入计数。
+- 应用进程树首次重启后，Vite `5173` 已恢复，但 API/Worker 的嵌套 `cmd` 未保留 `backend` 工作目录，启动日志为 `ModuleNotFoundError: No module named 'app'`。不重试同一启动方式；改为以各自明确工作目录启动可执行文件并重新验证。
+- 受控 API 与四类 Worker 已以当前源码恢复；`8002/healthz`、`5173 -> 8002` CORS 均为 200，当前 OpenAPI 不含任何 `/relevance/` 路由。真实 Playwright CLI 隔离会话已打开登录页；后续 `snapshot` 在本机 CLI 会话超时，改从首个打开生成的快照文件或项目 Playwright 浏览器路径继续，不重复同一超时命令。
+- 在新的 Playwright Chromium 隔离会话中已确认登录页并产出截图；首次注册后 30 秒未跳回入口，尚未提交研究请求。优先诊断重启后的 Vite API 基址和 API 日志，不重复注册提交或接触用户既有会话。
+- 已恢复并复核 Phase 30 计划、发现与进度记录；当前实现和离线质量门禁保持前次通过状态。注册接口契约确认仅要求有效邮箱、至少 12 位密码和非空显示名称；下一步从隔离浏览器的实际响应定位此前 `422`，然后完成不使用用户会话的真实检索验收。
+- 本机直接调用 `E:\nodejs\corepack.cmd pnpm --version` 因 Corepack 包装器动态导入错误退出；不影响 Node `20.19.6`、`npx`、受控 API、前端或 Workers，后续仍使用仓库既有可工作的 Node/Pnpm 调度路径。
+- 新隔离浏览器真实提交注册后仍停留在注册页，网络确认 `POST 8002/api/v1/auth/register -> 422`。响应精确说明 `example.test` 是保留邮箱域；此诊断不涉及相关性链路。将改用普通格式隔离地址重复同一次浏览器验收，不修改代码。
+- 改用普通格式隔离邮箱后注册成功，未接触用户已有账户或工作区。真实页面提交“我想研究睡眠质量与心理健康之间的关系。”、确认模型生成的默认计划，并创建运行 `38f361a2-fad4-43c4-87c2-bc6373599b2c`。运行超过旧 `45` 秒阈值后仍在同一轮相关性分析，页面展示正向纳入进度 `18 / 50`、安全排除 `18`，未出现相关性重试/取消/失败/证据不足入口；继续等待完成态并核验最终可见候选。
+- 真实 relevance Worker 在 `188.67s` 后正常完成。运行 `38f361a2-fad4-43c4-87c2-bc6373599b2c` 最终为 `partial_failed/completed`，原因仅是 OpenAlex 单源超时（`provider_partial_failed`），不是相关性技术失败；完整相关性结果为已分析 `50`、安全排除 `23`、正向筛选 `27`。页面进入结果后，服务端候选分页真实返回 `27` 条且检查器只展示经证据校验的正向理由；网络中无 `/relevance/` 请求，截图写入 `output/playwright/phase30-live-positive-screening.png`。
+- 一次尝试点击旧快照 ref 被 Playwright 拒绝；立即重新获取当前快照后继续，无服务端操作或候选状态改动。下一步执行最终质量门禁、差异审计并完成 Phase 30 规划状态。
+- 最终门禁首轮中，直接执行 `.venv\\Scripts\\pyright.exe` 未继承项目解释器环境，误报 `fastapi`、`sqlalchemy` 等全部依赖缺失（208 errors）。这不是源代码类型回归；改用仓库既有的 `uv run pyright` 入口重跑，并以同一环境执行其他后端门禁，不重复该错误命令。
+- 最终质量门禁已通过：`uv run ruff check app tests`、`uv run pyright`（`0 errors`）、`uv run alembic check`、`uv run pytest -q`（`190 passed, 15 skipped`）；前端锁定 Node `20.19.6` / pnpm `10.34.5` 下格式、Lint、类型、单元（`19 passed`）和构建均通过。
+- 首次全量 Playwright E2E 为 `3 passed, 8 failed`。失败共性是测试复用了正在运行且指向真实 API `8002` 的 `5173`，而测试 mock 拦截器按 `8000` 请求匹配，造成虚拟接口不命中；不是本轮正向筛选逻辑回归。将按此前通过的隔离 Vite `5175 + VITE_API_BASE_URL=8000` 重跑，不改变生产 API 配置。
+- OpenAPI 已确认无公开 `/relevance/` 路由。源码扫描仅命中“旧字段应被移除”的清理逻辑及 E2E 的反向断言，不存在实际用户相关性重试/取消入口。
+- 已读取 Playwright 配置和测试路由，确认默认端口 `5173` 会复用现有 Vite，而所有 mock 明确匹配 `http://127.0.0.1:8000/api/v1/**`。下一步显式使用 `PLAYWRIGHT_VITE_PORT=5175` 与 `VITE_API_BASE_URL=8000` 重跑全量 E2E；隔离服务不会影响现有真实浏览器和 API。
+- 隔离 E2E 已在 Node `20.19.6`、pnpm `10.34.5`、`PLAYWRIGHT_VITE_PORT=5175`、`VITE_API_BASE_URL=8000` 环境下通过：`11 passed`。这证实了首次失败为测试服务复用真实 `5173` 的环境串线，而非产品回归。
+- 已将真实浏览器截图和 MCP 快照移动到已忽略的 `output/playwright/`，避免生成物出现在 Git 工作区根目录。递归删除和逐项删除被本机策略拒绝，因此采用非破坏性移动，不再重复被拒绝的清理命令。
+- 已精确清理本轮隔离账户及其一条工作区、搜索运行和 Redis 会话；清理前只读核对为 `1` 个临时用户、`1` 个工作区、`1` 个搜索运行，清理后用户计数为 `0`。Phase 30 完成。
+
+# 2026-08-04 — Phase 31 完整开发环境重启
+
+- 已核对受控进程归属：前端 `5173`、API `8002` 与 workflow/relevance/ingestion/research 四类 ARQ Worker 均从当前工作区启动；`8000` 为未归属的既有服务，本次明确保留。下一步停止受控应用进程、重启 Compose 基础设施并从当前源码恢复全部服务。
+- Compose 基础设施已通过 `down` 后 `up -d` 重建，未删除任何卷。首次停止进程脚本误用 PowerShell 内置只读变量 `$PID` 作为循环变量，进程未被停止；后续改用 `$processId`，不重复该命令形式。
+- 受控进程已在第二次尝试中全部停止，Compose 五项服务均已健康。PowerShell 的 `Start-Process` 启动脚本被本机执行策略拒绝，未拉起任何应用进程；改用带明确工作目录的 `cmd start /b` 启动，不重复被拒绝的方式。
+- 已通过 `cmd start /b` 从明确工作目录启动 API、workflow/relevance/ingestion/research 四类 Worker 与 Vite。`8002/healthz`、`5173` 和 `5173 -> 8002` CORS 预检均为 `200`；Compose 的 PostgreSQL、Redis、etcd、Milvus、MinIO 均为 healthy。Worker 日志确认加载 `run_search`、`run_candidate_relevance`、`ingest_document` 与 `run_research`；Vite 实际注入 `VITE_API_BASE_URL=http://127.0.0.1:8002`，OpenAPI 无公开 `/relevance/` 路由。Phase 31 完成。
+
+# 2026-08-04 — Phase 32 75 条候选全部排除运行审计
+
+- 用户报告运行 `69e719f4-b3a2-4c56-aff1-6d7cd4a8b968` 的候选全部被排除。开始只读审计 Provider、Redis 快照、相关性统计、数据库事件和 Worker 日志；本阶段不修改运行数据、候选状态或业务代码。
+- 已确认三路 Provider 均完成并规整出 75 条候选，没有基础初筛排除。事件流显示其中 20 条先因缺少摘要被确定性排除；relevance Worker 对完整有摘要集合先后执行 attempt 1（175.11 秒）和自动 attempt 2（184.51 秒），两次都记录 `candidate_relevance_output_invalid`。第二次技术失败后，安全排除兜底使 Redis 统计变为 `relevance_analyzed_count=75`、`relevance_excluded_count=75`、`screening_candidate_count=0`；这不是 75 条模型负向结论。下一步核实无效输出的具体校验分支与实际输出预算，继续保持只读。
+- 已确认模型实际处理的是 55 条有摘要候选，当前第一阶段输出预算为 `55 × 700 = 38,500` tokens；20 条无摘要候选没有进入模型调用。`candidate_relevance_output_invalid` 覆盖流未形成完整 JSON、JSON 不满足 schema，或未为完整候选集合返回恰好一次且可由标题/摘要核对的记录。原始流只在内存中累积、验证成功前不写 Redis/SSE/日志，因此事后无法精确区分截断、格式损坏或候选 ID 缺失；可排除 Provider、超时、模型负向判断、独立主张拒绝和快照合并异常。Phase 32 完成。
+
+# 2026-08-04 — Phase 33 真实模型输出无效深度诊断
+
+- 用户要求深入定位 `candidate_relevance_output_invalid`。将以本次 55 篇有摘要候选发起一次不写 Redis、数据库、SSE 或模型原文的真实流式探针，仅保留结构化安全诊断，定位失败位于流收集、JSON、schema、候选完整性、逐字证据还是独立核验。
+- 真实同构探针已完成，未写入任何业务资源或模型正文。当前 `deepseek-v4-flash` 在 `172.094s` 内持续返回 27,350 个流块（最大相邻间隔 `0.703s`），以 `finish_reason=stop` 正常结束；输出 29,975 字符、27,345 completion tokens，低于请求预算 38,500。JSON、Pydantic schema、55 个候选 ID 的完整性和唯一性全部通过；仅 1 条逐字 evidence 引文无法在同一候选的标题/摘要中精确匹配，故 `_validate_batch()` 得到 54 条有效、1 条错误。当前 `assess()` 对任一 `errors` 直接抛出整批 `candidate_relevance_output_invalid`，执行器因此重跑整批并在第二次后安全排除全部尚未可靠判断的候选。根因是“单候选证据不匹配被错误升级为整批技术失败”，不是超时、输出截断、JSON/schema/ID 缺失、Provider 或快照合并问题。Phase 33 完成。
+# 2026-08-05 — Phase 34 架构规则与静态守门线
+
+- 已恢复既有 Phase 1-33 规划、发现和进度记录；本次整改追加为 Phase 34-39，不覆盖历史计划。
+- 已确认仓库没有 `.codegraph/`，后续代码导航使用 `rg`；当前未提交工作树作为行为基线保留。
+- Phase 34 开始：先修改 `AGENT.md`、新增架构 ADR，并建立依赖、文件重量与 OpenAPI 的轻量检查入口。
+- Phase 34 完成：`AGENT.md` 已固化依赖方向、业务所有权、前端分层、测试纪律和 600/700/1000 文件重量规则；新增 ADR、Import Linter、源文件重量脚本和 CI 步骤。为让依赖图覆盖真实代码，补齐 `app/modules`、`app/api` 与 `app/infra` 的包标记。验证结果为 115 个模块/401 条依赖、2 个合同全部通过，文件重量脚本仅报告既有审查项，`git diff --check` 无错误；按规则未运行业务测试。OpenAPI 漂移检查随 Phase 37 的生成契约一起接入。
+- Phase 35 开始：优先迁移 Redis/arq 队列实现和 API 直连 Redis 装配，删除 Import Linter 临时例外，再处理数据库、存储、Milvus、Reranker、LLM 与 checkpoint 适配器。
+- Phase 35 队列/Redis 批次已完成机械迁移：arq 队列、Redis 连接、搜索会话与研究事件的具体实现已归入 `infra/redis`，业务所有者侧新增 Queue/Session/Event Protocol，生产代码旧路径导入已清零；`SearchRunExecutor` 的相关性队列改为强制显式注入，具名 `api/deps/services.py` 已接管多处 Router 装配。当前尚未格式化或验证，下一步同步测试导入与构造参数、收紧 Import Linter 例外后运行单个队列路由 focused test。
+- 已同步全部后端测试的 owner/adapter 导入，直接构造 Redis store 的测试改用 `RedisSearchSessionStore` / `RedisResearchEventStore`，队列路由测试统一 patch `app.infra.redis.job_queues.create_pool`；所有 `SearchRunExecutor` 调用点已显式提供相关性队列。Import Linter 已删除失效的 `modules -> workers` 与 Router 直连 Redis 例外，只对具名 `api/deps/services` 的四条 composition-root 适配器边放行。
+- 队列/Redis 批次首次 Ruff 检查失败：2 处 live test 仍调用旧事件 store 的 `stream_key` 静态方法，另有 60 个由新增第一方包标记触发的导入分组问题。修复方向是改用 owner 函数 `build_research_event_stream_key`，并仅用 Ruff 自动整理导入；不重复未修复的检查，也不改变业务行为。
+- 已改用 owner 事件 key 函数并由 Ruff 自动整理第一方导入；`uv run ruff check app tests` 通过。计划内唯一 focused test `tests/unit/test_worker_queue_routing.py` 通过（`1 passed`），workflow/fulltext/ingestion 适配器仍使用既有队列名与 job 参数。
+- 首次重量复查因 Ruff 将 `research/graph.py` 的第三方与第一方 import 分组而从 1041 增至 1042 行，检查按锁定基线拒绝。没有为凑行数压缩业务代码；临时基线校准为规范格式后的 1042，仍禁止继续增长，并将在 Phase 36 拆分后删除例外。Import Linter 因并行命令输出未完整返回，改为修正后单独执行。
+- Phase 35 队列/Redis 子批次完成：Import Linter 分析 `123 files / 403 dependencies`，2 个合同全部 kept；源文件重量检查通过（6 个既有职责审查项）；focused queue routing test 为 `1 passed`。未运行其他业务测试，下一批转向数据库具体实现与业务仓储端口审计。
+- 数据库边界审计完成：`app.db` 有 6 个 ORM model 文件与 session/base，至少 16 个业务服务直接依赖 `AsyncSession`。决定先按 owner 建仓储端口并迁移用例，最后再移动 SQLAlchemy 实现；不采用临时 `modules -> infra` 导入或旧路径兼容 shim。
+- 认证 owner 被选为首个仓储反转切片。一次文件读取误猜 `test_auth_service.py` 不存在，已通过 `rg --files` 定位真实文件 `test_authentication.py`，不再重复错误路径。实施边界为 `UserAccount` 领域值、`UserRepository` 端口、SQLAlchemy adapter 和具名 API 装配；认证 Router/依赖不再直接接收 session 或 ORM User。
+- 认证反转初版已写入；扫描发现多端点文件中仅首个重复 `Annotated[User, ...]` 被手工补丁命中，其余仍需统一替换。将执行一次精确字符串机械改写并复用现有 `test_authentication.py` 改为内存仓储，不新增同义测试。
+- 认证数据库反转切片完成：`UserAccount`、`UserRepository` 与 `SqlAlchemyUserRepository` 已落地，认证 Router 和 bearer 依赖通过具名工厂装配，不再接收 ORM User/原始 session；其余 Router 的当前用户类型统一为领域账号。局部 Ruff 通过，现有认证 focused test `5 passed`，Import Linter 为 `127 files / 412 dependencies`、2 contracts kept。局部 Ruff 首次仅有 1 个新增 import 排序问题，已由自动修复解决。
+- 恢复 Phase 35 工作区仓储批次：catch-up 和 `git diff --stat` 已核对，未验证代码保持原样。首次 `rg` 将 `workspace*` 放进 Windows 路径导致语法错误，已改用固定目录配合 `-g "workspace*.py"`，并记录到计划错误表。
+- 工作区切片遗漏扫描通过：生产代码只有具名 `api/deps` 构造服务，领域模块无数据库具体依赖，ORM 展示属性已移除。下一步对照修改前行为审查事务、游标、搜索和响应映射，再执行本批次局部 Ruff 与唯一 focused test。
+- 工作区仓储批次局部 Ruff 已通过（8 个相关文件，2 个由格式器规范化）；计划内唯一 focused test `tests/unit/test_workspace_service.py` 为 `6 passed in 0.57s`。未运行其他业务测试，下一步只执行 Import Linter 和源码重量静态检查后收口本批次。
+- 工作区仓储批次完成：Import Linter 为 `130 files / 421 dependencies`、2 contracts kept；源码重量策略通过并仍只报告 6 个既有审查项。没有运行额外业务测试，Phase 35 继续迁移下一组直接接收数据库会话的 owner 用例。
+- 下一批数据库审计定位到 16 个仍直接导入 ORM 的业务文件。首次 PowerShell 行数统计把 `foreach` 直接接管道导致解析错误，已记录并改用数组收集形式；未修改业务代码。
+- 已按文件重量和调用关系选择 `ResearchWorkflowService` 作为下一最小切片；它将改为依赖具名阶段仓储端口，SQLAlchemy adapter 保留 `FOR UPDATE`、所有权过滤、提交和刷新，focused test 复用 `test_workflow_contracts.py`。
+- 继续扫描后撤回上述切片顺序：`ResearchWorkflowService` 无生产调用，阶段事实仍由 plan/search/build 多处直接写 ORM。为解决冗余和虚假抽象，下一步审查真实 plan/search 写路径并建立 owner 级持久化 contract；未对该死服务实施无价值迁移。
+- 已完成计划写路径设计：新增不可变计划/工作区领域快照与 `ResearchPlanRepository`，SQL adapter 承担初始提交、新版本原子写入、`FOR UPDATE` 查询和上下文保存；服务继续拥有状态规则与 queue failure mapping。实现后只运行现有 `test_research_plan_service.py`。
+- 计划仓储反转主体已写入：新增 `plan_models.py`、`plan_repository.py` 与 `infra/db/repositories/research_plans.py`，API/Worker 改为显式 adapter 注入，`query_plan.py` 改依赖最小 Protocol，现有计划测试改用内存仓储。尚未格式化或验证，下一步先扫描旧 ORM/构造器残留。
+- 计划残留扫描再次把 `plan_*` 放入 Windows 路径，属于路径通配符错误的第 2 次；已将计划规则升级为固定目录配合 `-g`，后续不再使用任何含通配符的目录参数。
+- 计划 focused test 首轮为 `4 passed, 3 failed`；三个失败均来自 `_ready_plan()` 新领域记录缺少必填 `selected_direction_id`，服务路径尚未报错。将补齐测试夹具后只重跑同一文件。
+- 计划 focused test 第二轮为 `6 passed, 1 failed`；最后一项仍断言旧 ORM `plan` 被原地改为 confirmed。不可变快照的正确事实位于服务返回值，改正断言后进行同文件最后复验。
+- 计划仓储反转批次完成：focused test `7 passed in 1.21s`；局部 Ruff、局部 Pyright（0 errors）、Import Linter（`133 files / 428 dependencies`，2 contracts kept）和源码重量检查均通过。未运行其他业务测试；下一批统一处理 SearchRun owner 端口。
+- SearchRun 调用图审计完成：共享运行事实横跨 8 类消费者，核心服务还同时拥有 quota、活动唯一性、Worker claim/progress/terminal 更新。下一步在 `modules/search` 建统一领域快照/端口与 SQL adapter，再批量迁移构造点，保持 Redis key、queue payload 和状态机不变。
+- SearchRun owner 主体已写入但尚未验证：新增 `modules/search/run_models.py`、`run_repository.py` 与 `infra/db/repositories/search_runs.py`，核心 `SearchRunService` 已改依赖统一仓储端口，API/Worker 的首批构造点已接入 SQL adapter，现有 focused test 改用内存仓储。下一步先扫描旧构造器、ORM/session 和计划类型残留，再集中格式化并运行唯一的 `test_search_run_service.py`。
+- SearchRun 核心切片验证通过：相关文件集中格式化后 Ruff 自动修复 1 个导入排序问题，唯一 focused test `tests/unit/test_search_run_service.py` 为 `6 passed in 0.60s`。核心服务与 `modules/search` 已无 ORM/session 残留；下一步迁移 Search 与 Relevance 执行器，使 Worker composition root 显式提供 SQL adapter。
+- 首次向 `findings.md` 追加执行器发现时使用了不存在的锚点，补丁被拒绝且未改文件；已读取真实尾部并改用最后一条 SearchRun 发现作为锚点，不再重复旧定位。
+- Search 与 Relevance 执行器生产代码已改为依赖统一 `SearchRunRepository` 和 `SearchRunRecord`：计划读取与 relevance 运行领取都经 owner 端口，Worker 显式装配 `SqlAlchemySearchRunRepository`，执行器已移除 SQLAlchemy/ORM 导入。测试尚未同步，下一步改写现有执行器测试替身而不新增测试文件。
+- 执行器测试已复用原文件改为领域快照与最小 repository 替身；两个 live 集成测试的构造点也已改用 SQL adapter，刷新断言继续针对原 ORM 记录。未运行任何 live 测试；下一步做残留扫描、集中格式化并只选一个执行器 focused test。
+- 执行器批次完成：集中格式化后 Ruff 修复 1 个导入排序问题，`test_search_execution.py` 与 `test_candidate_relevance_execution.py` 一次运行共 `10 passed in 1.59s`。未运行 live 或其他后端测试；下一批迁移 candidate lookup、citation、fulltext 和 review 的运行读取边界。
+- 候选消费者生产代码首轮已改：lookup、citation、fulltext 只接收 `SearchRunRepository`，审核服务在保留准入 session 的同时显式接收同一运行端口；全部 SearchRun 参数改为领域快照，内部临时构造 `SearchRunService(session)` 已移除。API 装配与测试调用点尚待同步。
+- `api/deps` 已新增请求级 `get_search_run_repository` 并让 search、review、fulltext、citation 服务共享该具名依赖；相关 unit fixture 已从 ORM SearchRun 改为 `SearchRunRecord` 和最小 repository 替身。Candidate review 仍保留准入事务 session，待 literature admission port 批次移除。
+- 候选消费者 SearchRun 反转批次验证通过：集中格式化，Ruff 修复 4 个导入排序问题；citation、fulltext、review 三份既有单测一次运行 `16 passed in 2.62s`。未运行 live 测试。下一步将 CandidateReview 的文献准入改为显式端口，删除其 session、内部 service 构造和手动 rollback。
+- 文献准入 contract 已迁入 `modules/literature/admission.py`，旧 `collections/contracts.py` 已删除；CandidateReview 只接收 `LiteratureAdmissionPort`，不再接收 session、对象存储或内部构造具体准入服务。具体准入服务在命令入口主动结束共享请求 session 的只读隐式事务，再进入自己的原子事务。API 和 live test 构造点已同步，尚待格式化与 focused 验证。
+- 文献准入/审核批次验证通过：集中格式化后 Ruff 修复 8 个导入排序问题，`test_collection_admission.py` 与 `test_candidate_review_service.py` 一次运行 `11 passed in 1.81s`。CandidateReview 已无 SQLAlchemy、对象存储和 concrete admission service 依赖；未运行 live 测试。
+- 已删除零生产调用的 `ResearchWorkflowService` 及其导出；原 4 个假 session 测试收敛为 1 个直接验证 canonical 阶段转换表的契约测试，避免为死 facade 建仓储端口或保留无价值模拟测试。尚未单独运行该测试，将随下一静态批次验证。
+- Ingestion 仓储审计确认现有文件已同时包含 Protocol 与 SQLAlchemy 实现，适合直接拆到 owner port + infra adapter。首次读取误猜 `test_ingestion_service.py` 不存在，已通过 `rg --files` 定位真实测试为 `test_ingestion_repository.py` 与 `test_ingestion_pipeline.py`，后续不重复错误路径。
+- Ingestion 持久化边界已拆分：端口迁入 `modules/rag/ingestion/repository.py`，SQLAlchemy 实现整体迁入 `infra/db/repositories/ingestion.py`，Worker 显式装配。Adapter 统一把 SQLAlchemy 异常映射为 owner 的 `PERSISTENCE_FAILED`，业务编排器已移除 SQLAlchemy import；测试 imports 已同步，尚待集中验证。
+- Ingestion/dead workflow 批次完成：Ruff 修复 4 个导入排序问题；ingestion repository、pipeline 与收敛后的 workflow contract 一次运行 `10 passed in 4.13s`。旧 ingestion repository 路径和 `ResearchWorkflowService` 引用均清零；未运行其他测试。
+- Literature admission concrete 已移到 `infra/db/repositories/literature_admission.py` 并改名 SQLAlchemy adapter。Collection build 公开方法已形成 research-owned `CollectionBuildUseCases`，原具体实现整体移到 `infra/db/repositories/collection_builds.py`，Router 依赖端口，API/Worker 显式装配 adapter；旧模块路径尚待残留扫描与 focused 验证。
+- Collection build/准入 adapter 批次完成：旧 `collections.build_service/service` 路径和类名引用清零；集中格式化后 Ruff 修复 8 个导入排序问题，唯一 collection build focused test `7 passed in 0.58s`。`modules` 内数据库依赖现只剩 research 的 conversation、execution 和 retrieval 三组。
+- Research execution 首个 move 补丁因包含空 update hunk 被 `apply_patch` 整体拒绝；已移除无内容 hunk 后成功重试。领域上下文/输出/端口现位于 `modules/research/execution_port.py`，SQL 事务实现迁为 `infra/db/repositories/research_execution.py::SqlAlchemyResearchExecutionAdapter`，Worker、Graph 和单测 imports 已同步，尚待验证。
+- Research conversation 公开接口已形成 `ResearchConversationUseCases`，原 SQLAlchemy 实现迁为 `infra/db/repositories/research_conversations.py::SqlAlchemyResearchConversationAdapter`；Router 只依赖 use-case contract，API deps 与 live/unit 构造点已同步。Research execution 的剩余 Worker/test concrete 引用也已补齐；尚待残留扫描与验证。
+- 上一条进度追加首次因手工锚点漏了一个空格而被拒绝，未改文件；已用实际文本修正并成功写入，不重复旧锚点。
+- Research retrieval 已抽出 `ResearchRetrievalRepository` 与 `LexicalMatch`：领域服务只负责混合召回编排、RRF、重排和父块合并，四类 PostgreSQL 查询迁入 `infra/db/repositories/research_retrieval.py`。Worker 显式注入 SQL adapter，单测已去掉 ORM chunk/session 替身。扫描确认 `backend/app/modules` 已无 `app.db`、SQLAlchemy、AsyncSession 或 infra import；尚待 research focused tests 与静态门禁。
+- Research focused 首轮为 `14 passed, 6 failed`；失败均因新增 repository Protocol 错插在 `RetrievedEvidence` dataclass 最后两个字段之前，使 `source_chunk_ids/parent_merged` 被错误解析为 Protocol 属性。已把字段移回 dataclass，下一步只重跑相同测试命令，不改算法或断言。
+- 修正结构后相同 research focused 命令通过：execution、retrieval、graph 共 `20 passed in 1.87s`。尚未运行其他测试；下一步执行 Phase 35 的 scoped Pyright、Import Linter 与源码重量检查。
+- Phase 35 静态门禁完成：scoped Pyright 为 `0 errors, 1 warning`，Import Linter 为 `141 files / 456 dependencies`、2 contracts kept，源码重量检查通过。唯一警告来自 ingestion adapter 装饰器的泛型签名。
+- 续接时首次追加进度使用了并不存在于文件中的摘要措辞作为锚点，补丁被拒绝且未改文件；已改用实际尾部锚点，不重复该定位。
+- 将 ingestion 异常映射 decorator 改为 `ParamSpec + Awaitable[_Result]`，保留异步仓储方法的参数和返回类型；scoped Pyright 为 `0 errors, 0 warnings`。该改动无运行时行为变化，未重复运行 pytest。
+- ORM/session 物理迁移扫描连续两次因 Windows 固定路径约束失败：首次把 `.importlinter*` 当目录参数，第二次让无匹配的 `rg` 作为最后命令返回 1，导致并行读取结果被整体丢弃；已改用固定文件路径并显式保持只读扫描成功，不再复用这两种命令形态。
+- 已将 SQLAlchemy `base.py`、`session.py` 与完整 `models/` 从旧 `app/db` 迁入 `app/infra/db`，并机械更新 Alembic、API composition、Worker、adapter 与测试共 40 个 Python 文件的导入；旧 package 入口与 infra `.gitkeep` 已删除，schema、表名、列和 revision 未变化。
+- 一次同时修改 router、Import Linter、文档和进度的补丁因数据库讨论稿的长行锚点不完整而被整体拒绝；已拆为小补丁，后续对长历史段落只做精确路径替换。
+- 旧 `app/db` 的 tracked source 已全部删除；尝试清理其中仅剩的未跟踪 `__pycache__` 时被本地执行策略拒绝，未绕过策略。该缓存不包含源码，正式导入与版本差异均已无旧入口。
+- ORM 迁移首轮验证：数据库 metadata focused test `6 passed`，Import Linter `140 files / 456 dependencies`、2 contracts kept，源码重量策略通过。Ruff 要求 ingestion decorator 使用公开 PEP 695 泛型名；Pyright 进一步指出 `Awaitable[T]` 过宽，不能满足 `async def` Protocol 的 `Coroutine` 返回类型。下一步收紧 decorator 类型后只复跑这两项。
+- ingestion decorator 改为 `collections.abc.Coroutine` 后 Ruff 通过，但当前 Pyright 仍要求与 Protocol 的具体 `types.CoroutineType` 完全一致；下一次改用该精确类型。若仍失败，将删除该装饰器抽象，避免重复同一类型策略。
+- ingestion decorator 改用 `types.CoroutineType` 后 Ruff 与 scoped Pyright 均通过（`0 errors, 0 warnings`）。Phase 35 已完成：业务模块外层依赖清零，ORM/session 物理归入 `infra/db`，metadata focused test 与 Import Linter/重量门禁通过。计划推进到 Phase 36，首个切片为顶层 ingestion 归入 RAG/infra。
+- Phase 36 ingestion 主体已迁移：contracts/chunking/parser/service 位于 `modules/rag/ingestion`，连接配置位于 `core/ingestion_settings.py`；embedding 与 vector-index Protocol 留在 owner，LangChain OpenAI-compatible 与 Milvus 实现分别位于 `infra/llm`、`infra/milvus`。顶层 `modules/ingestion` tracked package 已删除且代码引用清零，尚待 focused 验证。
+- Ingestion 切片验证完成：`test_ingestion_pipeline.py` 为 `5 passed`，scoped Pyright 为 `0 errors, 0 warnings`；Ruff 首轮只发现 8 个导入排序问题，已自动修复并复查通过。未运行其他业务测试或 live 测试。
+- Retrieval 拆分后发现 RAG owner 仍反向导入 research 的错误与 settings，和 `research -> rag` 形成业务域双向依赖。首次解除补丁因机械移除 adapter 后留下的额外空行使导入锚点不匹配而被拒绝；已改用更小的实际锚点，新增 retrieval-owned settings Protocol 与 unavailable error。
+- Retrieval 切片完成：typed contract、RRF、阈值、父块合并与 use case 位于 `modules/rag/retrieval`（388 行），HTTP Reranker 与 Milvus recall 位于对应 infra adapter；旧 `modules/research/retrieval.py` 与全部导入已删除。`test_research_retrieval.py` 为 `4 passed`，Ruff/Pyright 通过，Import Linter 为 `144 files / 461 dependencies`、2 contracts kept。
+- Documents 迁移的一次大补丁因 `workers/ingestion.py` 的 settings import 已先被机械更新、锚点过时而整体拒绝；已拆为 owner storage 路径统一与 concrete import 两步，不重复该大补丁。
+- Documents/fulltext 主体已归位：contracts、下载/上传安全用例和候选全文任务服务位于 `modules/documents`，S3/网络配置位于 `core/fulltext_settings.py`，存储 Protocol 位于 documents owner，boto3 实现位于 `infra/storage/documents.py`。旧 `modules/fulltext` tracked package 与代码 imports 已清零，尚待 focused 验证。
+- Documents focused 验证为 `19 passed`，Ruff 与 scoped Pyright 通过。Import Linter 唯一失败是 composition root 新增的 `api.deps.services -> infra.storage.documents` 未列入精确例外；Router 本身无 direct infra import，下一步只补该装配边并复跑依赖合同。
+- Documents 依赖合同在增加唯一的 composition-root 存储装配边后通过（`144 files / 463 dependencies`，2 contracts kept）。该切片完成，下一步拆旧 workflow 中 research-owned workspace/plan。
+- Research owner 文件迁移时，4 个 Phase 35 新文件尚未被 Git 跟踪，`git mv` 对它们报 `not under version control`，而同批已跟踪文件已成功移动；已核对实际源/目标后用精确 `Move-Item` 只移动这 4 个文件，没有重复成功的 move。
+- Workflow settings 批量迁到 core 时，运行中的开发进程短暂占用 `research/graph.py`，其单文件写入被 Windows 拒绝；其余 14 个文件成功。已用 `apply_patch` 只修 graph import。State imports 已按符号机械拆为 `research.state` 与 `search.state`，共更新 33 个文件。
+# 2026-08-05 — Phase 36 上下文恢复
+
+- 已按 `planning-with-files` 恢复会话并核对工作树；Phase 35 已完成，页首 Current Phase 已校正为 Phase 36。
+- 当前中间状态是旧 `workflow` 实现文件已按 owner 移动，但聚合 API contracts 和部分 imports 尚未拆完；完成合同拆分前不把后端视为可运行状态。
+- 仓库根目录没有 `.codegraph/`，后续代码定位继续使用 `rg`；所有既有未提交改动原样保留。
+- 已将旧聚合合同按 owner 拆为 `research/plan_contracts.py`、`search/api_contracts.py`、`documents/api_contracts.py` 与 `literature/api_contracts.py`，字段、错误码和 Pydantic 校验保持不变。
+- 已更新生产代码和测试 imports，并删除最后的 `modules/workflow/__init__.py`；源码扫描确认 `app.modules.workflow|collections|fulltext|ingestion` 引用为零，四个旧目录没有 tracked source。
+- 工具错误记录：首次并行 `rg` 因零匹配退出码 1 使编排层中止，已改为显式将退出码 1 解释为零匹配；首次测试导入补丁因目标导入块包含额外 SearchRun 类型而整体拒绝，已按真实 owner 拆成较小补丁；一次 JavaScript 工具调用因输入不完整产生 SyntaxError，未触及文件。
+- 合同拆分聚焦验证：8 个 owner 附近测试文件共 `42 passed`；Import Linter `146 files / 469 dependencies`、源码重量策略均通过。
+- 首轮 Ruff 暴露 45 个前序迁移遗留的纯 import 排序项和 1 个未使用 import，已用一次 `ruff check --fix` 机械整理；scoped Pyright 同时发现 `ConfirmedResearchPlan` Protocol 错把 frozen 快照字段声明为可写，改为只读 property 后复验 Ruff 与 Pyright 均通过。
+- `git diff --check` 通过，仅输出 Windows 工作树的既有 LF/CRLF 转换提醒，无空白错误。
+- Phase 36 下一批已完成耦合定位：`research/graph.py` 同时包含模型、图/节点、状态、prompt 与 PostgreSQL checkpoint；intent/relevance 也仍直接构造 `ChatOpenAI`。下一步按明确端口迁入 `modules/agents` 与 `infra/llm|db`，并从 Worker 显式装配。
+- Intent/relevance LLM 依赖反转完成：业务模块只保留结构化模型 Protocol、完整集合校验与稳定错误分类；`infra/llm/intent_analysis.py` 和 `candidate_relevance.py` 持有 ChatOpenAI 构造及动态 token 预算。
+- Workflow/Relevance Worker 已显式装配 analyzer/evaluator；旧 `OpenAICompatibleIntentAnalyzer`、`OpenAICompatibleCandidateRelevanceEvaluator`、`OpenAICompatibleCandidateRelevanceClaimVerifier` 名称清零。
+- 聚焦验证为 `21 passed`，Ruff/Pyright 通过。首轮静态检查只发现 Callable import 位置和多行 `max_tokens` ignore 标记位置，已修正后只复跑静态检查，没有重复跑已通过测试。
+- Agent 归位完成：旧 `research/graph.py` 移入 `modules/agents` 并拆成 contracts、state、prompts、checkpoint port、graph 和 `nodes/single_rag.py`；OpenAI 具体模型归 `infra/llm/research_model.py`，PostgreSQL saver 归 `infra/db/research_checkpoint.py`。
+- Research Worker 显式注入 `ResearchChatModel` 与 `PostgresResearchGraphExecutor`；离线 graph 测试显式使用 `DirectResearchGraphExecutor`，不再以 `checkpoint_database_url=None` 隐式切换实现。
+- Agent 聚焦验证 `11 passed`，Pyright、Import Linter（`157 files / 499 dependencies`）、Ruff 和源码重量策略通过；`research/graph.py` 的 1042 行临时例外已删除，当前 graph 465 行、single-RAG nodes 157 行。
+- 编辑错误记录：三次尝试用单个大 hunk 删除已迁出的 graph 符号块均因 apply_patch 上下文匹配失败，未产生文件变化；随后按类组和方法组使用小补丁完成相同迁移，没有绕过补丁工具或重写整文件。
+- 续接 Phase 36 时按 `planning-with-files` 完成 session catchup；工作树仍是既有 155 文件架构迁移批次，没有回退或覆盖用户改动。候选审核目前仅新增了未接线的 `modules/search/review_session.py`，旧 `review_service.py` 仍是唯一生产入口；下一步在同一 coherent batch 中拆出 Query、Selection、Preparation、Admission 四个具名用例，再统一迁移 DI、Router 和 focused tests。
+- 已完成候选审核调用面与旧实现逐段核对：查询端持有排序/筛选/cursor/展示映射，选择端持有 Redis lock，准备端只调用单篇全文 `request(retry=True)`，准入端调用单篇全文状态与 literature admission，并仅从选择清单移除成功项。新实现会保持这些 wire/Redis 语义，同时把 `CandidateFulltextService` 和 `CandidateSelectionService` 作为显式依赖注入。
+- 候选审核生产拆分已接线：共享会话、Query、Selection、Preparation、Admission 分别位于五个具名模块；API deps 与六个 Router 端点依赖具体用例，两个 live 测试构造点也已迁移。扫描确认旧 `CandidateReviewService` 只剩文件内自引用后已删除，未保留 facade；下一步执行该 coherent batch 唯一一次定向格式化、focused test 与静态门禁。
+- 候选审核批次已定向格式化，Ruff 自动修复 1 个 import 排序项；focused `test_candidate_review_service.py` 为 `7 passed in 0.14s`。未运行任何 live 或全量测试，下一步只执行 scoped Pyright、Import Linter 和源码重量检查。
+- Scoped Pyright 已通过（`0 errors, 0 warnings`）。Import Linter 首次从 `backend/` 执行失败：配置文件位于仓库根目录，工具报告 `Could not read any configuration`；下一次改从根目录运行，不重复该命令。
+- Import Linter 第二次从仓库根目录读取到 `.importlinter`，但因 `app` 未加入 Python path 失败（`Could not find package 'app'`）；下一次保留根目录配置并显式设置 `PYTHONPATH=backend`，不再改变代码或配置。
+- Import Linter 使用根目录配置与 `PYTHONPATH=backend` 通过：`161 files / 525 dependencies`，2 contracts kept。源码重量检查通过，仅保留既有 `relevance.py`、`styles.css`、`ResearchChatView.vue`、`ResultsView.vue` 四个职责审查项；旧候选审核引用扫描为零，`git diff --check` 无空白错误（仅有既有 LF/CRLF 提醒）。
+- 下一批执行器审计确认：Search 的 `_enrich_citations()` 已无生产调用，实际题录预取由 Relevance executor 所有；将删除这段死职责和重复单测。Search Worker 会显式注入 Provider Registry 与并发限额，Relevance Worker 会显式注入题录限额和 `CitationMetadataEnricher`，业务执行器不再读取全局 settings 或构造 DOI resolver。
+- 执行器收口的大补丁因对两个构造函数使用了过宽的 `) -> None` 锚点而整体拒绝，未产生文件变化；后续改用各类构造参数附近的精确小补丁，不重复该大补丁。
+- Search/Relevance 执行器显式装配已完成：Search 仅接收 Registry 与最大 Provider 并发，Relevance 仅接收题录限额与注入的 enricher；全局 settings 和 DOI resolver 构造均移至对应 Worker。Search 中无生产调用的题录预取方法、builder、test helper 与重复测试已删除，live search 构造点同步改为显式 Registry。
+- 执行器批次定向 Ruff 修复 2 个 import 排序项；Search/Relevance focused tests 为 `9 passed in 0.14s`。未运行 live 或广泛测试，下一步执行 scoped Pyright、Import Linter、源码重量与残留扫描。
+- 执行器批次静态门禁通过：scoped Pyright `0 errors, 0 warnings`；Import Linter `161 files / 523 dependencies`、2 contracts kept；源码重量策略通过且仍为既有 4 个职责审查项。下一步审计 search/documents/literature 域间双向 import 与剩余 settings/default construction。
+- `SearchRunService` 已移除 `get_workflow_settings()` fallback；API composition root 显式注入 quota 配置，query/Worker 只读构造仍无需携带无关依赖，真正进入 start/retry 而未装配时会明确失败。定向 Ruff 通过，focused `test_search_run_service.py` 为 `6 passed in 0.07s`。
+- Literature 所有权批次进行中：新增 `literature/contracts.py` 与 `normalization.py`，Citation formatter 已迁入 literature，Candidate citation Redis 编排已迁回 search；准入端口改收 `LiteratureAdmissionCandidate` 最小 typed command，SQL adapter 不再接收 `UnifiedCandidate`。Search/provider/documents/Worker 的核心 imports 已开始切换，测试与剩余引用尚未完成，因此当前中间状态暂不视为可验证。
+- 2026-08-05 续接检查：`.codegraph/` 仍不存在，Phase 36 与既有大规模未提交整改保持原状；恢复扫描确认 Literature 生产代码已不再接收 `UnifiedCandidate`，当前剩余工作集中在测试 Citation imports、准入测试 typed command 与旧路径清零。
+- Literature 测试迁移首个跨 14 文件大补丁因在 `test_citation_formatter.py` 后错误复用了 collection admission 的 import 上下文而整体拒绝，未写入任何文件；后续按单文件真实 import block 拆分补丁，不重复该批量锚点。
+- 第二次缩小后的 import 补丁仍遗漏 `test_citation_formatter.py` 的文件分隔标记，导致在 `test_citation_enrichment.py` 查找错误上下文并整体拒绝；未产生文件变化。后续严格一文件一补丁，避免第三次重复跨文件错误。
+- Literature 批次首次定向 Ruff 目标误写为不存在的 `app/api/deps/candidate_review.py`；Ruff 已格式化其余 36 个有效目标（1 个文件变更）后以 E902 退出，尚未执行 check。真实 composition root 是 `app/api/deps/services.py`，后续只补跑该文件格式化和全批 `ruff check --fix`。
+- Literature focused tests 首次在收集阶段失败：包级 `literature/__init__.py` 急切导入 admission，形成 `documents.contracts -> search.contracts -> literature.__init__ -> admission -> documents.contracts`。扫描确认没有调用方依赖这些重导出，将包入口收窄为无副作用命名空间后再复跑同一 focused 组。另一次双补丁编排在 JavaScript 解析阶段被日志反引号截断，未调用编辑工具且未改文件。
+- Literature 包入口已移除急切重导出并保持无副作用；同一 focused 组复跑为 `41 passed in 0.77s`。本批未运行 live 或全量测试，下一步只执行 scoped Pyright、Import Linter、源码重量与 diff 检查。
+- Literature 所有权批次静态门禁通过：scoped Pyright `0 errors, 0 warnings`；Import Linter `163 files / 535 dependencies`、2 contracts kept；源码重量策略仍只有既有 4 个职责审查项；`git diff --check` 无空白错误。旧 Citation 路径和 Literature 内 `UnifiedCandidate` 扫描均为零。
+- Search/Documents 依赖审计结论：全文获取只读取候选的 `candidate_id/doi/abstract/links/citation/is_open_access`，可用 Documents-owned `FulltextCandidate` 投影；候选所有权、检索运行所有权与 Redis 具体实现通过端口由 Search/composition root 注入。全文 Redis key 迁入 Documents-owned key module，Search 只消费该公开 key contract。
+- 一次 ORM 扫描把 Windows 不支持的 `app/infra/db/models/*.py` 路径通配符直接传给 `rg`，命令以路径错误退出；后续改为读取明确文件。Search/Documents 首轮 focused tests 为 `3 failed, 26 passed`，三个失败均是既有测试夹具直接把 `UnifiedCandidate` 赋给新的 `FulltextCandidate` 状态字段；已改为调用 Search-owned projection 函数，不在 Pydantic 模型中增加隐式兼容。
+- Search/Documents 首轮 scoped Pyright 的 15 个错误均是获取调用点类型未投影，已将 Worker、全文单测/live 夹具显式转换为 `FulltextCandidate`，并将 live ingestion 准入转换为 `LiteratureAdmissionCandidate`。随后 Ruff 曾因两个空 Search import block 解析失败，已删除；未运行 live。
+- Search/Documents 静态扫描后补出第二条环：`literature.admission` 仍直接导入 `documents.contracts` 的全文 result。准入只读取 `candidate_id/status/document` 三个已验证事实，已决定用 Literature-owned structural Protocol 表达该输入，让 adapter 和调用方解耦而不复制 Pydantic wire DTO。
+- Documents 投影/端口批次已完成：全文服务接收显式 `CandidateFulltextRunPort`、`CandidateFulltextLookupPort`、`CandidateFulltextSessionStore`，Search bridge 负责 `UnifiedCandidate -> FulltextCandidate`；全文 key 迁入 `documents/keys.py`；Worker 从 canonical Search snapshot 读取并在写状态前投影。候选全文、候选审核和全文单测分别通过 `29 passed` 与 `13 passed`。
+- Literature 准入改收 `LiteratureAdmissionFulltext` structural Protocol，SQL adapter 删除 Documents contract imports；准入 focused `test_collection_admission.py` 为 `4 passed`，Ruff/Pyright 均通过。
+- 一次静态并行编排把 backend 相对路径传给仓库根目录，最后的 `rg app/modules/literature` 以路径错误退出且未返回其他并行结果；后续按 backend/root 工作目录拆开运行，不重复该路径错误。
+- Phase 36 已完成：模块归位、Agent/RAG 拆解、候选审核拆解、Search/Relevance 显式装配、Literature/Fulltext 单向依赖和 6 条 Import Linter 合同均已落地。Phase 37 开始处理 OpenAPI 生成类型。
+- Phase 37 扫描有两次 shell 编排错误：一次是 `@/api/types` 双引号 quoting，一次是不存在的 `frontend/scripts` 路径；均在执行前失败且未改文件。现有生成目录只有 `frontend/src/api/generated/.gitkeep`。
+- Phase 37 已完成：FastAPI OpenAPI 可通过 `scripts/export_openapi.py` 确定性导出，前端使用 `openapi-typescript` 生成 `api/generated/schema.ts`，并提供 `api:generate`、`api:check` 与 CI 漂移检查。`api/types.ts` 只从生成 schema 派生别名，不再手写响应 DTO。
+- 为保持既有 wire shape，动态候选计数、Provider 汇总与研究计划 scope 使用命名 `TypedDict`，避免 Pydantic 默认值把缺失字段实体化为 `null`；搜索与研究 SSE 只补充 OpenAPI `text/event-stream` schema，运行时响应、重连和刷新恢复协议不变。
+- Phase 37 验证通过：前端 typecheck；搜索状态与候选相关性 focused unit 共 `13 passed`；后端 scoped Ruff、Ruff format 与 Pyright；OpenAPI 命名 DTO/SSE assertion；源码重量与 `git diff --check`。格式化后的 OpenAPI 与 schema 连续两次生成哈希一致，未运行 live 或全量测试。
+- Phase 38 已开始：第一批只归位统一 query keys、搜索 SSE composable 和研究 SSE composable，并迁移对应 view 接线；CSS 拆分留在后续 coherent batch。
+- Phase 38 第一批已完成：统一 query key factory 已建立；SearchRun 的加载、SSE、终态回读、重连和时钟状态归入 `features/search`；Research 的 SSE、数据库恢复和重连归入 `features/research`；研究 query/mutation 与缓存失效归入 `api/hooks/research`。两个 view 已移除底层 fetch、AbortController 和 TanStack Query 装配。
+- 第一批定向验证通过：前端 typecheck、六个变更文件的 ESLint，以及现有 `search-run-state.test.ts` 共 `10 passed`。首次并行门禁只暴露 SearchRun 旧 `terminal` 与新 helper 重名，删除旧定义后同组复验通过；未增加测试或运行全量/E2E。
+- Phase 38 第二批已完成：所有 route view 中的 TanStack Query/Mutation、query key 和 API module 直连均已清零；search/literature/research owner hooks 统一查询、mutation 与缓存失效，候选审核轮询归入 `features/search/use-review-polling.ts`。搜索状态、候选语言和相关性展示 helper 已从 `features/research` 迁回 `features/search`。
+- 第二批 typecheck、定向 ESLint 与搜索 feature 既有 3 个单测文件通过（`15 passed`），未运行 E2E 或全量测试。
+- 5084 行全局 CSS 已按原选择器顺序机械拆为 token/reset、共享控件和 auth/search/literature/research feature 样式；最大文件 948 行，`styles.css` 只保留 23 行 token。Prettier、Vite CSS 构建与源码重量策略通过，构建后的 CSS 为 82.82 kB（gzip 14.20 kB），未改变样式规则内容。
+- Phase 38 最终收口：候选审核表拆为 `features/search/CandidateReviewTable.vue`，研究会话侧栏拆为 `features/research/ConversationSidebar.vue`；证据/治理、计划范围与候选准入说明分别归入 feature presentation 模块。`ResultsView.vue` 降至 607 行，`ResearchChatView.vue` 降至 656 行。
+- Phase 38 最终定向验证通过：typecheck 与 `src/api/hooks`、components、features、views 全部 ESLint 通过；未新增模拟业务测试，沿用前批 focused tests。
+
+# 2026-08-05 — Phase 39 最终门禁
+
+- 前端最终门禁通过：`corepack pnpm test:e2e` 为 `11 passed`，`corepack pnpm build` 完成 `vue-tsc`、Vite 生产构建（1917 modules transformed）。
+- 后端最终静态门禁通过：Ruff check、Ruff format check、Pyright 均无错误；完整非 live pytest 已在本阶段前通过（`184 passed, 17 deselected`），本轮未重复运行。
+- 架构静态门禁通过：Import Linter `166 files / 539 dependencies`、6 contracts kept；源码重量检查通过，仅保留 `relevance.py`、`research-chat.css`、`results.css` 三个职责审查提示；Compose config 校验通过。
+- OpenAPI 生成已执行，`openapi.json` 与 `schema.ts` 经 Prettier 规范化后哈希稳定。`api:check` 的 `git ls-files` 要求需等生成文件进入提交索引后才会通过，本地未为此 staging。
+- 最终差异审计通过：`git diff --check` 无空白错误；旧业务包引用、views 直连 Query/API、CI/scripts 中 `RUN_LIVE_*` 均无匹配。产品方向、开发环境、ADR、AGENT 与规划记录已同步。

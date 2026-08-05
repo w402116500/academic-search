@@ -7,10 +7,11 @@ from datetime import UTC, datetime
 from urllib.parse import quote
 
 import httpx
+
 from app.core.settings import SemanticScholarProviderSettings
+from app.modules.literature.contracts import CitationDate
 from app.modules.search.contracts import (
     CandidateAuthor,
-    CitationDate,
     ProviderError,
     ProviderErrorCode,
     ProviderQuery,

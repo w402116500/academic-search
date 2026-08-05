@@ -9,16 +9,20 @@ from uuid import uuid4
 
 import pytest
 from app.core.settings import LiteratureSourceSettings, get_literature_source_settings
-from app.db.models.collection import ResearchCollection
-from app.db.models.user import User
-from app.db.models.workflow import ResearchPlan, SearchRun
-from app.db.session import async_session_factory
+from app.infra.db.models.collection import ResearchCollection
+from app.infra.db.models.user import User
+from app.infra.db.models.workflow import ResearchPlan, SearchRun
+from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
+from app.infra.db.session import async_session_factory
+from app.infra.redis.connection import redis_client_from_environment
+from app.infra.redis.job_queues import ArqCandidateRelevanceJobQueue
+from app.infra.redis.search_session import RedisSearchSessionStore
+from app.modules.research.state import WorkspaceWorkflowStage
+from app.modules.search.execution import SearchRunExecutor
 from app.modules.search.providers.base import SearchProvider
-from app.modules.workflow.search_execution import SearchRunExecutor
-from app.modules.workflow.search_run_service import SearchRunService
-from app.modules.workflow.search_session import SearchSessionStore
-from app.modules.workflow.state import SearchRunStatus, WorkspaceWorkflowStage
-from app.workers.redis import redis_client_from_environment
+from app.modules.search.providers.registry import ProviderRegistry
+from app.modules.search.run_service import SearchRunService
+from app.modules.search.state import SearchRunStatus
 
 
 @pytest.mark.live
@@ -31,7 +35,8 @@ async def test_live_search_run_persists_progress_and_candidates() -> None:
     settings = get_literature_source_settings().model_copy(
         update={"search_citation_enrichment_limit": 0}
     )
-    enabled_sources = [provider.source.value for provider in _enabled_sources(settings)]
+    providers = _enabled_sources(settings)
+    enabled_sources = [provider.source.value for provider in providers]
     if not enabled_sources:
         pytest.skip("当前 .env 没有启用任何文献来源")
 
@@ -97,27 +102,30 @@ async def test_live_search_run_persists_progress_and_candidates() -> None:
             session.add_all([user, collection, plan, run])
             await session.commit()
 
-            claimed_run = await SearchRunService(session).claim_run(run_id)
+            runs = SqlAlchemySearchRunRepository(session)
+            claimed_run = await SearchRunService(runs).claim_run(run_id)
             assert claimed_run is not None
             executor = SearchRunExecutor(
-                session=session,
+                runs=runs,
                 search_run=claimed_run,
-                session_store=SearchSessionStore(
+                session_store=RedisSearchSessionStore(
                     redis,
                     ttl_seconds=settings.search_session_ttl_seconds,
                 ),
-                literature_settings=settings,
+                relevance_queue=ArqCandidateRelevanceJobQueue(),
+                registry=ProviderRegistry(providers),
+                max_concurrent_providers=settings.search_max_concurrent_providers,
             )
             result = await executor.execute()
 
-            await session.refresh(claimed_run)
-            snapshot = await SearchSessionStore(
+            await session.refresh(run)
+            snapshot = await RedisSearchSessionStore(
                 redis,
                 ttl_seconds=settings.search_session_ttl_seconds,
             ).read_snapshot(session_key)
 
             assert result["search_run_id"] == str(run_id)
-            assert claimed_run.status in {
+            assert run.status in {
                 SearchRunStatus.COMPLETED.value,
                 SearchRunStatus.PARTIAL_FAILED.value,
             }

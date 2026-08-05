@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from app.modules.search.citation_enrichment import CitationMetadataEnricher
-from app.modules.search.contracts import (
-    CandidateAuthor,
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadataStatus,
@@ -13,6 +11,10 @@ from app.modules.search.contracts import (
     CitationResolutionErrorCode,
     DoiCslRecord,
     DoiMetadataResolution,
+)
+from app.modules.search.citation_enrichment import CitationMetadataEnricher
+from app.modules.search.contracts import (
+    CandidateAuthor,
     RawCandidate,
     SourceName,
     UnifiedCandidate,

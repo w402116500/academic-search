@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import {
   Check,
   FileText,
@@ -13,40 +12,23 @@ import {
 } from "@lucide/vue";
 import { RouterLink, useRoute } from "vue-router";
 
-import { buildCollection, getCollectionDocuments, removePendingDocument } from "@/api/collections";
+import { useCollectionDocumentsQuery, useCollectionMutations } from "@/api/hooks/research";
 
 const route = useRoute();
-const queryClient = useQueryClient();
 const workspaceId = computed(() => String(route.params.workspaceId));
-const documentsQuery = useQuery({
-  queryKey: computed(() => ["collection-documents", workspaceId.value]),
-  queryFn: () => getCollectionDocuments(workspaceId.value),
-  refetchInterval: (query) =>
-    query.state.data?.summary.ingestion_status_counts.running ||
-    query.state.data?.summary.ingestion_status_counts.queued
-      ? 2_000
-      : false,
-});
-const buildMutation = useMutation({
-  mutationFn: () => buildCollection(workspaceId.value),
-  onSuccess: () =>
-    void queryClient.invalidateQueries({ queryKey: ["collection-documents", workspaceId.value] }),
-});
-const removeMutation = useMutation({
-  mutationFn: (documentId: string) => removePendingDocument(workspaceId.value, documentId),
-  onSuccess: () =>
-    void queryClient.invalidateQueries({ queryKey: ["collection-documents", workspaceId.value] }),
-});
+const documentsQuery = useCollectionDocumentsQuery(workspaceId, true);
+const {
+  buildCollectionMutation: buildMutation,
+  removePendingDocumentMutation: removeMutation,
+  refreshDocuments,
+} = useCollectionMutations(workspaceId);
 
 const pendingCount = computed(
-  () => documentsQuery.data.value?.summary.ingestion_status_counts.pending ?? 0,
+  () => documentsQuery.data.value?.summary.ingestion_status_counts?.pending ?? 0,
 );
 const readyCount = computed(
   () => documentsQuery.data.value?.summary.researchable_document_count ?? 0,
 );
-function refreshDocuments(): void {
-  void documentsQuery.refetch();
-}
 </script>
 
 <template>

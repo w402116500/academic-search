@@ -7,12 +7,14 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from app.db.models.workflow import SearchRun
-from app.modules.fulltext.contracts import (
+from app.modules.documents.contracts import (
     CandidateFulltextState,
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
 )
+from app.modules.documents.keys import build_candidate_fulltext_key
+from app.modules.documents.service import CandidateFulltextService
+from app.modules.search.api_contracts import CandidateReviewFilter
 from app.modules.search.contracts import (
     CandidateAuthor,
     CandidateLinks,
@@ -26,17 +28,21 @@ from app.modules.search.contracts import (
     TriageDecision,
     UnifiedCandidate,
 )
-from app.modules.workflow.candidate_review_service import (
+from app.modules.search.fulltext_candidate import (
+    SearchCandidateFulltextLookup,
+    to_fulltext_candidate,
+)
+from app.modules.search.review_preparation import CandidatePreparationService
+from app.modules.search.review_query import CandidateReviewQueryService
+from app.modules.search.review_selection import CandidateSelectionService
+from app.modules.search.review_session import (
     CandidateReviewError,
     CandidateReviewErrorCode,
-    CandidateReviewService,
+    CandidateReviewSession,
 )
-from app.modules.workflow.contracts import CandidateReviewFilter
-from app.modules.workflow.search_session import (
-    SearchSessionStore,
-    build_candidate_fulltext_key,
-)
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.modules.search.run_models import SearchRunRecord
+from app.modules.search.run_repository import SearchRunRepository
+from app.modules.search.session import SearchSessionStore
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000001201")
 _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000001202")
@@ -47,17 +53,28 @@ _SECOND_ID = UUID("00000000-0000-0000-0000-000000001206")
 _SESSION_KEY = "academic-search:search-run:00000000-0000-0000-0000-000000001204"
 
 
-class FakeSession:
-    """只实现候选审核服务读取 SearchRun 所需的数据库接口。"""
+class FakeSearchRunRepository:
+    """返回当前用户拥有的运行领域快照。"""
 
-    def __init__(self, run: SearchRun) -> None:
+    def __init__(self, run: SearchRunRecord) -> None:
         self._run = run
 
-    async def scalar(self, _statement: object) -> SearchRun:
+    async def get_owned_run(
+        self,
+        *,
+        owner_user_id: UUID,
+        collection_id: UUID,
+        search_run_id: UUID,
+        for_update: bool = False,
+    ) -> SearchRunRecord | None:
+        del for_update
+        if (
+            owner_user_id != _OWNER_ID
+            or collection_id != self._run.collection_id
+            or search_run_id != self._run.id
+        ):
+            return None
         return self._run
-
-    async def rollback(self) -> None:
-        """批量准入测试之外仍提供真实服务所需的事务清理接口。"""
 
 
 class FakeSessionStore:
@@ -109,18 +126,26 @@ class FakeQueue:
         return f"fulltext-{search_run_id}-{candidate_id}-{attempt_no}"
 
 
-def _run() -> SearchRun:
+def _run() -> SearchRunRecord:
     """构造已结束、拥有 Redis 会话的检索运行。"""
-    return SearchRun(
+    now = datetime.now(UTC)
+    return SearchRunRecord(
         id=_RUN_ID,
         collection_id=_COLLECTION_ID,
         research_plan_id=_PLAN_ID,
+        arq_job_id=None,
         redis_session_key=_SESSION_KEY,
         status="completed",
         stage="completed",
         attempt_no=1,
         provider_summary={},
         candidate_counts={"candidate_count": 2},
+        error_code=None,
+        error_message=None,
+        started_at=now,
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -140,7 +165,7 @@ def _candidate(
         authors=(author,),
         doi=doi,
     )
-    return UnifiedCandidate(
+    candidate = UnifiedCandidate(
         candidate_id=candidate_id,
         doi=doi,
         title=title,
@@ -151,6 +176,7 @@ def _candidate(
         source_records=(source,),
         triage=TriageDecision(included=True),
     )
+    return _with_relevance(candidate, CandidateRelevanceLevel.CORE)
 
 
 def _store(*candidates: UnifiedCandidate) -> FakeSessionStore:
@@ -163,6 +189,14 @@ def _store(*candidates: UnifiedCandidate) -> FakeSessionStore:
                 "candidates": [candidate.model_dump(mode="json") for candidate in candidates],
             }
         }
+    )
+
+
+def _review_session(store: FakeSessionStore) -> CandidateReviewSession:
+    """以相同运行仓储和会话替身装配审核用例。"""
+    return CandidateReviewSession(
+        cast(SearchRunRepository, FakeSearchRunRepository(_run())),
+        cast(SearchSessionStore, store),
     )
 
 
@@ -207,7 +241,7 @@ async def test_page_keeps_selection_across_cursor_pages_and_uses_fulltext_state(
     state_key = build_candidate_fulltext_key(_SESSION_KEY, _FIRST_ID)
     store.snapshots[state_key] = CandidateFulltextState(
         search_run_id=_RUN_ID,
-        candidate=first,
+        candidate=to_fulltext_candidate(first),
         attempt_no=1,
         result=FulltextAcquisitionResult(
             candidate_id=_FIRST_ID,
@@ -216,19 +250,18 @@ async def test_page_keeps_selection_across_cursor_pages_and_uses_fulltext_state(
         requested_at=now,
         updated_at=now,
     ).model_dump(mode="json")
-    service = CandidateReviewService(
-        cast(AsyncSession, FakeSession(_run())),
-        cast(SearchSessionStore, store),
-    )
+    session = _review_session(store)
+    selection = CandidateSelectionService(session)
+    query = CandidateReviewQueryService(session)
 
-    await service.update_selection(
+    await selection.update_selection(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
         search_run_id=_RUN_ID,
         candidate_ids=[_FIRST_ID],
         selected=True,
     )
-    first_page = await service.page(
+    first_page = await query.page(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
         search_run_id=_RUN_ID,
@@ -237,7 +270,7 @@ async def test_page_keeps_selection_across_cursor_pages_and_uses_fulltext_state(
         query="",
         review_filter=CandidateReviewFilter.ALL,
     )
-    second_page = await service.page(
+    second_page = await query.page(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
         search_run_id=_RUN_ID,
@@ -259,8 +292,8 @@ async def test_page_keeps_selection_across_cursor_pages_and_uses_fulltext_state(
 
 
 @pytest.mark.asyncio
-async def test_completed_review_orders_by_relevance_and_places_incomplete_last() -> None:
-    """终态审核优先展示核心候选，待评估/失败/跳过记录不能抢占语义层级。"""
+async def test_completed_review_only_returns_verified_positive_relevance_levels() -> None:
+    """筛选页只展示已核验的核心、关联和背景候选。"""
     core = _with_relevance(
         _candidate(
             UUID("00000000-0000-0000-0000-000000001211"), title="Core", year=2010, doi="10.1/core"
@@ -308,6 +341,11 @@ async def test_completed_review_orders_by_relevance_and_places_incomplete_last()
         title="Pending",
         year=2027,
         doi="10.1/pending",
+    ).model_copy(
+        update={
+            "relevance_state": CandidateRelevanceState.PENDING,
+            "relevance_assessment": None,
+        }
     )
     failed = _candidate(
         UUID("00000000-0000-0000-0000-000000001217"),
@@ -335,14 +373,12 @@ async def test_completed_review_orders_by_relevance_and_places_incomplete_last()
             "relevance_state": CandidateRelevanceState.SKIPPED,
         }
     )
-    service = CandidateReviewService(
-        cast(AsyncSession, FakeSession(_run())),
-        cast(
-            SearchSessionStore,
+    service = CandidateReviewQueryService(
+        _review_session(
             _store(
                 skipped, failed, pending, insufficient, not_recommended, background, related, core
-            ),
-        ),
+            )
+        )
     )
 
     page = await service.page(
@@ -359,50 +395,8 @@ async def test_completed_review_orders_by_relevance_and_places_incomplete_last()
         core.candidate_id,
         related.candidate_id,
         background.candidate_id,
-        not_recommended.candidate_id,
-        insufficient.candidate_id,
-        pending.candidate_id,
-        failed.candidate_id,
-        skipped.candidate_id,
     ]
-
-
-@pytest.mark.asyncio
-async def test_cursor_is_rejected_when_a_running_snapshot_switches_to_final_relevance_sort() -> (
-    None
-):
-    """排序语义变化后旧游标不能继续翻页，避免重复或漏掉候选。"""
-    run = _run()
-    run.status = "running"
-    first = _candidate(_FIRST_ID, title="Newest", year=2025, doi="10.1/newest")
-    second = _candidate(_SECOND_ID, title="Older", year=2024, doi="10.1/older")
-    service = CandidateReviewService(
-        cast(AsyncSession, FakeSession(run)),
-        cast(SearchSessionStore, _store(first, second)),
-    )
-    running_page = await service.page(
-        owner_user_id=_OWNER_ID,
-        collection_id=_COLLECTION_ID,
-        search_run_id=_RUN_ID,
-        limit=1,
-        cursor=None,
-        query="",
-        review_filter=CandidateReviewFilter.ALL,
-    )
-    run.status = "completed"
-
-    with pytest.raises(CandidateReviewError) as raised:
-        await service.page(
-            owner_user_id=_OWNER_ID,
-            collection_id=_COLLECTION_ID,
-            search_run_id=_RUN_ID,
-            limit=1,
-            cursor=running_page.page.next_cursor,
-            query="",
-            review_filter=CandidateReviewFilter.ALL,
-        )
-
-    assert raised.value.code is CandidateReviewErrorCode.INVALID_CURSOR
+    assert page.page.total == 3
 
 
 @pytest.mark.asyncio
@@ -414,10 +408,7 @@ async def test_selection_refuses_candidate_without_doi() -> None:
         year=2025,
         doi=None,
     )
-    service = CandidateReviewService(
-        cast(AsyncSession, FakeSession(_run())),
-        cast(SearchSessionStore, _store(missing_doi)),
-    )
+    service = CandidateSelectionService(_review_session(_store(missing_doi)))
 
     with pytest.raises(CandidateReviewError) as raised:
         await service.update_selection(
@@ -432,21 +423,20 @@ async def test_selection_refuses_candidate_without_doi() -> None:
 
 
 @pytest.mark.asyncio
-async def test_selection_refuses_candidate_without_a_passed_triage() -> None:
-    """缺失基础初筛结果不能被默认视为可进入 RAG 准备清单。"""
+async def test_hidden_candidate_is_not_readable_or_selectable() -> None:
+    """负向、缺少初筛和旧失败候选不能经详情或选择接口重新暴露。"""
     candidate = _candidate(
         _FIRST_ID,
         title="Candidate without triage",
         year=2025,
         doi="10.1000/review.no-triage",
-    ).model_copy(update={"triage": None})
-    service = CandidateReviewService(
-        cast(AsyncSession, FakeSession(_run())),
-        cast(SearchSessionStore, _store(candidate)),
-    )
+    ).model_copy(update={"triage": None, "relevance_assessment": None})
+    session = _review_session(_store(candidate))
+    selection = CandidateSelectionService(session)
+    query = CandidateReviewQueryService(session)
 
     with pytest.raises(CandidateReviewError) as raised:
-        await service.update_selection(
+        await selection.update_selection(
             owner_user_id=_OWNER_ID,
             collection_id=_COLLECTION_ID,
             search_run_id=_RUN_ID,
@@ -454,7 +444,17 @@ async def test_selection_refuses_candidate_without_a_passed_triage() -> None:
             selected=True,
         )
 
-    assert raised.value.code is CandidateReviewErrorCode.CANDIDATE_NOT_SELECTABLE
+    assert raised.value.code is CandidateReviewErrorCode.CANDIDATE_NOT_FOUND
+
+    with pytest.raises(CandidateReviewError) as item_raised:
+        await query.item(
+            owner_user_id=_OWNER_ID,
+            collection_id=_COLLECTION_ID,
+            search_run_id=_RUN_ID,
+            candidate_id=_FIRST_ID,
+        )
+
+    assert item_raised.value.code is CandidateReviewErrorCode.CANDIDATE_NOT_FOUND
 
 
 @pytest.mark.asyncio
@@ -466,10 +466,7 @@ async def test_page_rejects_malformed_base64_cursor_as_a_business_error() -> Non
         year=2025,
         doi="10.1000/review.cursor",
     )
-    service = CandidateReviewService(
-        cast(AsyncSession, FakeSession(_run())),
-        cast(SearchSessionStore, _store(candidate)),
-    )
+    service = CandidateReviewQueryService(_review_session(_store(candidate)))
 
     with pytest.raises(CandidateReviewError) as raised:
         await service.page(
@@ -495,11 +492,10 @@ async def test_item_reads_a_selected_candidate_without_scanning_a_page() -> None
         doi="10.1000/review.detail",
     )
     store = _store(candidate)
-    service = CandidateReviewService(
-        cast(AsyncSession, FakeSession(_run())),
-        cast(SearchSessionStore, store),
-    )
-    await service.update_selection(
+    session = _review_session(store)
+    selection = CandidateSelectionService(session)
+    query = CandidateReviewQueryService(session)
+    await selection.update_selection(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
         search_run_id=_RUN_ID,
@@ -507,7 +503,7 @@ async def test_item_reads_a_selected_candidate_without_scanning_a_page() -> None
         selected=True,
     )
 
-    item = await service.item(
+    item = await query.item(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
         search_run_id=_RUN_ID,
@@ -530,12 +526,20 @@ async def test_prepare_selected_reuses_single_candidate_fulltext_service() -> No
     )
     store = _store(candidate)
     queue = FakeQueue()
-    service = CandidateReviewService(
-        cast(AsyncSession, FakeSession(_run())),
-        cast(SearchSessionStore, store),
-        fulltext_queue=queue,
+    runs = cast(SearchRunRepository, FakeSearchRunRepository(_run()))
+    session_store = cast(SearchSessionStore, store)
+    session = CandidateReviewSession(runs, session_store)
+    selection = CandidateSelectionService(session)
+    service = CandidatePreparationService(
+        session,
+        CandidateFulltextService(
+            runs,
+            session_store,
+            queue,
+            candidate_lookup=SearchCandidateFulltextLookup(runs, session_store),
+        ),
     )
-    await service.update_selection(
+    await selection.update_selection(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
         search_run_id=_RUN_ID,

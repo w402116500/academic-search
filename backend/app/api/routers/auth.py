@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
+from fastapi import APIRouter, Depends, HTTPException, status
+
 from app.api.deps.auth import get_current_user
+from app.api.deps.services import get_authentication_service
 from app.core.security import (
     AuthenticationConfigurationError,
     AuthenticationSettings,
     create_access_token,
     get_authentication_settings,
 )
-from app.db.models.user import User
-from app.db.session import get_db_session
 from app.modules.auth.contracts import (
     AuthenticationResponse,
     AuthError,
@@ -21,9 +22,8 @@ from app.modules.auth.contracts import (
     LoginRequest,
     RegisterRequest,
 )
+from app.modules.auth.models import UserAccount
 from app.modules.auth.service import AuthenticationService
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 
@@ -61,7 +61,7 @@ def _authentication_settings_or_unavailable() -> AuthenticationSettings:
 
 
 def _authentication_response(
-    user: User, settings: AuthenticationSettings
+    user: UserAccount, settings: AuthenticationSettings
 ) -> AuthenticationResponse:
     """以同一格式返回注册和登录成功结果。"""
     token = create_access_token(user_id=user.id, settings=settings)
@@ -76,13 +76,13 @@ def _authentication_response(
 )
 async def register(
     request: RegisterRequest,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    service: Annotated[AuthenticationService, Depends(get_authentication_service)],
 ) -> AuthenticationResponse:
     """创建账号并立即返回访问令牌，邮箱验证将在后续独立接入。"""
     # 注册会写入用户表，因此必须先确认能够签发令牌，避免账号半成功。
     settings = _authentication_settings_or_unavailable()
     try:
-        user = await AuthenticationService(session).register(request)
+        user = await service.register(request)
     except AuthError as exc:
         raise _auth_error_response(exc) from exc
     return _authentication_response(user, settings)
@@ -91,18 +91,20 @@ async def register(
 @router.post("/login", response_model=AuthenticationResponse, summary="使用邮箱密码登录")
 async def login(
     request: LoginRequest,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    service: Annotated[AuthenticationService, Depends(get_authentication_service)],
 ) -> AuthenticationResponse:
     """验证本地账号密码并签发新的短生命周期访问令牌。"""
     settings = _authentication_settings_or_unavailable()
     try:
-        user = await AuthenticationService(session).authenticate(request)
+        user = await service.authenticate(request)
     except AuthError as exc:
         raise _auth_error_response(exc) from exc
     return _authentication_response(user, settings)
 
 
 @router.get("/me", response_model=CurrentUserResponse, summary="获取当前登录账号")
-async def get_me(current_user: Annotated[User, Depends(get_current_user)]) -> CurrentUserResponse:
+async def get_me(
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+) -> CurrentUserResponse:
     """让前端在刷新后确认 Bearer Token 对应的登录用户。"""
     return CurrentUserResponse.model_validate(current_user)

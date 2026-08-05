@@ -6,8 +6,9 @@ from collections.abc import Mapping, Sequence
 from urllib.parse import quote
 
 import httpx
+
 from app.core.settings import DoiResolverSettings
-from app.modules.search.contracts import (
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationResolutionError,
@@ -15,7 +16,7 @@ from app.modules.search.contracts import (
     DoiCslRecord,
     DoiMetadataResolution,
 )
-from app.modules.search.normalize import normalize_doi
+from app.modules.literature.normalization import normalize_doi
 from app.modules.search.providers.http_client import create_provider_async_client
 
 

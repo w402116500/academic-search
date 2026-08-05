@@ -1,33 +1,25 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
-import { useQuery } from "@tanstack/vue-query";
 import { useRoute, useRouter } from "vue-router";
 
-import { getWorkspace } from "@/api/collections";
-import { getCurrentSearchRun } from "@/api/workflow";
+import { useWorkspaceQuery } from "@/api/hooks/research";
+import { useCurrentSearchRunQuery } from "@/api/hooks/search";
 import AppHeader from "@/components/AppHeader.vue";
 import {
   routeForRecoveredSearchRun,
   shouldRestoreCurrentSearchRun,
-} from "@/features/research/search-run-state";
+} from "@/features/search/search-run-state";
 import PlanReviewView from "@/views/PlanReviewView.vue";
 import SearchRunView from "@/views/SearchRunView.vue";
 
 const route = useRoute();
 const router = useRouter();
 const workspaceId = computed(() => String(route.params.workspaceId));
-const workspaceQuery = useQuery({
-  queryKey: computed(() => ["workspace", workspaceId.value]),
-  queryFn: () => getWorkspace(workspaceId.value),
-});
+const workspaceQuery = useWorkspaceQuery(workspaceId);
 const shouldRestoreSearchRun = computed(() =>
   shouldRestoreCurrentSearchRun(workspaceQuery.data.value?.workflow_stage),
 );
-const currentSearchRunQuery = useQuery({
-  queryKey: computed(() => ["search-run", workspaceId.value]),
-  queryFn: () => getCurrentSearchRun(workspaceId.value),
-  enabled: shouldRestoreSearchRun,
-});
+const currentSearchRunQuery = useCurrentSearchRunQuery(workspaceId, shouldRestoreSearchRun);
 
 // URL 中的运行标识优先恢复进度画布；没有标识时根据服务端阶段找回当前运行。
 const showSearchRunner = computed(

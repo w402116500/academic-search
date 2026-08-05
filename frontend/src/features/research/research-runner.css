@@ -1,0 +1,51 @@
+.runner-page {
+  background: var(--canvas);
+}
+.runner-main {
+  width: min(100% - 56px, 1120px);
+  min-height: calc(100dvh - 66px);
+  margin: 0 auto;
+  padding: 40px 0 70px;
+}
+.runner-canvas {
+  min-height: 620px;
+}
+.runner-workspace-context {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.runner-workspace-context strong {
+  max-width: 460px;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-family: var(--sans);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runner-canvas .stage-view {
+  padding-top: 24px;
+}
+.runner-error {
+  margin-top: 44px;
+  border: 1px solid #ecc4ce;
+  background: #fff7f8;
+  color: var(--red);
+  padding: 16px;
+  font-size: 13px;
+}
+.runner-surface-enter-active,
+.runner-surface-leave-active {
+  transition:
+    opacity 0.24s ease,
+    transform 0.24s ease;
+}
+.runner-surface-enter-from,
+.runner-surface-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}

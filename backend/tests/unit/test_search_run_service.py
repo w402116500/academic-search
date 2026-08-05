@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import cast
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
-from app.db.models.collection import ResearchCollection
-from app.db.models.workflow import ResearchPlan, SearchRun
-from app.modules.workflow.contracts import SearchRunError, SearchRunErrorCode
-from app.modules.workflow.job_queue import SearchRunQueueError
-from app.modules.workflow.search_run_service import SearchRunService
-from app.modules.workflow.settings import WorkflowSettings
-from app.modules.workflow.state import ResearchPlanStatus, SearchRunStatus, WorkspaceWorkflowStage
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.workflow_settings import WorkflowSettings
+from app.modules.research.plan_models import ResearchPlanRecord
+from app.modules.research.state import ResearchPlanStatus, WorkspaceWorkflowStage
+from app.modules.search.api_contracts import SearchRunError, SearchRunErrorCode
+from app.modules.search.queue import SearchRunQueueError
+from app.modules.search.run_models import (
+    DailySearchRunCounts,
+    SearchRunContext,
+    SearchRunRecord,
+    SearchWorkspace,
+)
+from app.modules.search.run_repository import CreateSearchRun
+from app.modules.search.run_service import SearchRunService
+from app.modules.search.state import SearchRunStage, SearchRunStatus
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000000401")
 _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000402")
@@ -37,66 +41,180 @@ class FakeQueue:
         return f"job-{search_run_id}"
 
 
-class FakeSession:
-    """检索运行服务所需的最小异步会话替身。"""
+class FakeSearchRunRepository:
+    """In-memory search-run port replacement for command tests."""
 
-    def __init__(self, scalar_values: list[object | None]) -> None:
-        self._scalar_values = iter(scalar_values)
-        self.added: list[object] = []
-        self.commit_count = 0
-        self.rollback_count = 0
+    def __init__(
+        self,
+        *,
+        workspace: SearchWorkspace | None = None,
+        plan: ResearchPlanRecord | None = None,
+        run: SearchRunRecord | None = None,
+        has_active_run: bool = False,
+        counts: DailySearchRunCounts | None = None,
+    ) -> None:
+        self.workspace = workspace
+        self.plan = plan
+        self.run = run
+        self._has_active_run = has_active_run
+        self.counts = counts or DailySearchRunCounts(user=0, global_=0)
+        self.created_commands: list[CreateSearchRun] = []
+        self.saved_contexts: list[SearchRunContext] = []
 
-    @asynccontextmanager
-    async def begin(self) -> AsyncIterator[FakeSession]:
-        yield self
+    async def get_owned_workspace_for_update(
+        self, *, owner_user_id: UUID, collection_id: UUID
+    ) -> SearchWorkspace | None:
+        if (
+            self.workspace is None
+            or self.workspace.owner_user_id != owner_user_id
+            or self.workspace.id != collection_id
+        ):
+            return None
+        return self.workspace
 
-    async def scalar(self, _statement: object) -> object | None:
-        return next(self._scalar_values)
+    async def get_confirmed_plan_for_update(
+        self, *, collection_id: UUID
+    ) -> ResearchPlanRecord | None:
+        if self.plan is None or self.plan.collection_id != collection_id:
+            return None
+        return self.plan
 
-    def add(self, value: object) -> None:
-        self.added.append(value)
+    async def get_current_run(
+        self, *, owner_user_id: UUID, collection_id: UUID
+    ) -> SearchRunRecord | None:
+        if self.workspace is None or self.workspace.owner_user_id != owner_user_id:
+            return None
+        if self.run is None or self.run.collection_id != collection_id:
+            return None
+        return self.run
 
-    async def commit(self) -> None:
-        self.commit_count += 1
+    async def get_owned_run(
+        self,
+        *,
+        owner_user_id: UUID,
+        collection_id: UUID,
+        search_run_id: UUID,
+        for_update: bool = False,
+    ) -> SearchRunRecord | None:
+        del for_update
+        run = await self.get_current_run(
+            owner_user_id=owner_user_id,
+            collection_id=collection_id,
+        )
+        return run if run is not None and run.id == search_run_id else None
 
-    async def rollback(self) -> None:
-        self.rollback_count += 1
+    async def has_active_run(self, research_plan_id: UUID) -> bool:
+        assert research_plan_id == _PLAN_ID
+        return self._has_active_run
 
-    async def refresh(self, _instance: object) -> None:
-        return None
+    async def count_since(
+        self, *, owner_user_id: UUID, period_start: datetime
+    ) -> DailySearchRunCounts:
+        assert owner_user_id == _OWNER_ID
+        assert period_start.tzinfo is not None
+        return self.counts
+
+    async def create_run(
+        self, *, workspace: SearchWorkspace, command: CreateSearchRun
+    ) -> SearchRunContext:
+        self.created_commands.append(command)
+        now = datetime.now(UTC)
+        self.workspace = workspace
+        self.run = SearchRunRecord(
+            id=command.run_id,
+            collection_id=command.collection_id,
+            research_plan_id=command.research_plan_id,
+            arq_job_id=None,
+            redis_session_key=command.redis_session_key,
+            status=SearchRunStatus.QUEUED.value,
+            stage=SearchRunStage.DISPATCH.value,
+            attempt_no=command.attempt_no,
+            provider_summary={},
+            candidate_counts={},
+            error_code=None,
+            error_message=None,
+            started_at=None,
+            finished_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        return SearchRunContext(workspace, self.run)
+
+    async def get_run_context_for_update(self, search_run_id: UUID) -> SearchRunContext | None:
+        if self.workspace is None or self.run is None or self.run.id != search_run_id:
+            return None
+        return SearchRunContext(self.workspace, self.run)
+
+    async def get_relevance_run_for_update(self, search_run_id: UUID) -> SearchRunRecord | None:
+        return self.run if self.run is not None and self.run.id == search_run_id else None
+
+    async def get_plan(self, research_plan_id: UUID) -> ResearchPlanRecord | None:
+        return self.plan if self.plan is not None and self.plan.id == research_plan_id else None
+
+    async def save(self, context: SearchRunContext) -> SearchRunContext:
+        self.workspace = context.workspace
+        self.run = context.run
+        self.saved_contexts.append(context)
+        return context
 
 
-def _collection(*, stage: str = "plan_review") -> ResearchCollection:
-    """构造已通过认证归属检查的活动工作区。"""
-    return ResearchCollection(
+def _collection(*, stage: str = "plan_review") -> SearchWorkspace:
+    return SearchWorkspace(
         id=_COLLECTION_ID,
         owner_user_id=_OWNER_ID,
-        name="Search test workspace",
         status="active",
         workflow_stage=stage,
     )
 
 
-def _plan(*, status: str = ResearchPlanStatus.CONFIRMED.value) -> ResearchPlan:
-    """构造含有一个方向查询的研究计划。"""
-    return ResearchPlan(
+def _plan(*, status: str = ResearchPlanStatus.CONFIRMED.value) -> ResearchPlanRecord:
+    now = datetime.now(UTC)
+    return ResearchPlanRecord(
         id=_PLAN_ID,
         collection_id=_COLLECTION_ID,
         revision=1,
         raw_request="城市绿地如何影响心理健康？",
         status=status,
         direction_options=[{"id": "green-space", "title": "绿地与心理健康"}],
+        selected_direction_id="green-space",
         scope={"confirmed": {"start_year": 2020, "end_year": 2024, "languages": ["zh"]}},
         query_plan={
             "selected_direction_id": "green-space",
             "queries": [{"provider": "openalex", "query": "green space mental health"}],
         },
         model_snapshot={},
+        arq_job_id=None,
+        error_code=None,
+        error_message=None,
+        confirmed_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _run(*, status: str, attempt_no: int) -> SearchRunRecord:
+    now = datetime.now(UTC)
+    return SearchRunRecord(
+        id=_RUN_ID,
+        collection_id=_COLLECTION_ID,
+        research_plan_id=_PLAN_ID,
+        arq_job_id=None,
+        redis_session_key=f"search:session:{_RUN_ID}",
+        status=status,
+        stage=SearchRunStage.COMPLETED.value,
+        attempt_no=attempt_no,
+        provider_summary={},
+        candidate_counts={},
+        error_code=None,
+        error_message=None,
+        started_at=now,
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
     )
 
 
 def _workflow_settings(*, user_limit: int = 20, global_limit: int = 500) -> WorkflowSettings:
-    """仅构造本服务读取的配额字段，避免单元测试依赖本地模型凭据。"""
     return WorkflowSettings.model_construct(
         workflow_user_daily_search_run_limit=user_limit,
         workflow_global_daily_search_run_limit=global_limit,
@@ -105,79 +223,55 @@ def _workflow_settings(*, user_limit: int = 20, global_limit: int = 500) -> Work
 
 @pytest.mark.asyncio
 async def test_start_search_requires_confirmed_plan_and_queues_once() -> None:
-    """只有确认计划才能创建运行，成功后使用服务端生成的运行 UUID 投递。"""
     collection = _collection()
-    plan = _plan()
-    session = FakeSession([collection, plan, None, 0, 0])
+    plans = FakeSearchRunRepository(workspace=collection, plan=_plan())
     queue = FakeQueue()
 
-    submission = await SearchRunService(
-        cast(AsyncSession, session), queue, settings=_workflow_settings()
-    ).start_search(
-        owner_user_id=_OWNER_ID,
-        collection_id=_COLLECTION_ID,
+    submission = await SearchRunService(plans, queue, settings=_workflow_settings()).start_search(
+        owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID
     )
 
     assert submission.search_run.status == SearchRunStatus.QUEUED.value
     assert submission.search_run.research_plan_id == _PLAN_ID
-    assert collection.workflow_stage == WorkspaceWorkflowStage.RETRIEVING.value
+    assert submission.collection.workflow_stage == WorkspaceWorkflowStage.RETRIEVING.value
     assert queue.enqueued_run_ids == [submission.search_run.id]
 
-    not_confirmed = FakeSession([collection, None])
+    not_confirmed = FakeSearchRunRepository(workspace=collection)
     with pytest.raises(SearchRunError) as error:
         await SearchRunService(
-            cast(AsyncSession, not_confirmed), FakeQueue(), settings=_workflow_settings()
-        ).start_search(
-            owner_user_id=_OWNER_ID,
-            collection_id=_COLLECTION_ID,
-        )
+            not_confirmed, FakeQueue(), settings=_workflow_settings()
+        ).start_search(owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID)
     assert error.value.code is SearchRunErrorCode.PLAN_NOT_CONFIRMED
 
 
 @pytest.mark.asyncio
 async def test_start_search_rejects_an_existing_active_run() -> None:
-    """重复点击不会创建第二条 queued/running 运行。"""
-    active_run = SearchRun(
-        id=_RUN_ID,
-        collection_id=_COLLECTION_ID,
-        research_plan_id=_PLAN_ID,
-        status=SearchRunStatus.RUNNING.value,
-        stage="provider_search",
-        attempt_no=1,
-        provider_summary={},
-        candidate_counts={},
+    runs = FakeSearchRunRepository(
+        workspace=_collection(),
+        plan=_plan(),
+        has_active_run=True,
     )
-    session = FakeSession([_collection(), _plan(), active_run])
-
     with pytest.raises(SearchRunError) as error:
-        await SearchRunService(cast(AsyncSession, session), FakeQueue()).start_search(
+        await SearchRunService(runs, FakeQueue()).start_search(
             owner_user_id=_OWNER_ID,
             collection_id=_COLLECTION_ID,
         )
 
     assert error.value.code is SearchRunErrorCode.ACTIVE_RUN_EXISTS
-    assert session.added == []
+    assert runs.created_commands == []
 
 
 @pytest.mark.asyncio
 async def test_retry_creates_a_new_attempt_without_overwriting_history() -> None:
-    """失败运行重试时递增 attempt_no，并保留旧运行对象。"""
-    previous = SearchRun(
-        id=_RUN_ID,
-        collection_id=_COLLECTION_ID,
-        research_plan_id=_PLAN_ID,
-        status=SearchRunStatus.PARTIAL_FAILED.value,
-        stage="completed",
-        attempt_no=2,
-        provider_summary={},
-        candidate_counts={},
+    previous = _run(status=SearchRunStatus.PARTIAL_FAILED.value, attempt_no=2)
+    runs = FakeSearchRunRepository(
+        workspace=_collection(stage="screening"),
+        plan=_plan(),
+        run=previous,
     )
-    session = FakeSession([_collection(stage="screening"), previous, _plan(), None, 0, 0])
     queue = FakeQueue()
 
-    submission = await SearchRunService(
-        cast(AsyncSession, session), queue, settings=_workflow_settings()
-    ).retry_search(
+    submission = await SearchRunService(runs, queue, settings=_workflow_settings()).retry_search(
         owner_user_id=_OWNER_ID,
         collection_id=_COLLECTION_ID,
         previous_run_id=_RUN_ID,
@@ -191,69 +285,63 @@ async def test_retry_creates_a_new_attempt_without_overwriting_history() -> None
 
 @pytest.mark.asyncio
 async def test_queue_failure_marks_run_and_workspace_failed() -> None:
-    """Redis 不可用时保留失败运行，不返回伪成功。"""
-    collection = _collection()
-    session = FakeSession([collection, _plan(), None, 0, 0])
+    runs = FakeSearchRunRepository(workspace=_collection(), plan=_plan())
 
     with pytest.raises(SearchRunError) as error:
         await SearchRunService(
-            cast(AsyncSession, session), FakeQueue(fail=True), settings=_workflow_settings()
-        ).start_search(
-            owner_user_id=_OWNER_ID,
-            collection_id=_COLLECTION_ID,
-        )
+            runs, FakeQueue(fail=True), settings=_workflow_settings()
+        ).start_search(owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID)
 
-    run = session.added[0]
-    assert isinstance(run, SearchRun)
-    assert run.status == SearchRunStatus.FAILED.value
-    assert collection.workflow_stage == WorkspaceWorkflowStage.FAILED.value
+    assert runs.run is not None
+    assert runs.run.status == SearchRunStatus.FAILED.value
+    assert runs.workspace is not None
+    assert runs.workspace.workflow_stage == WorkspaceWorkflowStage.FAILED.value
     assert error.value.code is SearchRunErrorCode.QUEUE_UNAVAILABLE
 
 
 @pytest.mark.asyncio
 async def test_start_search_rejects_user_and_global_daily_submission_limits() -> None:
-    """检索运行在落库前检查用户与全局 UTC 自然日预算。"""
-    user_limited = FakeSession([_collection(), _plan(), None, 1])
+    user_limited = FakeSearchRunRepository(
+        workspace=_collection(),
+        plan=_plan(),
+        counts=DailySearchRunCounts(user=1, global_=1),
+    )
     with pytest.raises(SearchRunError) as user_error:
         await SearchRunService(
-            cast(AsyncSession, user_limited),
+            user_limited,
             FakeQueue(),
             settings=_workflow_settings(user_limit=1),
         ).start_search(owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID)
-
     assert user_error.value.code is SearchRunErrorCode.USER_QUOTA_EXCEEDED
-    assert user_limited.added == []
+    assert user_limited.created_commands == []
 
-    global_limited = FakeSession([_collection(), _plan(), None, 0, 1])
+    global_limited = FakeSearchRunRepository(
+        workspace=_collection(),
+        plan=_plan(),
+        counts=DailySearchRunCounts(user=0, global_=1),
+    )
     with pytest.raises(SearchRunError) as global_error:
         await SearchRunService(
-            cast(AsyncSession, global_limited),
+            global_limited,
             FakeQueue(),
             settings=_workflow_settings(global_limit=1),
         ).start_search(owner_user_id=_OWNER_ID, collection_id=_COLLECTION_ID)
-
     assert global_error.value.code is SearchRunErrorCode.GLOBAL_BUDGET_EXHAUSTED
-    assert global_limited.added == []
+    assert global_limited.created_commands == []
 
 
 @pytest.mark.asyncio
 async def test_retry_search_consumes_the_same_daily_submission_budget() -> None:
-    """失败检索的重试同样在创建新运行前受配额保护。"""
-    previous = SearchRun(
-        id=_RUN_ID,
-        collection_id=_COLLECTION_ID,
-        research_plan_id=_PLAN_ID,
-        status=SearchRunStatus.FAILED.value,
-        stage="completed",
-        attempt_no=1,
-        provider_summary={},
-        candidate_counts={},
+    runs = FakeSearchRunRepository(
+        workspace=_collection(stage="failed"),
+        plan=_plan(),
+        run=_run(status=SearchRunStatus.FAILED.value, attempt_no=1),
+        counts=DailySearchRunCounts(user=1, global_=1),
     )
-    session = FakeSession([_collection(stage="failed"), previous, _plan(), None, 1])
 
     with pytest.raises(SearchRunError) as error:
         await SearchRunService(
-            cast(AsyncSession, session),
+            runs,
             FakeQueue(),
             settings=_workflow_settings(user_limit=1),
         ).retry_search(
@@ -263,4 +351,4 @@ async def test_retry_search_consumes_the_same_daily_submission_budget() -> None:
         )
 
     assert error.value.code is SearchRunErrorCode.USER_QUOTA_EXCEEDED
-    assert session.added == []
+    assert runs.created_commands == []

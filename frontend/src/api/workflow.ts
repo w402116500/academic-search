@@ -8,7 +8,6 @@ import type {
   ResearchPlan,
   ResearchScope,
   ResearchSubmissionResponse,
-  SearchCandidatesResponse,
   SearchCandidatePageResponse,
   SearchRun,
 } from "./types";
@@ -115,19 +114,5 @@ export const admitCandidateSelection = (
 
 export const retrySearch = (workspaceId: string, runId: string): Promise<SearchRun> =>
   apiFetch<SearchRun>(`/api/v1/collections/${workspaceId}/search-runs/${runId}/retry`, {
-    method: "POST",
-  });
-
-export const retryCandidateRelevance = (
-  workspaceId: string,
-  runId: string,
-): Promise<SearchCandidatesResponse> =>
-  apiFetch<SearchCandidatesResponse>(
-    `/api/v1/collections/${workspaceId}/search-runs/${runId}/relevance/retry`,
-    { method: "POST" },
-  );
-
-export const cancelCandidateRelevance = (workspaceId: string, runId: string): Promise<SearchRun> =>
-  apiFetch<SearchRun>(`/api/v1/collections/${workspaceId}/search-runs/${runId}/relevance/cancel`, {
     method: "POST",
   });

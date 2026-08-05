@@ -6,20 +6,20 @@ from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
 
-from app.db.session import async_session_factory
-from app.modules.collections.build_service import ResearchCollectionBuildService
-from app.modules.fulltext.settings import get_fulltext_acquisition_settings
-from app.modules.fulltext.storage import Boto3StagingObjectStorage
-from app.modules.ingestion.chunking import ChunkingConfig, HierarchicalChunker
-from app.modules.ingestion.contracts import IngestionError, IngestionErrorCode
-from app.modules.ingestion.embedding import OpenAICompatibleTextEmbedder
-from app.modules.ingestion.milvus import MilvusDocumentChunkIndex
-from app.modules.ingestion.parser import PdfTextParser
-from app.modules.ingestion.repository import SqlAlchemyIngestionRepository
-from app.modules.ingestion.service import DocumentIngestionService
-from app.modules.ingestion.settings import IngestionSettings, get_ingestion_settings
-from app.workers.queues import INGESTION_QUEUE_NAME
-from app.workers.redis import redis_settings_from_environment
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
+from app.core.ingestion_settings import IngestionSettings, get_ingestion_settings
+from app.infra.db.repositories.collection_builds import SqlAlchemyCollectionBuildAdapter
+from app.infra.db.repositories.ingestion import SqlAlchemyIngestionRepository
+from app.infra.db.session import async_session_factory
+from app.infra.llm.embeddings import OpenAICompatibleTextEmbedder
+from app.infra.milvus.document_chunks import MilvusDocumentChunkIndex
+from app.infra.redis.connection import redis_settings_from_environment
+from app.infra.redis.queues import INGESTION_QUEUE_NAME
+from app.infra.storage.documents import Boto3StagingObjectStorage
+from app.modules.rag.ingestion.chunking import ChunkingConfig, HierarchicalChunker
+from app.modules.rag.ingestion.contracts import IngestionError, IngestionErrorCode
+from app.modules.rag.ingestion.parser import PdfTextParser
+from app.modules.rag.ingestion.service import DocumentIngestionService
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +80,7 @@ async def ingest_document(ctx: dict[str, Any], ingestion_run_id: str) -> dict[st
     finally:
         # 入库服务已先提交本次运行的 completed/failed 状态；这里再汇总工作区展示阶段。
         async with async_session_factory() as stage_session:
-            await ResearchCollectionBuildService(
+            await SqlAlchemyCollectionBuildAdapter(
                 stage_session
             ).refresh_collection_stage_for_ingestion_run(run_id)
 

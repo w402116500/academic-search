@@ -12,36 +12,49 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from app.db.models.collection import ResearchCollection
-from app.db.models.document import Document, IngestionRun
-from app.db.models.paper import Paper
-from app.db.models.user import User
-from app.db.models.workflow import ResearchPlan, SearchRun
-from app.db.session import async_session_factory
-from app.modules.fulltext import Boto3StagingObjectStorage, get_fulltext_acquisition_settings
-from app.modules.fulltext.contracts import FulltextAcquisitionStatus
-from app.modules.search.contracts import (
-    CandidateAuthor,
-    CandidateLinks,
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
+from app.infra.db.models.collection import ResearchCollection
+from app.infra.db.models.document import Document, IngestionRun
+from app.infra.db.models.paper import Paper
+from app.infra.db.models.user import User
+from app.infra.db.models.workflow import ResearchPlan, SearchRun
+from app.infra.db.repositories.literature_admission import (
+    SqlAlchemyLiteratureAdmissionAdapter,
+)
+from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
+from app.infra.db.session import async_session_factory
+from app.infra.redis.connection import redis_client_from_environment
+from app.infra.redis.search_session import RedisSearchSessionStore
+from app.infra.storage.documents import Boto3StagingObjectStorage
+from app.modules.documents.contracts import FulltextAcquisitionStatus
+from app.modules.documents.keys import build_candidate_fulltext_key
+from app.modules.documents.service import CandidateFulltextService
+from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
     CitationMetadata,
     CitationMetadataStatus,
+)
+from app.modules.research.state import ResearchPlanStatus
+from app.modules.search.contracts import (
+    CandidateAuthor,
+    CandidateLinks,
     RawCandidate,
     SourceName,
     TriageDecision,
     UnifiedCandidate,
 )
-from app.modules.workflow.candidate_review_service import CandidateReviewService
-from app.modules.workflow.search_session import (
-    SearchSessionStore,
-    build_candidate_fulltext_key,
+from app.modules.search.fulltext_candidate import SearchCandidateFulltextLookup
+from app.modules.search.review_admission import CandidateAdmissionService
+from app.modules.search.review_preparation import CandidatePreparationService
+from app.modules.search.review_selection import CandidateSelectionService
+from app.modules.search.review_session import CandidateReviewSession
+from app.modules.search.session import (
     build_candidate_selection_key,
     build_search_session_key,
 )
-from app.modules.workflow.state import ResearchPlanStatus, SearchRunStage, SearchRunStatus
+from app.modules.search.state import SearchRunStage, SearchRunStatus
 from app.workers.fulltext import acquire_candidate_fulltext
-from app.workers.redis import redis_client_from_environment
 from sqlalchemy import select
 
 _LIVE_TEST_ENVIRONMENT_FLAG = "RUN_LIVE_CANDIDATE_REVIEW_E2E_TESTS"
@@ -178,7 +191,7 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
             )
             await session.commit()
 
-        store = SearchSessionStore(redis, ttl_seconds=600)
+        store = RedisSearchSessionStore(redis, ttl_seconds=600)
         candidate = _candidate(candidate_id)
         await store.write_snapshot(
             session_key,
@@ -192,19 +205,26 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
 
         queue = FakeFulltextQueue()
         async with async_session_factory() as session:
-            review = CandidateReviewService(
-                session,
-                store,
-                fulltext_queue=queue,
+            runs = SqlAlchemySearchRunRepository(session)
+            review_session = CandidateReviewSession(runs, store)
+            selection = CandidateSelectionService(review_session)
+            preparation = CandidatePreparationService(
+                review_session,
+                CandidateFulltextService(
+                    runs,
+                    store,
+                    queue,
+                    candidate_lookup=SearchCandidateFulltextLookup(runs, store),
+                ),
             )
-            await review.update_selection(
+            await selection.update_selection(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
                 search_run_id=run_id,
                 candidate_ids=[candidate_id],
                 selected=True,
             )
-            prepared = await review.prepare_selected(
+            prepared = await preparation.prepare_selected(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
                 search_run_id=run_id,
@@ -225,12 +245,20 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
         assert fulltext_state["result"]["status"] == FulltextAcquisitionStatus.AVAILABLE.value
 
         async with async_session_factory() as session:
-            review = CandidateReviewService(
-                session,
-                store,
-                admission_storage=storage,
+            runs = SqlAlchemySearchRunRepository(session)
+            review_session = CandidateReviewSession(runs, store)
+            selection = CandidateSelectionService(review_session)
+            admission = CandidateAdmissionService(
+                review_session,
+                CandidateFulltextService(
+                    runs,
+                    store,
+                    candidate_lookup=SearchCandidateFulltextLookup(runs, store),
+                ),
+                SqlAlchemyLiteratureAdmissionAdapter(session, storage),
+                selection,
             )
-            admitted = await review.admit_selected(
+            admitted = await admission.admit_selected(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
                 search_run_id=run_id,

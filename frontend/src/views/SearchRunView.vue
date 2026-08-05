@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
-import { useQueryClient } from "@tanstack/vue-query";
+import { computed, onMounted } from "vue";
 import {
   ArrowRight,
   Check,
@@ -14,30 +13,33 @@ import {
 } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
 
-import { apiUrl, getAccessToken, ApiError } from "@/api/client";
 import {
   isSearchRunProgressStalled,
   searchRunCandidateCount,
   searchRunRelevanceProgress,
-} from "@/features/research/search-run-state";
-import { getCurrentSearchRun, retrySearch, startSearch } from "@/api/workflow";
-import type { ProviderSummary, SearchProgressEvent, SearchRun, SearchRunStage } from "@/api/types";
+  searchRunScreeningCandidateCount,
+} from "@/features/search/search-run-state";
+import { isSearchRunTerminal, useSearchProgress } from "@/features/search/use-search-progress";
+import type { ProviderSummary, SearchRunStage } from "@/api/types";
 
 const route = useRoute();
 const router = useRouter();
-const queryClient = useQueryClient();
 const workspaceId = computed(() => String(route.params.workspaceId));
-const run = ref<SearchRun | null>(null);
-const errorMessage = ref<string | null>(null);
-const loading = ref(true);
-const controller = ref<AbortController | null>(null);
-const lastProgressMessage = ref<string | null>(null);
-const lastProgressAt = ref<number | null>(null);
-const progressStreamStartedAt = ref<number | null>(null);
-const streamProblemMessage = ref<string | null>(null);
-const reconnecting = ref(false);
-const progressClock = ref(Date.now());
-let progressClockTimer: ReturnType<typeof setInterval> | null = null;
+const {
+  run,
+  errorMessage,
+  loading,
+  lastProgressMessage,
+  lastProgressAt,
+  progressStreamStartedAt,
+  streamProblemMessage,
+  reconnecting,
+  progressClock,
+  initialize,
+  retry,
+  reconnectProgress,
+} = useSearchProgress(workspaceId);
+const terminal = isSearchRunTerminal;
 const stages: { key: SearchRunStage; title: string; detail: string; icon: typeof DatabaseZap }[] = [
   {
     key: "provider_search",
@@ -60,12 +62,15 @@ const stages: { key: SearchRunStage; title: string; detail: string; icon: typeof
     icon: Check,
   },
 ];
-const terminal = (status: string | undefined): boolean =>
-  ["completed", "partial_failed", "failed", "expired", "cancelled"].includes(status ?? "");
 const candidatesReady = computed(() =>
   ["completed", "partial_failed"].includes(run.value?.status ?? ""),
 );
-const candidateCount = computed(() => searchRunCandidateCount(run.value?.candidate_counts ?? {}));
+const candidateCount = computed(() => {
+  const candidateCounts = run.value?.candidate_counts ?? {};
+  return candidatesReady.value
+    ? searchRunScreeningCandidateCount(candidateCounts)
+    : searchRunCandidateCount(candidateCounts);
+});
 const relevanceProgress = computed(() =>
   searchRunRelevanceProgress(run.value?.candidate_counts ?? {}),
 );
@@ -79,10 +84,9 @@ const stageState = (stage: SearchRunStage): "done" | "active" | "locked" => {
   return current > index ? "done" : current === index ? "active" : "locked";
 };
 const relevanceProgressLabel = computed(() => {
-  const { total, completed, failed } = relevanceProgress.value;
+  const { total, analyzed, excluded } = relevanceProgress.value;
   if (!total) return "正在准备相关性判断";
-  if (failed) return `已分析 ${completed} / ${total} 篇，${failed} 篇需要重试`;
-  return `已分析 ${completed} / ${total} 篇`;
+  return `正在分析候选相关性 · 已分析 ${analyzed} / ${total} 篇 · 已排除 ${excluded} 篇`;
 });
 const currentStageDetail = computed(() => {
   const currentStage = stages.find((stage) => stage.key === run.value?.stage);
@@ -203,142 +207,7 @@ const failedProviderNotice = computed(() => {
   return `${failedProviderCount.value} 个来源暂未返回，系统仍会继续处理其他来源已返回的候选。`;
 });
 
-async function loadRun(): Promise<SearchRun> {
-  try {
-    return await getCurrentSearchRun(workspaceId.value);
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) return startSearch(workspaceId.value);
-    throw error;
-  }
-}
-
-function saveRun(nextRun: SearchRun): void {
-  run.value = nextRun;
-  queryClient.setQueryData(["search-run", workspaceId.value], nextRun);
-}
-
-function updateFromEvent(event: SearchProgressEvent): void {
-  if (!run.value) return;
-  saveRun({
-    ...run.value,
-    status: event.status,
-    stage: event.stage,
-    provider_summary: event.provider_summary,
-    // 事件可能只携带本阶段新增的统计，不能覆盖已从持久化运行读取到的最终候选数。
-    candidate_counts: { ...run.value.candidate_counts, ...event.candidate_counts },
-  });
-  // 时间与说明只在确实收到 SSE 事件时更新，避免把页面首次加载伪装成实时进度。
-  lastProgressAt.value = Date.now();
-  if (event.message) lastProgressMessage.value = event.message;
-  streamProblemMessage.value = null;
-}
-
-async function refreshTerminalRun(runId: string): Promise<void> {
-  const persistedRun = await getCurrentSearchRun(workspaceId.value);
-  if (persistedRun.id === runId) saveRun(persistedRun);
-}
-
-async function streamEvents(runId: string): Promise<void> {
-  controller.value?.abort();
-  const abort = new AbortController();
-  controller.value = abort;
-  try {
-    const response = await fetch(
-      apiUrl(`/api/v1/collections/${workspaceId.value}/search-runs/${runId}/events`),
-      { headers: { Authorization: `Bearer ${getAccessToken() ?? ""}` }, signal: abort.signal },
-    );
-    if (!response.ok || !response.body) throw new Error("无法建立检索进度流。");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const chunks = buffer.split("\n\n");
-      buffer = chunks.pop() ?? "";
-      for (const chunk of chunks) {
-        const dataLine = chunk.split("\n").find((line) => line.startsWith("data:"));
-        if (!dataLine) continue;
-        try {
-          updateFromEvent(JSON.parse(dataLine.slice(5).trim()) as SearchProgressEvent);
-        } catch {
-          /* 忽略心跳或损坏事件，下一次刷新会恢复真实状态。 */
-        }
-      }
-    }
-    if (run.value && terminal(run.value.status)) {
-      // SSE 只用于推进画布；终态重新读取数据库快照，确保显示最终候选统计。
-      await refreshTerminalRun(runId);
-      return;
-    }
-    if (!abort.signal.aborted) throw new Error("进度连接已结束，请重新连接确认任务状态。");
-  } catch (error) {
-    // 用户主动重连、路由卸载时会终止旧请求，不应把这类正常中断显示为错误。
-    if (abort.signal.aborted || (error instanceof Error && error.name === "AbortError")) return;
-    throw error;
-  } finally {
-    if (controller.value === abort) controller.value = null;
-  }
-}
-
-async function connectProgressStream(runId: string): Promise<void> {
-  streamProblemMessage.value = null;
-  progressStreamStartedAt.value = Date.now();
-  try {
-    await streamEvents(runId);
-  } catch (error) {
-    streamProblemMessage.value =
-      error instanceof Error ? error.message : "无法继续读取检索进度，请重新连接。";
-  }
-}
-
-async function initialize(): Promise<void> {
-  loading.value = true;
-  errorMessage.value = null;
-  controller.value?.abort();
-  try {
-    saveRun(await loadRun());
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : "无法读取检索状态。";
-  } finally {
-    loading.value = false;
-  }
-  if (run.value && !terminal(run.value.status)) void connectProgressStream(run.value.id);
-}
-
-async function retry(): Promise<void> {
-  if (!run.value) return;
-  loading.value = true;
-  errorMessage.value = null;
-  controller.value?.abort();
-  try {
-    saveRun(await retrySearch(workspaceId.value, run.value.id));
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : "检索重试失败。";
-  } finally {
-    loading.value = false;
-  }
-  if (run.value && !terminal(run.value.status)) void connectProgressStream(run.value.id);
-}
-
-async function reconnectProgress(): Promise<void> {
-  if (!run.value || terminal(run.value.status)) return;
-  reconnecting.value = true;
-  await connectProgressStream(run.value.id);
-  reconnecting.value = false;
-}
-
-onMounted(() => {
-  progressClockTimer = setInterval(() => {
-    progressClock.value = Date.now();
-  }, 1_000);
-  void initialize();
-});
-onUnmounted(() => {
-  controller.value?.abort();
-  if (progressClockTimer) clearInterval(progressClockTimer);
-});
+onMounted(() => void initialize());
 </script>
 
 <template>

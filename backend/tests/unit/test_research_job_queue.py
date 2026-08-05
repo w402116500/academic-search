@@ -4,8 +4,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from app.modules.research.job_queue import ArqResearchJobQueue
-from app.workers.queues import RESEARCH_QUEUE_NAME
+from app.infra.redis.job_queues import ArqResearchJobQueue
+from app.infra.redis.queues import RESEARCH_QUEUE_NAME
 
 
 class _FakeRedis:
@@ -32,7 +32,7 @@ async def test_research_retry_uses_new_arq_job_id(monkeypatch: pytest.MonkeyPatc
     async def _create_pool(_: object) -> _FakeRedis:
         return redis
 
-    monkeypatch.setattr("app.modules.research.job_queue.create_pool", _create_pool)
+    monkeypatch.setattr("app.infra.redis.job_queues.create_pool", _create_pool)
     queue = ArqResearchJobQueue()
     research_run_id = uuid4()
 

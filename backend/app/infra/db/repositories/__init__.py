@@ -1,0 +1,1 @@
+"""Named SQLAlchemy repository adapters."""

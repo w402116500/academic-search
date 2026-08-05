@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
 from app.api.deps.auth import get_current_user
-from app.db.models.user import User
-from app.db.session import get_db_session
-from app.modules.collections.workspace_contracts import (
+from app.api.deps.services import get_workspace_service
+from app.modules.auth.models import UserAccount
+from app.modules.research.workspace_contracts import (
     CreateWorkspaceRequest,
     UpdateWorkspaceRequest,
     WorkspaceError,
@@ -16,9 +18,7 @@ from app.modules.collections.workspace_contracts import (
     WorkspaceListResponse,
     WorkspaceResponse,
 )
-from app.modules.collections.workspace_service import ResearchWorkspaceService
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.modules.research.workspace_service import ResearchWorkspaceService
 
 router = APIRouter(prefix="/collections", tags=["研究工作区"])
 
@@ -44,11 +44,11 @@ def _workspace_error_response(error: WorkspaceError) -> HTTPException:
 )
 async def create_workspace(
     request: CreateWorkspaceRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchWorkspaceService, Depends(get_workspace_service)],
 ) -> WorkspaceResponse:
     """创建一个空工作区；研究问题将在进入工作区后另行确认。"""
-    collection = await ResearchWorkspaceService(session).create(
+    collection = await service.create(
         owner_user_id=current_user.id,
         request=request,
     )
@@ -57,8 +57,8 @@ async def create_workspace(
 
 @router.get("", response_model=WorkspaceListResponse, summary="搜索我的研究工作区")
 async def list_workspaces(
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchWorkspaceService, Depends(get_workspace_service)],
     include_archived: bool = Query(default=False, description="是否包含已归档工作区"),
     query: str | None = Query(
         default=None,
@@ -76,7 +76,7 @@ async def list_workspaces(
 ) -> WorkspaceListResponse:
     """供工作区切换器按需加载，默认只显示活动工作区。"""
     try:
-        page = await ResearchWorkspaceService(session).list_owned(
+        page = await service.list_owned(
             owner_user_id=current_user.id,
             include_archived=include_archived,
             query=query,
@@ -94,12 +94,12 @@ async def list_workspaces(
 @router.get("/{collection_id}", response_model=WorkspaceResponse, summary="获取研究工作区详情")
 async def get_workspace(
     collection_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchWorkspaceService, Depends(get_workspace_service)],
 ) -> WorkspaceResponse:
     """读取当前用户拥有的单个活动或归档工作区。"""
     try:
-        collection = await ResearchWorkspaceService(session).get_owned(
+        collection = await service.get_owned(
             owner_user_id=current_user.id,
             collection_id=collection_id,
         )
@@ -112,12 +112,12 @@ async def get_workspace(
 async def update_workspace(
     collection_id: UUID,
     request: UpdateWorkspaceRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchWorkspaceService, Depends(get_workspace_service)],
 ) -> WorkspaceResponse:
     """仅更新名称和说明，归档工作区必须先恢复才能编辑。"""
     try:
-        collection = await ResearchWorkspaceService(session).update(
+        collection = await service.update(
             owner_user_id=current_user.id,
             collection_id=collection_id,
             request=request,
@@ -130,12 +130,12 @@ async def update_workspace(
 @router.post("/{collection_id}/archive", response_model=WorkspaceResponse, summary="归档研究工作区")
 async def archive_workspace(
     collection_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchWorkspaceService, Depends(get_workspace_service)],
 ) -> WorkspaceResponse:
     """归档后停止新的文献写入与研究活动，已保存数据保持可恢复。"""
     try:
-        collection = await ResearchWorkspaceService(session).archive(
+        collection = await service.archive(
             owner_user_id=current_user.id,
             collection_id=collection_id,
         )
@@ -147,12 +147,12 @@ async def archive_workspace(
 @router.post("/{collection_id}/restore", response_model=WorkspaceResponse, summary="恢复研究工作区")
 async def restore_workspace(
     collection_id: UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchWorkspaceService, Depends(get_workspace_service)],
 ) -> WorkspaceResponse:
     """恢复后工作区可继续接收后续检索和文献入库任务。"""
     try:
-        collection = await ResearchWorkspaceService(session).restore(
+        collection = await service.restore(
             owner_user_id=current_user.id,
             collection_id=collection_id,
         )

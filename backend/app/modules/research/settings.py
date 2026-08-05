@@ -6,9 +6,10 @@ import os
 from functools import lru_cache
 from urllib.parse import urlsplit
 
-from app.core.env import load_env
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.env import load_env
 
 
 class ResearchSettings(BaseSettings):

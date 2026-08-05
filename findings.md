@@ -2,6 +2,13 @@
 
 ## Requirements
 
+### 2026-08-04 候选相关性正向纳入
+
+- 用户筛选页只应看到通过标题/摘要证据核验的 `core`、`related`、`background` 候选；所有非纳入结论保留服务端审计但不进入页面。
+- “理由不能由标题或摘要支持”是安全排除，不是用户可操作的重试故障；技术性完整集合失败由后端最多自动重投一次。
+- 页面仅呈现 `正在分析候选相关性 · 已分析 X / Y 篇 · 已排除 Z 篇`，不显示重试、取消、失败、证据不足或被排除候选。
+- 已确认删除公开 relevance retry/cancel 接口；恢复机制仅存在于 Worker 内部，且不重新检索 Provider。
+
 - 目标链路是“提交研究要求 -> 创建工作区草稿 -> 意图分析 -> 用户确认研究计划 -> 多源检索 -> 统一文献结果”。
 - 前端原型已经按连续阶段设计，后端需要提供可恢复的服务端状态，而不是只返回一次性 JSON。
 - MVP 不做付费功能；本阶段不实现 RAG 研究问答和复杂多 Agent。
@@ -427,3 +434,115 @@
 - 该真实运行最终为 `partial_failed/completed`：50 条候选中 48 条相关性分析完成，21 条因摘要缺失被确定性标为信息不足，2 条未通过独立主张核验；题录预取完成 12 条。结论来自运行审计而非页面推断，失败不属于流活动空闲、模型总时长或 ARQ 总时长。
 - `test@qq.com` 的运行 `19b46a2b-db9b-46c3-94f0-0452768e3992`：75 条候选中 70 条纳入相关性判断，29 条无摘要而确定性完成，41 条有摘要候选被同一次调用统一标为 `candidate_relevance_model_unavailable`。事件流在进入 `relevance_assessment` 后 `45.280s` 直接完成，没有 relevance 队列任务记录；实际 workflow Worker 的启动时间为 2026-08-04 15:20，早于流式分派代码进入运行时，仍执行旧的内联 45 秒总超时逻辑。当前源码已在 `search_execution.py` 中投递独立 relevance 队列，因此这是陈旧 Worker 未重启造成的运行时版本不一致。
 - `test@qq.com` 的运行 `2ba55e7f-05b9-4533-bbb0-f64aa6c892ce` 已使用新流式链路：相关性阶段耗时约 170 秒，49/50 完成。唯一失败候选是 DOI `10.3389/fnins.2022.902925` 的 `Sleep Deprivation During Memory Consolidation, but Not Before Memory Retrieval, Widens Threat Generalization to New Stimuli`；错误码为 `candidate_relevance_claim_unsupported`，原因是模型生成的 `helpful_aspect` 无法由其标题或摘要逐字支持。该拒绝发生在完整集合的独立主张核验阶段，不是流空闲超时、模型不可用或 Provider 失败。
+# 2026-08-04 — Phase 30 实现审计
+
+- 已确认公开 `relevance/retry`、`relevance/cancel` 路由和前端调用已删除，但 `candidate_relevance_service.py` 仍保留旧运行级重试/取消实现；执行器仅复用其中的候选反序列化与统计静态函数。应将这两个纯辅助职责迁入执行链路或独立内部工具后，删除该旧服务及 `search_run_service.py`、`search_session.py` 的取消相关 API。
+- 候选审核读侧已用 `is_screening_candidate()` 过滤列表与筛选，但既有单元测试默认构造 `pending` 候选、并仍断言负向/失败项可见，必须按正向可见性改写。
+- 前端类型尚未包含 `excluded` 相关性状态，前端状态单测仍断言旧 `relevance_completed_count/relevance_failed_count`，需要改为 `relevance_analyzed_count/relevance_excluded_count`。
+
+## 2026-08-04 — Phase 30 真实浏览器验收续查
+
+- 当前源码的注册契约为：规范化后的有效邮箱、`12` 至 `128` 位密码、`1` 至 `100` 位且非全空白的显示名称。此前隔离浏览器的一次 `422` 只能归因于当次页面实际请求内容，不能推断为相关性 Worker 或流式链路问题。
+- 本机 `E:\nodejs\corepack.cmd` 与已安装的 Corepack 包装器在直接查询 pnpm 版本时触发动态导入错误；`E:\nodejs\npx.cmd` 与 Node `20.19.6` 可用。该本地命令包装问题不影响已运行的 `5173`、`8002` 或后端 Worker。
+- 真实隔离浏览器的注册 `422` 已精确定位：邮箱后缀 `example.test` 被 `EmailStr` 判定为 special-use/reserved domain。响应仅报 `body.email` 验证失败；不是密码、显示名称、鉴权服务、Vite API 基址或相关性链路错误。后续验收使用普通格式的隔离域名，且不记录密码或令牌。
+- 新隔离账号已通过真实前端注册并提交“我想研究睡眠质量与心理健康之间的关系。”；模型生成计划后确认创建运行 `38f361a2-fad4-43c4-87c2-bc6373599b2c`。在旧 `45` 秒边界之后，页面仍处于 `relevance_assessment`，显示 `正在分析候选相关性 · 已分析 18 / 50 篇 · 已排除 18 篇`，且没有相关性重试、取消、失败或证据不足的用户控制入口。
+- 该真实 Worker 任务在 `188.67s` 后正常返回，运行 API 为 `partial_failed/completed`，但稳定错误只为 `provider_partial_failed`（OpenAlex 单源超时）；相关性任务本身无错误码。统计为 `relevance_analyzed_count=50`、`relevance_excluded_count=23`、`screening_candidate_count=27`。结果页的真实候选 API 返回 `27` 条，第 1 页与总数均为 `27`；检查器展示的理由已是“核心相关”及经标题/摘要核验的正向说明，未显示被排除候选或相关性失败/重试/取消语义。
+- 本轮浏览器网络请求中不存在 `/relevance/` 路径；截图已保存在 `output/playwright/phase30-live-positive-screening.png`。一次点击使用了已过期的页面 ref，被 Playwright 拒绝后重新获取快照，无业务副作用。
+- 全量 E2E 首次失败的环境根因已确认：`frontend/playwright.config.ts` 默认复用 `5173`，而开发 Vite 固定指向受控真实 API `8002`；测试替身仅拦截 `8000`。因此需以 `PLAYWRIGHT_VITE_PORT=5175` 和 `VITE_API_BASE_URL=http://127.0.0.1:8000` 启动独立 Vite，不能把真实 `5173` 或产品 API 基址改成测试配置。
+
+## 2026-08-04 — Phase 31 完整开发环境重启
+
+- 完整重启仅终止可归属的 `5173`、`8002` 和 workflow/relevance/ingestion/research Worker 进程树；未归属的 `8000` 监听被保留。Compose 使用 `down` 后 `up -d` 重建服务和网络，但不删除卷。
+- 重启后 Compose 的 PostgreSQL、Redis、etcd、Milvus、MinIO 均健康；API `8002`、Vite `5173` 与 CORS 预检均返回 `200`。四类 Worker 日志都确认已加载对应函数，Vite 编译模块确认 API 基址为 `http://127.0.0.1:8002`，当前 OpenAPI 不含公开 `/relevance/` 路由。
+
+## 2026-08-04 — 75 条候选全部排除运行审计
+
+- 运行 `69e719f4-b3a2-4c56-aff1-6d7cd4a8b968` 的 OpenAlex、Crossref、Semantic Scholar 均正常完成，各返回 25 条，规整后为 75 条且基础初筛没有排除项。
+- 首个 relevance 事件已显示 20/75 被确定性排除；随后 relevance Worker 的 attempt 1 持续 `175.11s`，attempt 2 持续 `184.51s`，两次均因 `candidate_relevance_output_invalid` 失败。自动恢复耗尽后，未形成可靠结论的候选被安全排除，最终统计为分析 75、排除 75、纳入 0。该结果不是模型对 75 篇都给出了负向判断。
+- 模型只处理 55 条有摘要候选；20 条无摘要候选不进入模型调用。当前输出预算为每条 700 tokens，即该轮最大请求预算 `38,500` tokens。稳定错误 `candidate_relevance_output_invalid` 表示完整流 JSON、Pydantic schema 或“每个有摘要候选恰好一条且题名/摘要证据可核对”的集合约束之一未满足。原始流按安全边界从不写入 Redis、SSE 或日志，失败后无法事后区分是截断、JSON 格式错误还是候选 ID 缺失；不是 Provider、120 秒空闲超时、模型负向判断、独立主张拒绝或快照字段合并问题。
+
+## 2026-08-04 — 真实模型输出无效深度诊断
+
+- 对同一运行的 55 条有摘要候选执行了不写 Redis、数据库、SSE 或模型正文的真实同构探针。`deepseek-v4-flash` 在 `172.094s` 内返回 27,350 个流块，最大相邻间隔仅 `0.703s`，最终 `finish_reason=stop`；共 29,975 字符、27,345 completion tokens，低于请求的 `38,500` token 上限。因此不存在总时长、120 秒空闲、输出 token 截断或传输中断。
+- JSON 解析、Pydantic schema 和 55 个有摘要候选的“恰好一条、无重复、无缺失、无额外 ID”均成功。仅有 1 条模型生成的逐字 evidence 引文未能在该篇候选的标题/摘要中严格匹配，`_validate_batch()` 因而产出 54 条有效结果和 1 条候选级错误。
+- 当前 `OpenAICompatibleCandidateRelevanceEvaluator.assess()` 将任何 `_validate_batch()` 错误一律升级为整批 `candidate_relevance_output_invalid`；`CandidateRelevanceRunExecutor` 将其视为技术故障，自动重试完整集合一次，并在第二次后安全排除所有尚未可靠判断的候选。这一错误分类使单篇引用不精确放大成 55 篇有摘要候选全部排除，叠加 20 篇无摘要候选后页面显示 75 篇全部排除。
+# 2026-08-05 — 全栈架构整改基线
+
+- 当前工作树作为既定行为基线保留，候选相关性、SearchRun 前端状态和相关测试均不得被回退。
+- 目标依赖方向为 `api/deps|workers -> modules ports/services <- infra adapters`；`modules` 禁止导入 `api`、`workers` 或具体 `infra`。
+- 已确认主要依赖环为 `modules.workflow <-> workers`、`modules.collections <-> modules.workflow` 与 `db.models -> modules.workflow`。
+- `infra/{db,redis,milvus,storage,llm}`、`modules/rag/*`、`modules/agents/nodes` 当前为空壳；具体实现仍位于 `workflow`、`research`、`fulltext`、`ingestion`。
+- 普通业务源文件不再采用 300 行硬限制：600 行为建议目标，700 行触发职责审查，1000 行为硬上限；生成代码、OpenAPI schema 和 Alembic migration 排除。
+- 当前超过 1000 行的主要文件是 `backend/app/modules/research/graph.py` 与 `frontend/src/styles.css`，在拆分完成前只能锁定不得增长。
+- Import Linter 从 `app` 根包构图时不会递归隐式命名空间目录；原 `app/modules` 与 `app/api` 因缺少包标记而完全没有进入依赖图。已补齐边界目录的 `__init__.py`，当前图覆盖 115 个模块和 401 条依赖，临时例外均精确对应待 Phase 35 删除的 `modules -> workers` 与 router 直连 Redis 边。
+- Phase 35 的首个可独立验证批次只迁移 Redis/arq 装配边界：业务模块保留协议和稳定 key/payload contract，`infra/redis` 持有 Redis/arq 实现，Router 通过具名 `api/deps` 获取服务。现有未提交业务改动与 HTTP/SSE、Redis key、queue name、payload、job id 语义必须保持不变。
+- 首轮收尾扫描确认生产代码已不存在旧 `workers.redis/queues`、`workflow.job_queue/search_session`、`ingestion.job_queue` 或 `research.job_queue` 导入；残留均在测试。`.importlinter` 的六个业务模块例外和四个 Router Redis 例外已成为失效配置，应在测试迁移后删除，并让 Router 仅通过 `api/deps` 的传递边到达具体适配器。
+- 旧测试把 `SearchSessionStore` 和 `ResearchEventStore` 当作 Redis 具体类直接构造；迁移后这两个名称是 owner-side Protocol。测试必须显式构造 `RedisSearchSessionStore` / `RedisResearchEventStore`，而 key builder 和类型注解继续从 owner 模块导入，避免把适配器重新泄漏回业务边界。
+- 新增第一方包标记改变了 Ruff 的 import 分类；规范化后的 `research/graph.py` 仅因 import 分组增加 1 个空行。源文件重量基线应反映规范格式，不能通过压缩无关业务代码规避检查。
+- 数据库边界不能通过机械移动 `app.db -> app.infra.db` 完成：当前至少 16 个业务类直接接收 `AsyncSession`，`auth/collections/workflow/research/ingestion` 多个模块直接查询或构造 ORM。正确顺序是先在 owner 模块定义具名仓储端口并逐个迁移用例，待 `modules -> app.db` 清零后再整体移动 SQLAlchemy models/session；否则会立即产生 `modules -> infra` 违规或兼容层双事实来源。
+- 认证切片可用三个产品意图明确的方法完成反转：原子创建本地账号、按邮箱读取账号、按 ID 读取活动账号。数据库唯一索引与 `IntegrityError` 映射属于 SQLAlchemy adapter；密码哈希、状态判断和稳定 `AuthError` 仍属于认证服务。
+- 认证切片实施后，`modules/auth` 已无 `app.db`、SQLAlchemy 或 `AsyncSession` 依赖；API 当前用户使用不可变 `UserAccount` 领域值，其他 Router 仍只消费其 `id`。SQLAlchemy adapter 暂时引用原 `app.db.models.user`，待所有 owner 清零后随模型整体迁入 `infra/db`。
+- `ResearchCollection` ORM 当前含 `workflow_stage_display` 展示属性，形成 `db model -> workflow presentation` 反向依赖。工作区反转应将展示属性放入 owner 的 `ResearchWorkspace` 领域值；SQL adapter 只负责 SQL 过滤、排序和 ORM 映射，游标校验与阶段文本匹配继续由业务服务所有。
+- 工作区仓储反转后的源码扫描确认：`modules/collections/workspace*` 已无 `app.db`、SQLAlchemy 或 `AsyncSession` 引用，生产环境仅由 `api/deps/services.py` 构造 `ResearchWorkspaceService(SqlAlchemyWorkspaceRepository(...))`。
+- `workflow_stage_display` 已从 ORM 移到 `ResearchWorkspace` 领域值；当前领域值仍依赖 `modules.workflow.state`，这是工作区和状态 owner 尚待 Phase 36 一并迁入 `modules/research` 的阶段性边，不应新增兼容 shim。
+- 工作区 adapter 保留了既有查询语义：活动/归档状态范围、名称 `ILIKE` 转义、阶段文本匹配、`updated_at + UUID` 稳定游标和多取一条分页；写操作仍在 adapter 内提交并刷新，不改变 HTTP contract。
+- 工作区切片加入依赖图后 Import Linter 覆盖 `130 files / 421 dependencies`，`modules` 外层禁入与 Router 装配边界两个合同均保持；重量检查仍只有既有 6 个职责审查项。
+- 工作区切片完成后仍有 16 个业务文件直接导入 ORM，其中 `workflow/search`、`research`、`collections` 与 ingestion/retrieval 各自跨多个模型；数据库层迁移必须继续按 owner 端口分批完成，不能整体改路径。
+- 剩余服务中 `ResearchWorkflowService` 是最小独立数据库切片：唯一持久化职责是按 owner `FOR UPDATE` 读取工作区并提交合法阶段转换，既有 `test_workflow_contracts.py` 已覆盖阶段规则；候选 lookup/citation 应随后围绕共享 SearchRun 端口一起迁移，避免重复仓储。
+- 对生产调用继续核对后发现 `ResearchWorkflowService` 实际仅被测试引用；真实 `workflow_stage` 写入分散在 plan、search-run 和 collection-build 服务。单独反转该未使用服务会保留多处事实所有者，应取消这一顺序并从实际生产写路径建立 canonical repository/use case。
+- `ResearchPlanService` 的真实事务序列是：先原子提交 workspace+plan，再投递 queue，再保存 job id；投递失败必须在第二次提交中把 plan/workspace 标为 failed。仓储反转必须保留这一 durable-before-enqueue 语义。
+- 计划领域快照需要覆盖 `ResearchPlanResponse` 的全部字段和工作区提交返回所需字段；新建时间戳由 SQL adapter 刷新后映射。`query_plan.py` 只需 `status/query_plan/scope`，可依赖最小 Protocol 而不是 ORM。
+- 计划仓储反转已验证 durable-before-enqueue：`create_initial`/`add_revision` 先提交，队列结果再通过 `save` 持久化；业务服务、Worker 和 Router 不再接收计划 ORM。`query_plan.py` 的最小 Protocol 同时兼容现有 ORM 调用方和新领域快照。
+- `SearchRun` 当前被 Router、search/relevance 执行器、候选 lookup、citation、fulltext 与 review 共同消费，但多个业务服务仍从 `AsyncSession` 临时构造 `SearchRunService`。应建立一个 search-owned `SearchRunRepository`，共享所有权读取、锁定、quota、创建、运行上下文和计划读取，不为消费者重复定义 reader。
+- SearchRun 创建与计划相同，必须保留“运行及 workspace stage 先提交 -> enqueue -> job id/失败状态第二次提交”；活动运行唯一索引冲突仍由 SQL adapter 捕获并映射为稳定 `ACTIVE_RUN_EXISTS`。
+- SearchRun 核心仓储已稳定，但两个执行器仍把 ORM `SearchRun` 和 `AsyncSession` 当作业务输入：`SearchRunExecutor` 自己查询 `ResearchPlan`，`CandidateRelevanceRunExecutor` 自己以 `skip_locked` 领取运行。统一 `SearchRunRepository` 已具备 `get_plan()` 与 `get_relevance_run_for_update()`，因此执行器应只接收领域快照和该端口，SQL adapter 由 Worker composition root 注入。
+- Candidate lookup、citation 与 fulltext 的数据库会话只用于读取/过期 SearchRun，可以直接改为共享 `SearchRunRepository`。Candidate review 还用 session 构造准入服务并手动 rollback，先同时注入运行端口以消除重复 SearchRun reader；后续必须再以 literature admission port 去掉其 session 和内部服务构造，不能把这次过渡当成最终边界。
+- CandidateReview 的手动 rollback 来自运行/全文只读查询与准入写事务共用同一请求 session。最终边界应由 literature-owned admission port 封装准入命令，并由具体准入服务在进入自身原子事务前清理只读隐式事务；审核用例只逐篇调用端口，不应知道 SQLAlchemy rollback、对象存储或具体准入 service。
+- SearchRun 消费者迁移后，`modules -> app.db/SQLAlchemy` 只剩六组：未使用的 `workflow/service.py`、文献准入、集合构建、ingestion repository、research conversation/run persistence、research retrieval SQL。下一步应先删除死 workflow service，再把已有 repository 形态的 ingestion 和 research execution 机械迁到 infra；conversation/build/retrieval 需要 owner port，不能只改 import 路径。
+- Collection build 当前 500 余行把公开用例、quota、queue 映射和全部 SQL 查询写在一个类中，现有单测也直接模拟 SQLAlchemy 行。为先完成依赖反转且保持行为稳定，Phase 35 应将该具体类明确标记为 SQLAlchemy adapter 并通过 research-owned use-case Protocol 注入；Phase 36 再按集合状态/文档列表/构建命令拆回 owner 服务，避免在同一批同时改写 10 余条事务语义。
+- Research 的三类剩余耦合角色不同：`service.py` 是 HTTP-facing conversation use cases，`execution.py` 实际是 Worker run persistence，`retrieval.py` 则混合了领域融合算法、PostgreSQL、Milvus 和 HTTP reranker。前两者可先整体迁 concrete adapter 并保留 owner Protocol；retrieval 必须抽取 SQL repository 和领域记录，否则整文件外移会把 RRF/auto-merge 等业务算法错误归到 infra。
+- Retrieval 的 SQL 边界可收敛为四个意图方法：读取当前 ingestion run IDs、关键词命中、按权限加载 evidence、读取 chunk-parent 关系。领域层只需要 `LexicalMatch(chunk_id, score)` 和 `RetrievedEvidence`，无需 ORM `DocumentChunk`；RRF、阈值、rerank 和 auto-merge 继续留在 owner 服务。
+- Phase 35 最终确认：`backend/app/modules` 对 `app.db`、`app.infra`、SQLAlchemy 和 `AsyncSession` 的引用均为零；SQLAlchemy Base、session、models 与 repositories 已统一位于 `app/infra/db`，Alembic 直接加载该 metadata。Router 不再直接拿数据库 session，具体 adapter 只在具名 `api/deps` 或 Worker composition root 装配。
+- ORM 物理迁移没有改变 schema 或 revision；数据库 metadata focused test 为 `6 passed`，Import Linter 为 `140 files / 456 dependencies` 且两条合同保持，源码重量策略通过，scoped Pyright 与 Ruff 均归零。
+# 2026-08-05 — Phase 36 恢复检查
+
+- `task_plan.md` 的 Phase 35 明细已标为 complete、Phase 36 已标为 in_progress，但页首 Current Phase 仍停留在 Phase 35；这是计划元数据漂移，不是代码阶段回退。
+- `modules/workflow/contracts.py` 已移动为 `modules/research/plan_contracts.py`，而旧消费者仍引用 `app.modules.workflow.contracts`；应按 research/search/documents/literature 所有权拆分 DTO 后一次性更新引用并删除旧 `workflow` 包。
+- 合同拆分后 `research/plan_contracts.py` 不再依赖 documents、search state、候选或引用格式，研究计划边界已成为独立 owner；Search API 合同组合 document-owned 全文响应，保留原有候选审核 wire shape。
+- 旧 `workflow`、`collections`、`fulltext` 和顶层 `ingestion` 的源码引用与 tracked source 已清零；磁盘上若仍有目录，只包含 Python 缓存，不是第二套实现。
+- `ResearchPlanRecord` 是 frozen 领域快照，读取它的 Protocol 必须以只读 property 声明；直接声明可写 Protocol 属性会被 Pyright 正确拒绝，属于端口可变性建模错误而非运行时问题。
+- Phase 36 剩余三个具体 LLM 构造点都在业务模块：intent 一个固定结构化模型，relevance 的评估与独立核验按候选数动态计算输出预算，research graph 一个多方法结构化模型；前两者适合注入 infra factory，后者适合完整 concrete adapter。
+- `ResearchGraphRunner` 当前直接消费 `checkpoint_database_url` 并打开 `AsyncPostgresSaver`。最小 checkpoint 端口应接收图、初始状态和 thread id，具体 PostgreSQL saver 生命周期归 `infra`，图只依赖该执行端口。
+- `SearchRunExecutor` 的 Provider Registry 仍允许内部默认构造，`CandidateRelevanceRunExecutor` 仍在 execute 内默认构造 evaluator；这些是本阶段必须从 Worker composition root 显式注入的剩余基础设施默认值。
+- Relevance 业务服务需要两个不同 factory：主评估与独立主张核验的输出预算不同，但两者都以完整候选集合的 `candidate_count` 计算；把 factory 闭包注入 domain 可同时保留单次集合语义和依赖反转。
+- `CandidateRelevanceRunExecutor` 现在只消费显式 evaluator；为允许测试只验证 stale attempt、租约或 citation enrichment 等不触发模型的 seam，构造参数可为空，但真正进入评估时会明确拒绝未装配状态，生产 Worker 始终注入。
+- Agent 拆分后的稳定边界为：`agents/contracts` 定义结构化输出和模型端口，`agents/state` 负责 checkpoint wire state，`agents/nodes` 实现单轮节点，`agents/graph` 只编排拓扑/复杂流程/预算取消，prompts 独立可审计；具体 LLM 与 PostgreSQL saver 均在 infra。
+- Graph checkpoint 的测试/生产差异现在由显式 executor 表达，而不是由业务图读取可空数据库 URL；这消除了 `modules -> langgraph.checkpoint.postgres`，同时保持同一 thread id 和 setup/compile/ainvoke 顺序。
+- 候选审核现有六个 HTTP 操作自然形成四个所有者用例：分页/单项查询、准备清单更新/清空、批量全文准备、批量准入。运行归属、Redis 候选快照、可见候选同步、选择清单和全文状态是四者共享的短期会话事实，保留在 `CandidateReviewSession`；Router 应分别依赖具体用例，不能继续依赖聚合 `CandidateReviewService`。
+- `review_session.py` 已覆盖旧服务的稳定错误码与共享前置条件，但尚未接入生产。旧 `review_service.py` 仍是唯一调用入口，因此迁移批次必须在删除旧文件前同时更新 API deps、Router、单元测试及两个 live 测试构造点，避免临时保留 facade 或双事实来源。
+- Documents 已有的 `CandidateFulltextService` 是具名业务用例而非 infra adapter，Preparation/Admission 可以直接显式注入它；前者需要带 arq queue 的实例调用 `request(retry=True)`，后者只调用 `get_state()`。Literature 准入继续通过 `LiteratureAdmissionPort`，因此拆分无需新增 speculative Protocol。
+- Search 执行器仍存在两个隐式装配点：`SearchRunExecutor` 缺省读取全局 literature settings 并构建 Provider Registry，`CandidateRelevanceRunExecutor` 缺省读取同一 settings 且在 `_enrich_citations()` 内构造 DOI HTTP resolver。正确的最小边界是由 Worker 注入 Registry、最大 Provider 并发、题录预取限额和 `CitationMetadataEnricher`；业务执行器无需知道全局配置获取函数或具体 resolver。
+- 域间扫描确认 search↔documents 与 search↔literature 仍是双向依赖：search review 直接消费 documents service/state 和 literature admission；documents service/state 及 literature citation/admission 又直接消费 search run/session/`UnifiedCandidate`。这不是简单移动文件可以解决，必须用具名 typed command/projection 或 composition bridge 切断一侧，且 citation metadata/formatter 应归 literature。
+- `SearchRunService` 仍导入 `get_workflow_settings()` 并在 retry 路径缺省读取全局配置；API composition root 已能提供配置，这个独立耦合可先改为显式注入，而 Worker/query-only 使用仍可不携带 queue/settings，进入需要配置的命令时应明确报装配错误。
+- Literature admission adapter 对 `UnifiedCandidate` 的真实需求只有 `candidate_id/doi/abstract/official_url/citation`；定义 literature-owned `LiteratureAdmissionCandidate` 可保留严格 DOI/全文一致性校验，同时去掉 literature -> search contract 依赖。
+- `CandidateCitationService` 的主要职责是 SearchRun 所有权、Redis candidate/fulltext snapshot lookup 和候选选择，因此应迁入 `modules/search`；literature 只拥有 Citation 数据模型、标准格式化和持久准入。这样 citation HTTP wire contract 仍可留在 literature，但运行编排不再反向依赖 search。
+- DOI 与长期 paper document type 规范化属于 literature 事实，可拆入 `literature/normalization.py`；search 的来源规整继续调用该 owner 函数，避免 infra literature adapter 反向导入 `search.normalize`。
+- Literature 中间迁移已形成单向所有权：Citation 数据模型/格式化/规范化和准入命令由 literature 拥有，Search 只负责编排候选题录解析与映射准入命令；测试不得通过兼容 `UnifiedCandidate` 让 SQL adapter 重新依赖 Search DTO。
+- Python owner 包的 `__init__.py` 不能急切重导出会依赖其他业务域的用例；即使调用方只导入子模块，包初始化也会先执行并可制造隐藏循环。Literature 包入口现保持无副作用，调用方从具名子模块导入。
+- Phase 36 最终依赖方向为 `research -> rag`、`agents -> research/rag`、`search -> literature/documents`、`documents -> literature`；Literature 与 Documents 之间通过 structural fulltext proof 和 candidate projection 传递事实，具体 ORM/Redis/Worker 仍在 composition/infra。
+- OpenAPI 中原本以 `dict[str, Any]` 表达、但前端按稳定字段消费的动态对象，应提升为 owner 命名的 `TypedDict` schema；`total=False` 能保持阶段性缺失字段不被补成 `null`，同时让生成客户端获得可追踪的字段类型。
+- SSE 的文档契约可通过 Router 的 OpenAPI `responses` 注册命名事件 schema，而实际 endpoint 继续返回原 `StreamingResponse(text/event-stream)`；这样能改善类型来源而不改变事件帧、重连或刷新恢复语义。
+- `frontend/src/api/types.ts` 只允许从 `generated/schema.ts` 派生别名、嵌套类型与必要的顶层 required 投影，不再复制字段声明；OpenAPI 是 DTO 的唯一事实来源。
+- OpenAPI JSON 与 TypeScript schema 在 Prettier 规范化后连续生成哈希稳定，可作为 CI 漂移检查的确定性生成物。
+- SSE feature composable 应拥有 AbortController、分片缓冲、重连计时与持久化回读；view 只消费 `run/progress/error` refs 和显式命令。Query hook 则拥有稳定 query key、API 调用与缓存失效，两者通过刷新回调协作，避免 feature 反向依赖路由组件。
+- Vue Query key 必须由 owner factory 产生且保留既有前缀语义；分页/筛选参数追加在 owner base key 之后，invalidate 只使用 base key，即可同时刷新当前页与其他已缓存页而不复制字符串。
+- 全局 CSS 可先按原始连续规则和导入顺序机械拆到 feature 文件，避免在架构迁移中夹带视觉改版；token、reset、共享控件、页面规则和响应式覆盖分离后，每个文件都能独立接受重量审查。
+- 当一个路由 view 超过 700 行但状态所有权已在 hooks/composables，优先把重复交互模板抽成 feature component；结果表和会话侧栏属于稳定产品表面，组件边界比按行数机械切割更有意义。
+- 认证继续由 Pinia auth store 作为应用启动与登录状态所有者；不新增未使用的 auth Query hook 以满足目录对称性，避免把 token 生命周期和服务端用户状态复制到第二个缓存事实来源。
+
+# 2026-08-05 — Phase 39 最终发现
+
+- 目标架构的 6 条 Import Linter 合同在最终代码上保持通过（`166 files / 539 dependencies`），未发现 `modules -> workers`、API router 直连 infra 或业务域反向环。
+- 文件重量规则按职责信号执行：普通业务文件不超过 1000 行；仅 `backend/app/modules/search/relevance.py`（842）、`frontend/src/features/research/research-chat.css`（947）、`frontend/src/features/search/results.css`（787）需要后续职责复审，不以机械拆分凑行数。
+- OpenAPI 生成物在当前工作树未跟踪，因而 `api:check` 的最后一项 `git ls-files` 只能在提交生成文件后完成；连续生成哈希稳定，未手工修改生成文件，也未通过 staging 掩盖该状态。
+- 前端路由级 view 已无 TanStack Query/API 直连，搜索与研究 SSE 恢复均由 feature composable 持有；Pinia auth 仍是刻意保留的认证状态所有者，不构成服务端数据复制。

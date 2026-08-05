@@ -7,7 +7,8 @@ import os
 from uuid import UUID
 
 import pytest
-from app.modules.research.retrieval import HttpResearchReranker, RetrievedEvidence
+from app.infra.llm.reranker import HttpResearchReranker
+from app.modules.rag.retrieval import RetrievedEvidence
 from app.modules.research.settings import get_research_settings
 
 _LIVE_TEST_ENVIRONMENT_FLAG = "RUN_LIVE_RERANKER_TESTS"

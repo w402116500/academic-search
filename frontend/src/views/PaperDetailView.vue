@@ -1,28 +1,26 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from "vue";
-import { useMutation, useQuery } from "@tanstack/vue-query";
+import { computed, ref, watch } from "vue";
 import { ArrowLeft, Clipboard, FileDown, LoaderCircle, ShieldCheck, Upload } from "@lucide/vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import {
-  getCandidateCitation,
-  getFulltext,
-  requestFulltext,
-  uploadAuthorizedFulltext,
-} from "@/api/collections";
-import { updateCandidateSelection } from "@/api/workflow";
+  readCandidateFulltext,
+  useCandidateCitationQuery,
+  useCandidateLiteratureMutations,
+} from "@/api/hooks/literature";
+import { useSearchCandidateQuery, useSearchReviewMutations } from "@/api/hooks/search";
 import {
   canRequestFulltext,
   citationReadinessMessage,
   fulltextStatusLabel,
   isFulltextTerminal,
   presentFulltextVerification,
-} from "@/features/research/search-run-state";
+} from "@/features/search/search-run-state";
 import {
   candidateLanguageLabel,
   normalizeCandidateLanguage,
-} from "@/features/research/candidate-language";
-import { getSearchCandidate } from "@/api/workflow";
+} from "@/features/search/candidate-language";
+import { useReviewPolling } from "@/features/search/use-review-polling";
 import type { CitationFormat, FulltextResponse } from "@/api/types";
 
 const route = useRoute();
@@ -30,16 +28,7 @@ const router = useRouter();
 const workspaceId = computed(() => String(route.params.workspaceId));
 const runId = computed(() => String(route.query.run ?? ""));
 const candidateId = computed(() => String(route.params.candidateId));
-const candidateQuery = useQuery({
-  queryKey: computed(() => [
-    "candidate-review-item",
-    workspaceId.value,
-    runId.value,
-    candidateId.value,
-  ]),
-  queryFn: () => getSearchCandidate(workspaceId.value, runId.value, candidateId.value),
-  enabled: computed(() => Boolean(runId.value) && Boolean(candidateId.value)),
-});
+const candidateQuery = useSearchCandidateQuery(workspaceId, runId, candidateId);
 const candidate = computed(() => candidateQuery.data.value?.candidate);
 const fulltext = ref<FulltextResponse | null>(null);
 const toast = ref<string | null>(null);
@@ -64,7 +53,6 @@ const canUploadAuthorizedPdf = computed(() => {
   );
 });
 const fulltextPresentation = computed(() => presentFulltextVerification(fulltext.value));
-let timer: number | undefined;
 
 /** 刷新详情页后恢复已有全文任务状态，而不是只等待本页新发起的操作。 */
 watch(
@@ -75,58 +63,17 @@ watch(
   { immediate: true },
 );
 
-/** 已在后台运行的全文核验需要在详情页恢复轮询，终态则立即停止。 */
-watch(
-  fulltext,
-  (state) => {
-    if (state && !isFulltextTerminal(state.status)) poll();
-    else if (timer) window.clearInterval(timer);
-  },
-  { immediate: true },
+const citationQuery = useCandidateCitationQuery(
+  workspaceId,
+  runId,
+  candidateId,
+  citationFormat,
+  citationReady,
 );
-const citationQuery = useQuery({
-  queryKey: computed(() => [
-    "candidate-citation",
-    workspaceId.value,
-    runId.value,
-    candidateId.value,
-    citationFormat.value,
-  ]),
-  queryFn: () =>
-    getCandidateCitation(workspaceId.value, runId.value, candidateId.value, citationFormat.value),
-  enabled: computed(() => Boolean(runId.value) && citationReady.value),
-});
-const fulltextMutation = useMutation({
-  mutationFn: async () => {
-    // 详情页发起的单篇核验也必须进入本次准备清单，避免核验完成后脱离批量交接页面。
-    await updateCandidateSelection(workspaceId.value, runId.value, [candidateId.value], true);
-    return requestFulltext(workspaceId.value, runId.value, candidateId.value);
-  },
-  onSuccess: (result) => {
-    fulltext.value = result;
-  },
-  onError: (error) => (toast.value = error instanceof Error ? error.message : "全文任务无法启动。"),
-});
-const uploadMutation = useMutation({
-  mutationFn: () => {
-    if (!uploadFile.value) throw new Error("请先选择要上传的 PDF。");
-    return uploadAuthorizedFulltext(
-      workspaceId.value,
-      runId.value,
-      candidateId.value,
-      uploadFile.value,
-    );
-  },
-  onSuccess: (result) => {
-    fulltext.value = result;
-    uploadFile.value = null;
-    uploadAuthorized.value = false;
-    if (uploadInput.value) uploadInput.value.value = "";
-  },
-  onError: (error) => {
-    toast.value = error instanceof Error ? error.message : "PDF 上传或校验无法完成。";
-  },
-});
+const { requestFulltextMutation: fulltextMutation, uploadFulltextMutation: uploadMutation } =
+  useCandidateLiteratureMutations(workspaceId, runId);
+const { selectionMutation } = useSearchReviewMutations(workspaceId, runId);
+useReviewPolling(fulltextIsProcessing, refreshCandidateFulltext);
 
 function openVerificationTask(): void {
   void router.push({
@@ -145,16 +92,44 @@ function selectUpload(event: Event): void {
   uploadFile.value = target.files?.[0] ?? null;
 }
 
-function poll(): void {
-  if (timer) window.clearInterval(timer);
-  timer = window.setInterval(async () => {
-    try {
-      fulltext.value = await getFulltext(workspaceId.value, runId.value, candidateId.value);
-      if (isFulltextTerminal(fulltext.value.status) && timer) window.clearInterval(timer);
-    } catch {
-      if (timer) window.clearInterval(timer);
-    }
-  }, 1_500);
+async function startCandidateFulltext(): Promise<void> {
+  try {
+    // 单篇核验也进入本次准备清单，确保完成后能从批量交接页继续处理。
+    await selectionMutation.mutateAsync({
+      candidateIds: [candidateId.value],
+      selected: true,
+    });
+    fulltext.value = await fulltextMutation.mutateAsync(candidateId.value);
+  } catch (error) {
+    toast.value = error instanceof Error ? error.message : "全文任务无法启动。";
+  }
+}
+
+async function uploadAuthorizedPdf(): Promise<void> {
+  if (!uploadFile.value) {
+    toast.value = "请先选择要上传的 PDF。";
+    return;
+  }
+  try {
+    fulltext.value = await uploadMutation.mutateAsync({
+      candidateId: candidateId.value,
+      file: uploadFile.value,
+    });
+    uploadFile.value = null;
+    uploadAuthorized.value = false;
+    if (uploadInput.value) uploadInput.value.value = "";
+  } catch (error) {
+    toast.value = error instanceof Error ? error.message : "PDF 上传或校验无法完成。";
+  }
+}
+
+async function refreshCandidateFulltext(): Promise<boolean> {
+  try {
+    fulltext.value = await readCandidateFulltext(workspaceId.value, runId.value, candidateId.value);
+    return !isFulltextTerminal(fulltext.value.status);
+  } catch {
+    return false;
+  }
 }
 
 async function copyCitation(): Promise<void> {
@@ -167,10 +142,6 @@ async function copyCitation(): Promise<void> {
     toast.value = error instanceof Error ? error.message : "浏览器未授予剪贴板权限。";
   }
 }
-
-onUnmounted(() => {
-  if (timer) window.clearInterval(timer);
-});
 </script>
 
 <template>
@@ -222,9 +193,9 @@ onUnmounted(() => {
         >
           <Clipboard :size="15" />复制引用</button
         ><a
-          v-if="candidate.links.landing_url"
+          v-if="candidate.links?.landing_url"
           class="secondary-button"
-          :href="candidate.links.landing_url"
+          :href="candidate.links?.landing_url"
           target="_blank"
           rel="noreferrer"
           >打开来源</a
@@ -233,7 +204,7 @@ onUnmounted(() => {
           class="primary-button"
           type="button"
           :disabled="fulltextMutation.isPending.value"
-          @click="fulltextMutation.mutate()"
+          @click="startCandidateFulltext"
         >
           <FileDown :size="15" />准备全文核验</button
         ><button v-else-if="fulltextIsProcessing" class="primary-button" type="button" disabled>
@@ -284,7 +255,7 @@ onUnmounted(() => {
             class="primary-button"
             type="button"
             :disabled="!uploadFile || !uploadAuthorized || uploadMutation.isPending.value"
-            @click="uploadMutation.mutate()"
+            @click="uploadAuthorizedPdf"
           >
             <LoaderCircle v-if="uploadMutation.isPending.value" class="spin" :size="15" />
             <Upload v-else :size="15" />上传并核验
@@ -352,7 +323,7 @@ onUnmounted(() => {
               <dt>引用信号</dt>
               <dd>
                 {{
-                  Object.values(candidate.citation_counts_by_source).reduce(
+                  Object.values(candidate.citation_counts_by_source ?? {}).reduce(
                     (sum, count) => sum + count,
                     0,
                   ) || "暂无"

@@ -1,6 +1,6 @@
 """PostgreSQL 模型准入规则的无数据库回归测试。"""
 
-from app.db.models import Base
+from app.infra.db.models import Base
 from sqlalchemy import CheckConstraint
 from sqlalchemy.orm import configure_mappers
 

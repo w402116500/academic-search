@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import {
   ArrowRight,
   Check,
@@ -15,20 +14,22 @@ import {
 } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
 
-import { confirmPlan, getPlan, regeneratePlan, startSearch } from "@/api/workflow";
-import type { ResearchPlanScope, ResearchScope } from "@/api/types";
+import { useResearchPlanMutations, useResearchPlanQuery } from "@/api/hooks/research";
 import { buildResearchScope, type ResearchTimePreset } from "@/features/research/scope";
+import {
+  providerNamesForDirection,
+  researchLanguageLabel,
+  researchTimeScopeLabel,
+  resolvePlanScope,
+  resolveTimePreset,
+} from "@/features/research/plan-presentation";
 
 const route = useRoute();
 const router = useRouter();
-const queryClient = useQueryClient();
 const workspaceId = computed(() => String(route.params.workspaceId));
 const currentYear = new Date().getFullYear();
-const planQuery = useQuery({
-  queryKey: computed(() => ["plan", workspaceId.value]),
-  queryFn: () => getPlan(workspaceId.value),
-  refetchInterval: (query) => (query.state.data?.status === "generating" ? 1_200 : false),
-});
+const planQuery = useResearchPlanQuery(workspaceId);
+const { confirmMutation, regenerateMutation } = useResearchPlanMutations(workspaceId);
 const selectedDirectionId = ref("");
 const timePreset = ref<ResearchTimePreset>("any");
 const startYear = ref<number | null>(null);
@@ -45,58 +46,17 @@ const selectedDirection = computed(
 );
 
 const selectedProviderNames = computed(() => {
-  const byDirection = planQuery.data.value?.query_plan?.by_direction;
-  if (!byDirection || typeof byDirection !== "object" || !selectedDirectionId.value) return [];
-  const queries = (byDirection as Record<string, unknown>)[selectedDirectionId.value];
-  if (!Array.isArray(queries)) return [];
-
-  const labels: Record<string, string> = {
-    openalex: "OpenAlex",
-    crossref: "Crossref",
-    arxiv: "arXiv",
-    semantic_scholar: "Semantic Scholar",
-  };
-  return [
-    ...new Set(
-      queries.flatMap((query) => {
-        if (!query || typeof query !== "object" || !("provider" in query)) return [];
-        const provider = query.provider;
-        return typeof provider === "string" ? [labels[provider] ?? provider] : [];
-      }),
-    ),
-  ];
+  return providerNamesForDirection(
+    planQuery.data.value?.query_plan?.by_direction,
+    selectedDirectionId.value,
+  );
 });
 
-const selectedScopeSummary = computed(() => {
-  if (timePreset.value === "last3") return "近 3 年";
-  if (timePreset.value === "last5") return "近 5 年";
-  if (timePreset.value === "custom" && startYear.value && endYear.value) {
-    return `${startYear.value} 至 ${endYear.value}`;
-  }
-  return "不限时间";
-});
+const selectedScopeSummary = computed(() =>
+  researchTimeScopeLabel(timePreset.value, startYear.value, endYear.value),
+);
 
-const selectedLanguageSummary = computed(() => {
-  const labels = { zh: "中文", en: "英文" } as const;
-  return languages.value.map((language) => labels[language]).join("、") || "未选择";
-});
-
-/**
- * 计划刚生成时，范围保存在 suggested；确认后，最终范围保存在 confirmed。
- * 这里统一为页面可编辑的范围，避免把模型建议错误显示为“不限时间”。
- */
-function resolvePlanScope(scope: ResearchPlanScope): ResearchScope | null {
-  if ("languages" in scope) return scope;
-  return scope.confirmed ?? scope.suggested ?? null;
-}
-
-/** 将服务端已有范围映射回最贴近用户理解的时间选择项。 */
-function resolveTimePreset(scope: ResearchScope): ResearchTimePreset {
-  if (scope.start_year === null || scope.end_year === null) return "any";
-  if (scope.start_year === currentYear - 2 && scope.end_year === currentYear) return "last3";
-  if (scope.start_year === currentYear - 4 && scope.end_year === currentYear) return "last5";
-  return "custom";
-}
+const selectedLanguageSummary = computed(() => researchLanguageLabel(languages.value));
 
 watch(
   () => planQuery.data.value,
@@ -107,46 +67,44 @@ watch(
     languages.value = scope?.languages?.length ? [...scope.languages] : ["zh", "en"];
     startYear.value = scope?.start_year ?? null;
     endYear.value = scope?.end_year ?? null;
-    timePreset.value = scope ? resolveTimePreset(scope) : "any";
+    timePreset.value = scope ? resolveTimePreset(scope, currentYear) : "any";
   },
   { immediate: true },
 );
 
-const confirmMutation = useMutation({
-  mutationFn: async () => {
-    const scope = buildScope();
-    const plan = await confirmPlan(workspaceId.value, selectedDirectionId.value, scope);
-    const run = await startSearch(workspaceId.value);
-    return { plan, run };
-  },
-  onSuccess: ({ run }) => {
-    void queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId.value] });
-    void router.push({
-      name: "workspace-runner",
-      params: { workspaceId: workspaceId.value },
-      query: { run: run.id },
-    });
-  },
-  onError: (error) => {
-    localError.value = error instanceof Error ? error.message : "计划确认失败，请检查后重试。";
-  },
-});
+function confirmResearchPlan(): void {
+  confirmMutation.mutate(
+    { selectedDirectionId: selectedDirectionId.value, scope: buildScope() },
+    {
+      onSuccess: ({ run }) => {
+        void router.push({
+          name: "workspace-runner",
+          params: { workspaceId: workspaceId.value },
+          query: { run: run.id },
+        });
+      },
+      onError: (error) => {
+        localError.value = error instanceof Error ? error.message : "计划确认失败，请检查后重试。";
+      },
+    },
+  );
+}
 
-const regenerateMutation = useMutation({
-  mutationFn: async () => {
-    const plan = planQuery.data.value;
-    if (!plan) throw new Error("当前研究计划尚未加载，无法重新生成。");
-    return regeneratePlan(workspaceId.value, plan.raw_request);
-  },
-  onSuccess: (plan) => {
-    localError.value = null;
-    queryClient.setQueryData(["plan", workspaceId.value], plan);
-    void queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId.value] });
-  },
-  onError: (error) => {
-    localError.value = error instanceof Error ? error.message : "计划重新生成失败，请稍后重试。";
-  },
-});
+function regenerateResearchPlan(): void {
+  const plan = planQuery.data.value;
+  if (!plan) {
+    localError.value = "当前研究计划尚未加载，无法重新生成。";
+    return;
+  }
+  regenerateMutation.mutate(plan.raw_request, {
+    onSuccess: () => {
+      localError.value = null;
+    },
+    onError: (error) => {
+      localError.value = error instanceof Error ? error.message : "计划重新生成失败，请稍后重试。";
+    },
+  });
+}
 
 function buildScope() {
   return buildResearchScope({
@@ -227,13 +185,13 @@ function toggleLanguage(language: "zh" | "en"): void {
           class="secondary-button"
           type="button"
           :disabled="regenerateMutation.isPending.value"
-          @click="regenerateMutation.mutate()"
+          @click="regenerateResearchPlan"
         >
           <RotateCcw :class="{ spin: regenerateMutation.isPending.value }" :size="15" />
           {{ regenerateMutation.isPending.value ? "正在重新生成计划…" : "重新生成计划" }}
         </button>
       </div>
-      <form v-else class="plan-form" @submit.prevent="confirmMutation.mutate()">
+      <form v-else class="plan-form" @submit.prevent="confirmResearchPlan">
         <div class="plan-decision-layout">
           <div class="plan-decision-main">
             <section class="plan-section" aria-labelledby="direction-heading">

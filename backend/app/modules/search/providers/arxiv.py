@@ -6,10 +6,11 @@ import xml.etree.ElementTree as ElementTree
 from datetime import UTC, datetime
 
 import httpx
+
 from app.core.settings import ArxivProviderSettings
+from app.modules.literature.contracts import CitationDate
 from app.modules.search.contracts import (
     CandidateAuthor,
-    CitationDate,
     ProviderError,
     ProviderErrorCode,
     ProviderQuery,
