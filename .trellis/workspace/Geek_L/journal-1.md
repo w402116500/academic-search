@@ -62,3 +62,24 @@ Verified backend and frontend quality gates, corrected specification drift, and 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 3: 修复 RAG 正文引用恢复
+
+**Date**: 2026-08-06
+**Task**: 修复 RAG 正文引用恢复
+**Branch**: `main`
+
+### Summary
+
+为 Writer 漏掉全部正文引用标记的真实失败形态增加保守恢复，并保留严格协议校验、回归测试与规范记录。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `359e697` | (see git log) |
+
+### Status
+
+[OK] **Completed**
