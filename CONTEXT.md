@@ -63,3 +63,56 @@ recovery policy, then excluded from user-facing candidate review while retained
 for internal metrics and audit. It is distinct from an assessment that is
 unsupported by the candidate evidence.
 _Avoid_: Unsupported assessment, user-review candidate
+
+## RAG Answer Citation
+
+**Evidence Snapshot**:
+The fixed set of retrieved evidence a model saw while producing one answer
+attempt, including the mapping from model-facing evidence references to actual
+document chunks.
+_Avoid_: Conversation evidence, global citation list
+
+**Evidence Ref**:
+A short model-facing evidence label such as `E1` or `E2` that is meaningful only
+inside one Evidence Snapshot. It is not a database identifier and must not be
+shown as the final user citation number.
+_Avoid_: Chunk ID, citation number, UUID
+
+**Answer Attempt**:
+One bounded attempt to answer a user's research question, including retrieval,
+answer drafting, evidence verification, optional repair, and finalization or
+failure.
+_Avoid_: Conversation, assistant message
+
+**User Citation Index**:
+The user-facing citation number such as `[1]` or `[2]`, generated from the
+final answer's first-use order. It is presentation-only and maps back through
+the answer's Evidence Snapshot.
+_Avoid_: Evidence Ref, chunk ID
+
+**Claim Verifier**:
+The independent checker that decides whether each factual claim in a draft
+answer is supported by the provided evidence. It judges support; it does not
+rewrite prose.
+_Avoid_: Answer editor, citation renderer
+
+**Final Composer**:
+The answer editor that rewrites a draft after verification by using only
+supported claims and explicit evidence-insufficient statements.
+_Avoid_: Verifier, string deleter
+
+**Citation Fragmentation Gate**:
+The presentation-quality boundary for an otherwise supported answer whose
+consecutive factual sentences repeatedly cite the same Evidence Ref.
+_Avoid_: Claim Verifier, citation index, generic style judge
+
+**Presentation Editor**:
+A constrained editor that reorganizes verified answer claims into readable
+user-facing prose without introducing new factual claims. It is separate from
+the Final Composer used for unsupported claims.
+_Avoid_: Final Composer, Claim Verifier, Answer Writer
+
+**Presentation Edit Fallback**:
+The successful publication of an original verified answer when the optional
+Presentation Editor cannot produce another verified form.
+_Avoid_: Research failure, clarification, editor retry

@@ -36,3 +36,4 @@ References: `docs/08-development-environment.md`,
 | [Logging Guidelines](./logging-guidelines.md) | Confirmed Python logging practices |
 | [Quality Guidelines](./quality-guidelines.md) | Static checks, tests, and CI gates |
 | [Candidate Relevance Execution](./candidate-relevance-execution.md) | Batch assessment, retry-subset, and Redis snapshot contracts |
+| [RAG Answer Citation And Verification](./rag-answer-citation-verification.md) | EvidenceSnapshot, EvidenceRef, verifier, composer, and user citation contracts |

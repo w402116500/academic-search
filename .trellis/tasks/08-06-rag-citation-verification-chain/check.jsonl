@@ -1,0 +1,5 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/rag-answer-citation-verification.md", "reason": "Verify implementation against EvidenceSnapshot/EvidenceRef contract"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "Frontend type-safety requirements if citation DTOs/rendering change"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer verification of final reference payload and display mapping"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend test and quality gates for changed RAG contracts"}
