@@ -5,8 +5,9 @@
 Use `ref` and `computed` for page-local input and derived UI state. Use route
 parameters and query strings for navigable, recoverable selection state. Use
 TanStack Vue Query for API data. Pinia holds application-wide UI state such as
-the authenticated user, access-token lifecycle, and authentication request
-state.
+the authenticated user and authentication request state. The API client owns
+access-token persistence in `localStorage` and adds the Bearer header; the auth
+store coordinates restoration, login, registration, and clearing that token.
 
 References: `frontend/src/views/PlanReviewView.vue`,
 `frontend/src/views/ResearchChatView.vue`, `frontend/src/stores/auth.ts`,

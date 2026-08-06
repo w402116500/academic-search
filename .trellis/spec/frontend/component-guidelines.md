@@ -42,9 +42,9 @@ References: `frontend/src/views/AuthView.vue`,
 
 ## Styling
 
-Stylesheets are imported from the application entrypoint: shared styles live
-under `src/assets/styles/`, while page or feature styles live beside their
-feature. The auth view is styled by `features/auth/auth.css` imported in
-`main.ts`.
+Stylesheets are imported from the application entrypoint: `src/styles.css` is
+the global base, reusable shared styles live under `src/assets/styles/`, and
+page or feature styles live beside their feature. The auth view is styled by
+`features/auth/auth.css` imported in `main.ts`.
 
 References: `frontend/src/main.ts`, `frontend/src/features/auth/auth.css`.

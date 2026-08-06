@@ -11,18 +11,22 @@ References: `frontend/package.json`, `frontend/vite.config.ts`,
 
 ## Guides
 
-| Guide | Use for |
-| --- | --- |
-| [Directory Structure](./directory-structure.md) | View, feature, API, and style placement |
-| [Component Guidelines](./component-guidelines.md) | Vue composition, forms, and accessibility |
-| [Hook Guidelines](./hook-guidelines.md) | Vue Query composables and cache updates |
-| [State Management](./state-management.md) | Local, URL, Pinia, and server state |
-| [Type Safety](./type-safety.md) | Generated API schema and strict TypeScript |
-| [Quality Guidelines](./quality-guidelines.md) | Lint, format, unit, and browser checks |
+| Guide                                             | Use for                                    |
+| ------------------------------------------------- | ------------------------------------------ |
+| [Directory Structure](./directory-structure.md)   | View, feature, API, and style placement    |
+| [Component Guidelines](./component-guidelines.md) | Vue composition, forms, and accessibility  |
+| [Hook Guidelines](./hook-guidelines.md)           | Vue Query composables and cache updates    |
+| [State Management](./state-management.md)         | Local, URL, Pinia, and server state        |
+| [Type Safety](./type-safety.md)                   | Generated API schema and strict TypeScript |
+| [Quality Guidelines](./quality-guidelines.md)     | Lint, format, unit, and browser checks     |
 
 ## Local Commands
 
-Run package scripts from `frontend/`:
+Use Node `20.19.6` from `.node-version` (the package engines allow Node
+`>=20.19.0 <21`) and the Corepack-managed pnpm `10.34.5` declared in
+`package.json`. Run package scripts from `frontend/`; when the ambient `pnpm`
+does not honor that package-manager version, prefix the same command with
+`corepack`.
 
 ```powershell
 pnpm dev
@@ -33,5 +37,8 @@ pnpm typecheck
 pnpm test:unit
 pnpm test:e2e
 ```
+
+For example, use `corepack pnpm lint` when the shell exposes an incompatible
+global pnpm version.
 
 References: `frontend/package.json`, `docs/08-development-environment.md`.

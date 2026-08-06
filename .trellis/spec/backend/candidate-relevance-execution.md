@@ -34,12 +34,14 @@ the search-run snapshot, never to the arq job payload.
 
 - `resolved_candidates`: candidates with a completed assessment or a terminal
   exclusion;
-- `retryable_failures`: candidate ID to code for results that cannot yet be
-  trusted.
+- `retryable_failures`: `Mapping[UUID, CandidateRelevanceCandidateFailure]`
+  for results that cannot yet be trusted; persist the failure object's `.code`
+  only when that candidate reaches terminal exclusion.
 
-The private Redis snapshot key `relevance_retry_candidate_ids` is an ordered
-JSON list of UUID strings. On attempt 2, the Worker uses the list only when
-its IDs exactly match the currently `PENDING`, triage-included candidates
+The private Redis session-snapshot field `relevance_retry_candidate_ids` is
+serialized as a JSON list of UUID strings. Its order is not semantically
+consumed. On attempt 2, the Worker converts the list to a set and uses it only
+when its IDs exactly match the currently `PENDING`, triage-included candidates
 before calling the evaluator. An absent, empty, invalid, nonmatching, or
 partially matching field that omits a pending ID or contains any foreign ID
 falls back to the pending included set; it must never cause completed or
@@ -55,15 +57,15 @@ field merge and retry-ID/attempt update must be committed in one
 
 ### 4. Validation And Error Matrix
 
-| Condition | Evaluator outcome | Worker action |
-| --- | --- | --- |
-| Stream empty, truncated, or outer JSON invalid | `CandidateRelevanceTechnicalFailure` | Retry all currently unresolved candidates in this invocation once |
-| Missing, duplicate, malformed, or evidence-invalid assessment item | Retry failure for that candidate | Merge valid peers, retry only failed IDs |
-| Claim verifier item missing, malformed, duplicate, or temporarily unavailable | Retry failure for that candidate | Merge verified peers, retry only failed IDs |
-| `candidate_relevance_claim_unsupported` | Terminal excluded candidate | Do not retry or display in review |
-| No abstract | `insufficient_information` terminal exclusion | Do not call the model for a fabricated assessment or retry it |
-| Retry exhausted | Terminal excluded candidate with stored error code | Exclude only IDs in the retry subset |
-| Retry IDs empty, malformed, missing a pending ID, or containing any ID absent from pending candidates | Invalid private snapshot state | Fall back to pending included candidates |
+| Condition                                                                                             | Evaluator outcome                                  | Worker action                                                     |
+| ----------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------- |
+| Stream empty, truncated, or outer JSON invalid                                                        | `CandidateRelevanceTechnicalFailure`               | Retry all currently unresolved candidates in this invocation once |
+| Missing, duplicate, malformed, or evidence-invalid assessment item                                    | Retry failure for that candidate                   | Merge valid peers, retry only failed IDs                          |
+| Claim verifier item missing, malformed, duplicate, or temporarily unavailable                         | Retry failure for that candidate                   | Merge verified peers, retry only failed IDs                       |
+| `candidate_relevance_claim_unsupported`                                                               | Terminal excluded candidate                        | Do not retry or display in review                                 |
+| No abstract                                                                                           | `insufficient_information` terminal exclusion      | Do not call the model for a fabricated assessment or retry it     |
+| Retry exhausted                                                                                       | Terminal excluded candidate with stored error code | Exclude only IDs in the retry subset                              |
+| Retry IDs empty, malformed, missing a pending ID, or containing any ID absent from pending candidates | Invalid private snapshot state                     | Fall back to pending included candidates                          |
 
 ### 5. Good / Base / Bad Cases
 
@@ -102,12 +104,20 @@ This discards `resolved_candidates` and schedules a whole-collection retry.
 #### Correct
 
 ```python
+retry_candidate_ids = tuple(outcome.retryable_failures)
+next_attempt_no = attempt_no + 1
 await session_store.merge_snapshot(
     session_key,
-    lambda current: merge_relevance(current, outcome.resolved_candidates),
+    lambda current: CandidateRelevanceRunExecutor._merge_relevance_and_schedule_retry(
+        current,
+        outcome.resolved_candidates,
+        next_attempt_no,
+        retry_candidate_ids,
+    ),
 )
-await queue.enqueue_relevance(search_run_id=run.id, attempt_no=2)
+await queue.enqueue_relevance(search_run_id=run.id, attempt_no=next_attempt_no)
 ```
 
-Persist the unresolved UUID subset in the same retry-scheduling snapshot so
-attempt 2 can derive its bounded model input without changing the queue API.
+This single transform persists valid results, `relevance_attempt_no`, and the
+unresolved UUID subset before attempt 2 can derive its bounded model input,
+without changing the queue API.
