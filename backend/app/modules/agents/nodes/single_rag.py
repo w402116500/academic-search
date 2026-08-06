@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
-from uuid import UUID
 
-from app.modules.agents.contracts import ResearchChatModel, ResearchModelError
+from app.modules.agents.contracts import (
+    AnswerClaimVerification,
+    ResearchChatModel,
+    ResearchModelError,
+    ResearchModelProtocolError,
+)
+from app.modules.agents.evidence_refs import (
+    canonical_answer_cited_refs,
+    chunk_ids_for_refs,
+    evidence_snapshot_trace,
+    invalid_evidence_refs,
+    render_user_citations,
+)
+from app.modules.agents.presentation import conditionally_edit_verified_answer
 from app.modules.agents.state import SingleRagState, evidence_from_state, evidence_to_state
-from app.modules.rag.retrieval import RetrievalResult
+from app.modules.rag.retrieval import RetrievalResult, RetrievedEvidence
 from app.modules.research.contracts import ResearchRunStage
 from app.modules.research.execution_port import ResearchExecutionContext
 from app.modules.research.settings import ResearchSettings
@@ -86,11 +98,12 @@ class SingleRagNodes:
             "正在依据已检索证据整理回答。",
             len(evidences),
         )
-        answer = await self._call_model(
+        answer = await self._call_model_with_snapshot(
             lambda: self._model.generate_answer(
                 question=state["question"],
                 evidences=evidences,
-            )
+            ),
+            evidences,
         )
         if not answer.evidence_sufficient:
             return {
@@ -101,28 +114,36 @@ class SingleRagNodes:
         return {
             "route": "answer",
             "answer": answer.answer,
-            "cited_chunk_ids": [str(item) for item in answer.cited_chunk_ids],
+            "cited_refs": list(answer.cited_refs),
+            "retrieval_trace": {
+                **state["retrieval_trace"],
+                "evidence_snapshot": evidence_snapshot_trace(evidences),
+            },
         }
 
     async def verify_answer(self, state: SingleRagState) -> dict[str, object]:
         """保存回答前独立核验原子主张与实际引用片段。"""
         evidences = tuple(evidence_from_state(item) for item in state["evidences"])
-        cited_ids = {UUID(item) for item in state["cited_chunk_ids"]}
-        cited_evidences = tuple(item for item in evidences if item.chunk_id in cited_ids)
-        if len(cited_evidences) != len(cited_ids):
-            raise ResearchModelError("回答引用不属于本次已检索证据。")
+        cited_refs = _validated_cited_refs_from_answer(
+            answer=state["answer"],
+            evidences=evidences,
+            cited_refs=state["cited_refs"],
+        )
         await self._emit(
             ResearchRunStage.EVIDENCE_VERIFYING,
             "正在逐项核验回答主张是否被实际引用的原文支持。",
-            len(cited_evidences),
+            len(cited_refs),
         )
-        verification = await self._call_model(
+        verification = await self._call_model_with_snapshot(
             lambda: self._model.verify_answer_claims(
                 question=state["question"],
                 answer=state["answer"],
-                evidences=cited_evidences,
-            )
+                evidences=evidences,
+                cited_refs=cited_refs,
+            ),
+            evidences,
         )
+        _ensure_supporting_refs_are_cited(verification, cited_refs, evidences)
         unsupported_count = sum(not item.supported for item in verification.claims)
         trace = {
             **state["retrieval_trace"],
@@ -130,9 +151,17 @@ class SingleRagNodes:
                 "claim_count": len(verification.claims),
                 "unsupported_claim_count": unsupported_count,
                 "status": "supported" if unsupported_count == 0 else "unsupported",
+                "claims": verification.model_dump(mode="json")["claims"],
+                "repair_count": state["repair_count"],
             },
         }
         if unsupported_count:
+            if state["repair_count"] == 0:
+                return {
+                    "route": "repair",
+                    "answer_claim_verification": verification.model_dump(mode="json"),
+                    "retrieval_trace": trace,
+                }
             return {
                 "route": "clarify",
                 "clarification_question": (
@@ -140,7 +169,81 @@ class SingleRagNodes:
                 ),
                 "retrieval_trace": trace,
             }
-        return {"route": "answer", "retrieval_trace": trace}
+        answer_to_render = state["answer"]
+        if state["repair_count"] == 0:
+            presentation = await conditionally_edit_verified_answer(
+                model=self._model,
+                call_model=self._call_model,
+                question=state["question"],
+                writer_answer=state["answer"],
+                verification=verification,
+                evidences=evidences,
+                cited_refs=cited_refs,
+            )
+            answer_to_render = presentation.answer
+            trace = {**trace, "presentation_quality": presentation.audit}
+        try:
+            rendered_answer, citations = render_user_citations(answer_to_render, evidences)
+        except ValueError as exc:
+            raise ResearchModelError("最终回答引用了不属于当前证据快照的标识。") from exc
+        if not citations:
+            raise ResearchModelError("最终回答没有可展示的证据引用。")
+        cited_refs = [citation.evidence_ref for citation in citations]
+        cited_chunk_ids = [str(chunk_id) for chunk_id in chunk_ids_for_refs(evidences, cited_refs)]
+        return {
+            "route": "answer",
+            "answer": rendered_answer,
+            "cited_refs": cited_refs,
+            "cited_chunk_ids": cited_chunk_ids,
+            "retrieval_trace": {
+                **trace,
+                "user_citations": [
+                    {
+                        "display_index": citation.display_index,
+                        "evidence_ref": citation.evidence_ref,
+                        "chunk_id": str(citation.chunk_id),
+                    }
+                    for citation in citations
+                ],
+            },
+        }
+
+    async def repair_answer(self, state: SingleRagState) -> dict[str, object]:
+        """核验失败时重新组织答案，而不是机械删除原文片段。"""
+        evidences = tuple(evidence_from_state(item) for item in state["evidences"])
+        verification = AnswerClaimVerification.model_validate(state["answer_claim_verification"])
+        await self._emit(
+            ResearchRunStage.ANSWERING,
+            "正在按已核验证据修复回答。",
+            len(evidences),
+        )
+        final_answer = await self._call_model_with_snapshot(
+            lambda: self._model.compose_final_answer(
+                question=state["question"],
+                draft_answer=state["answer"],
+                verification=verification,
+                evidences=evidences,
+            ),
+            evidences,
+        )
+        return {
+            "route": "answer",
+            "answer": final_answer.answer,
+            "cited_refs": list(final_answer.cited_refs),
+            "repair_count": state["repair_count"] + 1,
+        }
+
+    async def _call_model_with_snapshot(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        evidences: Sequence[RetrievedEvidence],
+    ) -> Any:
+        """Persist snapshot diagnostics when a model violates the RAG evidence contract."""
+        try:
+            return await self._call_model(operation)
+        except ResearchModelProtocolError as exc:
+            exc.add_evidence_snapshot(evidence_snapshot_trace(evidences))
+            raise
 
     async def clarify(self, state: SingleRagState) -> dict[str, object]:
         """证据不足是正常终态，前端会显示澄清问题。"""
@@ -153,3 +256,31 @@ class SingleRagNodes:
             "clarification_question": state.get("clarification_question")
             or "当前研究集合没有足够证据支持这个问题。请补充研究对象、条件或限定到具体论文。"
         }
+
+
+def _validated_cited_refs_from_answer(
+    *,
+    answer: str,
+    evidences: Sequence[RetrievedEvidence],
+    cited_refs: Sequence[str],
+) -> tuple[str, ...]:
+    try:
+        return canonical_answer_cited_refs(answer, evidences, cited_refs)
+    except ValueError as exc:
+        error = ResearchModelProtocolError("回答正文引用无效，无法映射到证据快照。")
+        error.add_evidence_snapshot(evidence_snapshot_trace(evidences))
+        raise error from exc
+
+
+def _ensure_supporting_refs_are_cited(
+    verification: AnswerClaimVerification,
+    cited_refs: Sequence[str],
+    evidences: Sequence[RetrievedEvidence],
+) -> None:
+    allowed_refs = set(cited_refs)
+    for item in verification.claims:
+        invalid = invalid_evidence_refs(item.supporting_refs, allowed_refs)
+        if invalid:
+            error = ResearchModelProtocolError("回答主张核验器返回了未被回答实际引用的片段标识。")
+            error.add_evidence_snapshot(evidence_snapshot_trace(evidences))
+            raise error

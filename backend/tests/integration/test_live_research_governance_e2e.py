@@ -104,6 +104,9 @@ class BlockingRouterModel:
     async def verify_answer_claims(self, **_: object) -> object:
         raise AssertionError("取消后不应核验回答主张。")
 
+    async def compose_final_answer(self, **_: object) -> object:
+        raise AssertionError("取消后不应修复回答。")
+
 
 def _live_test_is_enabled() -> bool:
     """真实数据库与 Redis 写入只能由显式环境变量开启。"""

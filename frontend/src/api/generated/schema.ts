@@ -1833,6 +1833,10 @@ export interface components {
       chunk_id: string;
       /** Citation Excerpt */
       citation_excerpt: string | null;
+      /** Display Index */
+      display_index: number | null;
+      /** Evidence Ref */
+      evidence_ref: string | null;
       /**
        * Id
        * Format: uuid

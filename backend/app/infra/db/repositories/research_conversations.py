@@ -32,6 +32,15 @@ from app.modules.research.contracts import (
 from app.modules.research.queue import ResearchJobQueue, ResearchQueueError
 from app.modules.research.settings import ResearchSettings, get_research_settings
 
+_SERVER_ONLY_RETRIEVAL_TRACE_KEYS = frozenset({"failure_diagnostics", "presentation_quality"})
+
+
+def _public_retrieval_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    """Project persisted run diagnostics into the ordinary API-safe trace."""
+    return {
+        key: value for key, value in trace.items() if key not in _SERVER_ONLY_RETRIEVAL_TRACE_KEYS
+    }
+
 
 class SqlAlchemyResearchConversationAdapter:
     """保证研究问题只能进入用户拥有、已完成索引的集合。"""
@@ -521,7 +530,7 @@ class SqlAlchemyResearchConversationAdapter:
             stage=stage,
             stage_display=RESEARCH_RUN_STAGE_DISPLAYS[stage],
             model_snapshot=dict(run.model_config),
-            retrieval_trace=dict(run.retrieval_trace),
+            retrieval_trace=_public_retrieval_trace(run.retrieval_trace),
             error_code=run.error_code,
             error_message=run.error_message,
             cancel_requested_at=run.cancel_requested_at,
@@ -551,6 +560,13 @@ class SqlAlchemyResearchConversationAdapter:
             ResearchEvidenceResponse(
                 id=evidence.id,
                 chunk_id=evidence.chunk_id,
+                display_index=evidence.rank,
+                evidence_ref=(
+                    str(evidence.locator_snapshot.get("evidence_ref"))
+                    if isinstance(evidence.locator_snapshot, dict)
+                    and evidence.locator_snapshot.get("evidence_ref") is not None
+                    else None
+                ),
                 selection_stage=evidence.selection_stage,
                 rank=evidence.rank,
                 vector_score=evidence.vector_score,

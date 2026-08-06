@@ -32,6 +32,7 @@ from app.infra.redis.research_events import RedisResearchEventStore
 from app.modules.agents.contracts import (
     ResearchChatModel,
     ResearchModelError,
+    ResearchModelProtocolError,
     ResearchRunCancelled,
 )
 from app.modules.agents.graph import ResearchGraphRunner
@@ -167,15 +168,22 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
                 evidence_count=0,
             )
         return {"research_run_id": str(run_id), "status": "cancelled", "evidence_count": 0}
+    except ResearchModelProtocolError as exc:
+        logger.exception("研究模型返回了不符合证据协议的结构化回答：research_run_id=%s", run_id)
+        error_code = "research_model_protocol_failed"
+        error_message = "研究模型返回了无法核验的回答，请重试。"
+        failure_diagnostics = exc.diagnostics
     except ResearchModelError:
         logger.exception("研究模型未生成可核验的结构化回答：research_run_id=%s", run_id)
         error_code = "research_model_failed"
         error_message = "研究模型调用失败，未生成可核验回答。"
+        failure_diagnostics = None
     except Exception:
         # 详细堆栈只写入 Worker 日志，数据库和 API 继续返回稳定、无敏感信息的错误。
         logger.exception("研究运行执行失败：research_run_id=%s", run_id)
         error_code = "research_execution_failed"
         error_message = "研究任务执行失败，请稍后重试。"
+        failure_diagnostics = None
     else:
         async with async_session_factory() as completion_session:
             persisted_status = await SqlAlchemyResearchExecutionAdapter(
@@ -211,7 +219,10 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
 
     async with async_session_factory() as failure_session:
         terminal_status = await SqlAlchemyResearchExecutionAdapter(failure_session).fail(
-            run_id, code=error_code, message=error_message
+            run_id,
+            code=error_code,
+            message=error_message,
+            diagnostics=failure_diagnostics,
         )
     if terminal_status is ResearchRunStatus.CANCELLED:
         await _publish_terminal_event(

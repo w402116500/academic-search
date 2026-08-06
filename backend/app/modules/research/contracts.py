@@ -183,6 +183,8 @@ class ResearchEvidenceResponse(BaseModel):
 
     id: UUID
     chunk_id: UUID
+    display_index: int | None
+    evidence_ref: str | None
     selection_stage: str
     rank: int | None
     vector_score: float | None

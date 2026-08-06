@@ -78,9 +78,17 @@ const currentConversation = computed(
 );
 const conversationDetail = computed(() => conversationQuery.data.value);
 const pendingRun = computed(() => {
-  const runs = conversationDetail.value?.runs ?? [];
+  if (activeRun.value?.output_message_id === null) return activeRun.value;
+  const latestUserMessage = [...(conversationDetail.value?.messages ?? [])]
+    .reverse()
+    .find((message) => message.role === "user");
+  if (!latestUserMessage) return null;
   return (
-    activeRun.value ?? [...runs].reverse().find((run) => run.output_message_id === null) ?? null
+    [...(conversationDetail.value?.runs ?? [])]
+      .reverse()
+      .find(
+        (run) => run.input_message_id === latestUserMessage.id && run.output_message_id === null,
+      ) ?? null
   );
 });
 const composerDisabled = computed(
@@ -425,7 +433,9 @@ watch(
                       v-for="(evidence, index) in runForOutputMessage(message.id)?.evidences ?? []"
                       :key="evidence.id"
                     >
-                      <span class="research-chat-evidence-index">{{ index + 1 }}</span>
+                      <span class="research-chat-evidence-index">{{
+                        evidence.display_index ?? index + 1
+                      }}</span>
                       <div>
                         <strong>{{ evidence.title }}</strong>
                         <a

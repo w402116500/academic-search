@@ -18,9 +18,12 @@ class SingleRagState(TypedDict):
     rewrite_count: int
     evidences: list[dict[str, object]]
     retrieval_trace: dict[str, object]
-    route: Literal["answer", "rewrite", "clarify"]
+    route: Literal["answer", "rewrite", "clarify", "repair"]
     answer: str
+    cited_refs: list[str]
     cited_chunk_ids: list[str]
+    repair_count: int
+    answer_claim_verification: dict[str, object]
     clarification_question: str
 
 

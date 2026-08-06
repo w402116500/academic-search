@@ -63,5 +63,10 @@ class ResearchExecutionPort(Protocol):
     ) -> ResearchRunStatus | None: ...
 
     async def fail(
-        self, research_run_id: UUID, *, code: str, message: str
+        self,
+        research_run_id: UUID,
+        *,
+        code: str,
+        message: str,
+        diagnostics: dict[str, Any] | None = None,
     ) -> ResearchRunStatus | None: ...

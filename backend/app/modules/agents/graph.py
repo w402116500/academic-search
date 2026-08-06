@@ -11,13 +11,24 @@ from langgraph.graph import END, START, StateGraph
 
 from app.modules.agents.checkpoint import ResearchGraphExecutor
 from app.modules.agents.contracts import (
+    AnswerClaimVerification,
     ResearchBudgetExhausted,
     ResearchChatModel,
     ResearchModelError,
+    ResearchModelProtocolError,
     ResearchRunBudget,
     ResearchRunCancelled,
 )
+from app.modules.agents.evidence_refs import (
+    canonical_answer_cited_refs,
+    chunk_ids_for_refs,
+    evidence_snapshot_trace,
+    invalid_evidence_refs,
+    render_user_citations,
+    resolve_evidence_refs,
+)
 from app.modules.agents.nodes.single_rag import SingleRagNodes
+from app.modules.agents.presentation import conditionally_edit_verified_answer
 from app.modules.agents.state import (
     ResearchGraphOutcome,
     SingleRagState,
@@ -102,6 +113,7 @@ class ResearchGraphRunner:
         graph.add_node("rewrite", nodes.rewrite)
         graph.add_node("answer", nodes.answer)
         graph.add_node("verify_answer", nodes.verify_answer)
+        graph.add_node("repair_answer", nodes.repair_answer)
         graph.add_node("clarify", nodes.clarify)
         graph.add_edge(START, "retrieve")
         graph.add_edge("retrieve", "assess")
@@ -119,8 +131,9 @@ class ResearchGraphRunner:
         graph.add_conditional_edges(
             "verify_answer",
             lambda state: state["route"],
-            {"answer": END, "clarify": "clarify"},
+            {"answer": END, "repair": "repair_answer", "clarify": "clarify"},
         )
+        graph.add_edge("repair_answer", "verify_answer")
         graph.add_edge("clarify", END)
         initial_state: SingleRagState = {
             "question": context.question,
@@ -130,7 +143,10 @@ class ResearchGraphRunner:
             "retrieval_trace": {},
             "route": "clarify",
             "answer": "",
+            "cited_refs": [],
             "cited_chunk_ids": [],
+            "repair_count": 0,
+            "answer_claim_verification": {},
             "clarification_question": "",
         }
         final_state = await self._graph_executor.invoke(
@@ -287,8 +303,7 @@ class ResearchGraphRunner:
         verification = await self._call_model(
             lambda: self._model.verify_evidence(question=context.question, evidences=all_evidences)
         )
-        verified_ids = set(verification.supported_chunk_ids)
-        verified = tuple(item for item in all_evidences if item.chunk_id in verified_ids)
+        verified = resolve_evidence_refs(all_evidences, verification.supported_refs)
         if not verified:
             return self._clarification_outcome(
                 question=context.question,
@@ -305,8 +320,9 @@ class ResearchGraphRunner:
                 ),
             )
         await self._emit(ResearchRunStage.ANSWERING, "正在综合已核验的文献证据。", len(verified))
-        answer = await self._call_model(
-            lambda: self._model.generate_answer(question=context.question, evidences=verified)
+        answer = await self._call_model_with_snapshot(
+            lambda: self._model.generate_answer(question=context.question, evidences=verified),
+            verified,
         )
         if not answer.evidence_sufficient:
             return self._clarification_outcome(
@@ -324,17 +340,21 @@ class ResearchGraphRunner:
                 ),
                 clarification=answer.clarification_question,
             )
-        cited_ids = set(answer.cited_chunk_ids)
-        cited_evidences = tuple(item for item in verified if item.chunk_id in cited_ids)
-        if len(cited_evidences) != len(cited_ids):
-            raise ResearchModelError("回答引用不属于本次已核验证据。")
-        answer_verification = await self._call_model(
+        cited_refs = _validated_cited_refs_from_answer(
+            answer=answer.answer,
+            evidences=verified,
+            cited_refs=answer.cited_refs,
+        )
+        answer_verification = await self._call_model_with_snapshot(
             lambda: self._model.verify_answer_claims(
                 question=context.question,
                 answer=answer.answer,
-                evidences=cited_evidences,
-            )
+                evidences=verified,
+                cited_refs=cited_refs,
+            ),
+            verified,
         )
+        _ensure_supporting_refs_are_cited(answer_verification, cited_refs, verified)
         unsupported_count = sum(not item.supported for item in answer_verification.claims)
         trace = self._complex_trace(
             routing=routing,
@@ -344,27 +364,99 @@ class ResearchGraphRunner:
                 "verified_evidence_count": len(verified),
                 "unresolved_aspects": verification.unresolved_aspects,
                 "budget_exhausted": stopped_by_budget,
+                "evidence_snapshot": evidence_snapshot_trace(verified),
                 "answer_claim_verification": {
                     "claim_count": len(answer_verification.claims),
                     "unsupported_claim_count": unsupported_count,
                     "status": "supported" if unsupported_count == 0 else "unsupported",
+                    "claims": answer_verification.model_dump(mode="json")["claims"],
                 },
             },
         )
+        final_answer_text = answer.answer
         if unsupported_count:
-            return self._clarification_outcome(
-                question=context.question,
-                evidences=verified,
-                trace={**trace, "outcome": "answer_claims_unsupported"},
-                clarification="当前原文无法完整支持准备输出的结论。请缩小问题范围或补充相关文献。",
+            repaired = await self._call_model_with_snapshot(
+                lambda: self._model.compose_final_answer(
+                    question=context.question,
+                    draft_answer=answer.answer,
+                    verification=answer_verification,
+                    evidences=verified,
+                ),
+                verified,
             )
+            repaired_cited_refs = _validated_cited_refs_from_answer(
+                answer=repaired.answer,
+                evidences=verified,
+                cited_refs=repaired.cited_refs,
+            )
+            second_verification = await self._call_model_with_snapshot(
+                lambda: self._model.verify_answer_claims(
+                    question=context.question,
+                    answer=repaired.answer,
+                    evidences=verified,
+                    cited_refs=repaired_cited_refs,
+                ),
+                verified,
+            )
+            _ensure_supporting_refs_are_cited(second_verification, repaired_cited_refs, verified)
+            second_unsupported_count = sum(
+                not item.supported for item in second_verification.claims
+            )
+            trace = {
+                **trace,
+                "answer_repair": {
+                    "status": "supported" if second_unsupported_count == 0 else "unsupported",
+                    "claim_count": len(second_verification.claims),
+                    "unsupported_claim_count": second_unsupported_count,
+                    "resolved_claim_ids": list(repaired.resolved_claim_ids),
+                    "evidence_insufficient_claims": list(repaired.evidence_insufficient_claims),
+                    "claims": second_verification.model_dump(mode="json")["claims"],
+                },
+            }
+            if second_unsupported_count:
+                return self._clarification_outcome(
+                    question=context.question,
+                    evidences=verified,
+                    trace={**trace, "outcome": "answer_claims_unsupported_after_repair"},
+                    clarification="当前原文无法完整支持准备输出的结论。请缩小问题范围或补充相关文献。",
+                )
+            final_answer_text = repaired.answer
+        else:
+            presentation = await conditionally_edit_verified_answer(
+                model=self._model,
+                call_model=self._call_model,
+                question=context.question,
+                writer_answer=answer.answer,
+                verification=answer_verification,
+                evidences=verified,
+                cited_refs=cited_refs,
+            )
+            final_answer_text = presentation.answer
+            trace = {**trace, "presentation_quality": presentation.audit}
+        try:
+            rendered_answer, citations = render_user_citations(final_answer_text, verified)
+        except ValueError as exc:
+            raise ResearchModelError("最终回答引用了不属于当前证据快照的标识。") from exc
+        if not citations:
+            raise ResearchModelError("最终回答没有可展示的证据引用。")
+        cited_refs = [citation.evidence_ref for citation in citations]
         return ResearchGraphOutcome(
             status=ResearchRunStatus.COMPLETED,
             stage=ResearchRunStage.COMPLETED,
-            answer=answer.answer,
+            answer=rendered_answer,
             evidences=verified,
-            cited_chunk_ids=tuple(answer.cited_chunk_ids),
-            retrieval_trace=trace,
+            cited_chunk_ids=chunk_ids_for_refs(verified, cited_refs),
+            retrieval_trace={
+                **trace,
+                "user_citations": [
+                    {
+                        "display_index": citation.display_index,
+                        "evidence_ref": citation.evidence_ref,
+                        "chunk_id": str(citation.chunk_id),
+                    }
+                    for citation in citations
+                ],
+            },
             mode=ResearchRunMode.MULTI_AGENT.value,
         )
 
@@ -375,6 +467,18 @@ class ResearchGraphRunner:
         result = await operation()
         await self._ensure_not_cancelled()
         return result
+
+    async def _call_model_with_snapshot(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        evidences: Sequence[RetrievedEvidence],
+    ) -> Any:
+        """Attach EvidenceSnapshot data to protocol failures before worker persistence."""
+        try:
+            return await self._call_model(operation)
+        except ResearchModelProtocolError as exc:
+            exc.add_evidence_snapshot(evidence_snapshot_trace(evidences))
+            raise
 
     async def _retrieve(self, *, scope: object, query: str) -> RetrievalResult:
         """复杂与单轮流程共用当前集合范围内的唯一检索工具。"""
@@ -462,3 +566,31 @@ class ResearchGraphRunner:
             retrieval_trace=trace,
             mode=ResearchRunMode.MULTI_AGENT.value,
         )
+
+
+def _validated_cited_refs_from_answer(
+    *,
+    answer: str,
+    evidences: Sequence[RetrievedEvidence],
+    cited_refs: Sequence[str],
+) -> tuple[str, ...]:
+    try:
+        return canonical_answer_cited_refs(answer, evidences, cited_refs)
+    except ValueError as exc:
+        error = ResearchModelProtocolError("回答正文引用无效，无法映射到证据快照。")
+        error.add_evidence_snapshot(evidence_snapshot_trace(evidences))
+        raise error from exc
+
+
+def _ensure_supporting_refs_are_cited(
+    verification: AnswerClaimVerification,
+    cited_refs: Sequence[str],
+    evidences: Sequence[RetrievedEvidence],
+) -> None:
+    allowed_refs = set(cited_refs)
+    for item in verification.claims:
+        invalid = invalid_evidence_refs(item.supporting_refs, allowed_refs)
+        if invalid:
+            error = ResearchModelProtocolError("回答主张核验器返回了未被回答实际引用的片段标识。")
+            error.add_evidence_snapshot(evidence_snapshot_trace(evidences))
+            raise error

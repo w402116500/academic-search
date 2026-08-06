@@ -182,7 +182,12 @@ class SqlAlchemyResearchExecutionAdapter:
             return outcome.status
 
     async def fail(
-        self, research_run_id: UUID, *, code: str, message: str
+        self,
+        research_run_id: UUID,
+        *,
+        code: str,
+        message: str,
+        diagnostics: dict[str, Any] | None = None,
     ) -> ResearchRunStatus | None:
         """持久化非预期异常，前端可以在同一运行上发起显式重试。"""
         async with self._session.begin():
@@ -197,7 +202,20 @@ class SqlAlchemyResearchExecutionAdapter:
             finished_at = datetime.now(UTC)
             terminal_trace = self._terminal_trace(
                 run,
-                {**run.retrieval_trace, "stage": ResearchRunStage.FAILED.value},
+                {
+                    **run.retrieval_trace,
+                    "stage": ResearchRunStage.FAILED.value,
+                    **(
+                        {
+                            "failure_diagnostics": {
+                                "failure_code": code,
+                                **diagnostics,
+                            }
+                        }
+                        if diagnostics
+                        else {}
+                    ),
+                },
                 finished_at=finished_at,
             )
             run.status = ResearchRunStatus.FAILED.value
@@ -323,6 +341,11 @@ class SqlAlchemyResearchExecutionAdapter:
         """同时保存 RRF 入选池和最终引用，便于后续定位回答为何选中某个片段。"""
         records: list[ResearchEvidence] = []
         cited_chunk_ids = set(outcome.cited_chunk_ids)
+        citation_by_chunk_id = {
+            UUID(str(item["chunk_id"])): item
+            for item in outcome.retrieval_trace.get("user_citations", [])
+            if isinstance(item, dict) and item.get("chunk_id") is not None
+        }
         for evidence in outcome.evidences:
             selection_stage = "rerank" if evidence.rerank_score is not None else "rrf"
             locator = {
@@ -348,18 +371,26 @@ class SqlAlchemyResearchExecutionAdapter:
                 )
             )
             if evidence.chunk_id in cited_chunk_ids:
+                citation = citation_by_chunk_id.get(evidence.chunk_id, {})
+                display_index = citation.get("display_index")
+                evidence_ref = citation.get("evidence_ref")
+                final_locator = {
+                    **locator,
+                    **({"display_index": display_index} if isinstance(display_index, int) else {}),
+                    **({"evidence_ref": evidence_ref} if isinstance(evidence_ref, str) else {}),
+                }
                 records.append(
                     ResearchEvidence(
                         research_run_id=research_run_id,
                         chunk_id=evidence.chunk_id,
                         selection_stage="final_citation",
-                        rank=evidence.rank,
+                        rank=display_index if isinstance(display_index, int) else evidence.rank,
                         vector_score=evidence.vector_score,
                         rrf_score=evidence.rrf_score,
                         rerank_score=evidence.rerank_score,
                         is_cited=True,
                         citation_excerpt=evidence.content,
-                        locator_snapshot=locator,
+                        locator_snapshot=final_locator,
                     )
                 )
         return records

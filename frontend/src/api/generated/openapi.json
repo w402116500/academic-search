@@ -2197,6 +2197,28 @@
             ],
             "title": "Citation Excerpt"
           },
+          "display_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Index"
+          },
+          "evidence_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Ref"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -2301,6 +2323,8 @@
         "required": [
           "id",
           "chunk_id",
+          "display_index",
+          "evidence_ref",
           "selection_stage",
           "rank",
           "vector_score",

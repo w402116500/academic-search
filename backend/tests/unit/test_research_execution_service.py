@@ -154,12 +154,23 @@ async def test_fail_closes_the_active_stage_before_persisting_failed() -> None:
     session = FakeExecutionSession([run])
 
     status = await SqlAlchemyResearchExecutionAdapter(cast(AsyncSession, session)).fail(
-        _RUN_ID, code="research_model_failed", message="模型响应无效"
+        _RUN_ID,
+        code="research_model_protocol_failed",
+        message="模型响应无效",
+        diagnostics={
+            "model_output_summary": "structured_output_rejected",
+            "evidence_snapshot": [{"evidence_ref": "E1", "chunk_id": "chunk-1"}],
+        },
     )
 
     assert status is ResearchRunStatus.FAILED
     assert run.stage == ResearchRunStage.FAILED.value
     assert _recorded_stage(run) == ResearchRunStage.RERANKING.value
+    assert run.retrieval_trace["failure_diagnostics"] == {
+        "failure_code": "research_model_protocol_failed",
+        "model_output_summary": "structured_output_rejected",
+        "evidence_snapshot": [{"evidence_ref": "E1", "chunk_id": "chunk-1"}],
+    }
 
 
 @pytest.mark.asyncio
