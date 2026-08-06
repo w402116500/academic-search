@@ -25,6 +25,7 @@ from app.modules.agents.contracts import (
 from app.modules.agents.evidence_refs import invalid_evidence_refs, validate_answer_cited_refs
 from app.modules.agents.graph import ResearchGraphRunner
 from app.modules.agents.prompts import (
+    ROUTE_QUESTION_SYSTEM,
     answer_claim_verification_system,
     answer_system,
     presentation_editor_system,
@@ -124,6 +125,7 @@ class FakeModel:
         presentation_cited_refs: tuple[str, ...] | None = None,
         verification_claim: str | None = None,
         route_mode: Literal["single_rag", "multi_agent"] = "single_rag",
+        route_protocol_failures: int = 0,
     ) -> None:
         self.sufficient = sufficient
         self.claims_supported = claims_supported
@@ -136,6 +138,8 @@ class FakeModel:
         self.presentation_cited_refs = presentation_cited_refs
         self.verification_claim = verification_claim
         self.route_mode: Literal["single_rag", "multi_agent"] = route_mode
+        self.route_protocol_failures = route_protocol_failures
+        self.route_calls = 0
         self.rewrite_count = 0
         self.verify_answer_calls = 0
         self.compose_calls = 0
@@ -149,6 +153,10 @@ class FakeModel:
         return f"rewritten: {question}"
 
     async def route_question(self, question: str) -> ResearchRouteDecision:
+        self.route_calls += 1
+        if self.route_protocol_failures:
+            self.route_protocol_failures -= 1
+            raise ResearchModelProtocolError("路由模型遗漏了必填 mode 字段。")
         return ResearchRouteDecision(
             mode=self.route_mode,
             reason="问题需要分别核验多个方面。"
@@ -276,6 +284,65 @@ def test_structured_router_accepts_known_model_aliases(alias: str) -> None:
     assert decision.mode == "single_rag"
 
 
+def test_structured_router_rejects_answer_payload_without_route_mode() -> None:
+    """模型把研究结论塞进 content 时，不能被宽松解析为某条路由。"""
+    with pytest.raises(ValidationError, match="mode"):
+        ResearchRouteDecision.model_validate(
+            {
+                "reason": "该问题适合单篇研究。",
+                "content": {
+                    "study_population": "306 名医学生",
+                    "prevalence_of_poor_sleep_quality": "53.4%",
+                },
+            }
+        )
+
+
+def test_route_prompt_requires_explicit_top_level_decision_contract() -> None:
+    """JSON mode 不传字段定义时，路由提示本身必须固定顶层契约。"""
+    assert "顶层 JSON 对象" in ROUTE_QUESTION_SYSTEM
+    assert '"mode"' in ROUTE_QUESTION_SYSTEM
+    assert '"reason"' in ROUTE_QUESTION_SYSTEM
+    assert "不得使用 content、data、result 等包装字段" in ROUTE_QUESTION_SYSTEM
+
+
+@pytest.mark.asyncio
+async def test_single_rag_retries_one_route_protocol_failure_within_model_budget() -> None:
+    """路由首次漏字段时可重试一次，且重试必须计入真实模型调用预算。"""
+    model = FakeModel(route_protocol_failures=1)
+    outcome = await ResearchGraphRunner(
+        retriever=FakeRetriever([RetrievalResult(evidences=(_evidence(),), trace={"final": 1})]),
+        model=model,
+        settings=ResearchSettings(),
+        graph_executor=DirectResearchGraphExecutor(),
+    ).run(_context("该方法的实验结果是什么？"))
+
+    assert outcome.status is ResearchRunStatus.COMPLETED
+    assert model.route_calls == 2
+    assert outcome.retrieval_trace["routing"]["route_attempts"] == 2
+    assert outcome.retrieval_trace["budget"]["model_calls"] == 4
+
+
+@pytest.mark.asyncio
+async def test_route_protocol_failure_remains_failed_after_one_retry() -> None:
+    """第二次路由仍不合约时不得默认选路或发布澄清回答。"""
+    model = FakeModel(route_protocol_failures=2)
+
+    with pytest.raises(ResearchModelProtocolError) as error:
+        await ResearchGraphRunner(
+            retriever=FakeRetriever([]),
+            model=model,
+            settings=ResearchSettings(),
+            graph_executor=DirectResearchGraphExecutor(),
+        ).run(_context("该方法的实验结果是什么？"))
+
+    assert model.route_calls == 2
+    assert error.value.diagnostics == {
+        "model_output_summary": "structured_output_rejected",
+        "route_attempts": 2,
+    }
+
+
 def test_answer_draft_allows_empty_citations_only_for_insufficient_evidence() -> None:
     """证据不足是可见正常终态，不能因空引用被误判为模型协议故障。"""
     clarification = AnswerDraft(
@@ -348,6 +415,7 @@ def test_rag_prompts_expose_only_evidence_refs_not_chunk_ids() -> None:
 
     assert "[E1]" in answer_prompt
     assert "[E1]" in verifier_prompt
+    assert "两个独立必填约束" in answer_prompt
     assert "chunk_id=" not in answer_prompt
     assert "chunk_id=" not in verifier_prompt
     assert str(evidence.chunk_id) not in answer_prompt
@@ -497,8 +565,8 @@ async def test_single_rag_renders_user_citations_by_first_use_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_single_rag_canonicalizes_cited_refs_from_answer_text() -> None:
-    """正文实际引用是后续 verifier 和用户展示的 canonical 引用集合。"""
+async def test_single_rag_rejects_cited_refs_that_do_not_match_answer_text() -> None:
+    """正文引用和结构化 cited_refs 不一致时，不能由任一侧静默覆盖另一侧。"""
     retriever = FakeRetriever(
         [RetrievalResult(evidences=(_evidence(), _second_evidence()), trace={"final": 2})]
     )
@@ -508,17 +576,15 @@ async def test_single_rag_canonicalizes_cited_refs_from_answer_text() -> None:
         supporting_refs=("E2",),
     )
 
-    outcome = await ResearchGraphRunner(
-        retriever=retriever,
-        model=model,
-        settings=ResearchSettings(),
-        graph_executor=DirectResearchGraphExecutor(),
-    ).run(_context("请按证据回答。"))
+    with pytest.raises(ResearchModelProtocolError, match="正文引用无效"):
+        await ResearchGraphRunner(
+            retriever=retriever,
+            model=model,
+            settings=ResearchSettings(),
+            graph_executor=DirectResearchGraphExecutor(),
+        ).run(_context("请按证据回答。"))
 
-    assert outcome.status is ResearchRunStatus.COMPLETED
-    assert outcome.answer == "第二段被引用[1]。"
-    assert outcome.cited_chunk_ids == (_SECOND_CHUNK_ID,)
-    assert model.verify_cited_refs == [("E2",)]
+    assert model.verify_cited_refs == []
 
 
 @pytest.mark.asyncio

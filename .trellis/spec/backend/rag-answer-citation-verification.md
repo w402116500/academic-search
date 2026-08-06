@@ -41,6 +41,21 @@ class AnswerDraft(BaseModel):
     clarification_question: str | None = None
 ```
 
+当 Writer 已返回合法的结构化 `cited_refs` 与 `claims`，但正文遗漏全部引用标记时，
+后端可调用以下纯函数作为一次保守恢复；它不是放宽正文引用契约：
+
+```python
+def recover_answer_prose_citations(
+    answer: str,
+    claims: Sequence[AnswerClaimDraft],
+    cited_refs: Sequence[EvidenceRef],
+) -> str | None: ...
+```
+
+返回非空字符串只表示已在原文中插入引用标记，调用方仍必须用
+`validate_answer_cited_refs()` 校验正文引用集合与 `cited_refs` 完全相等；返回
+`None` 时不得猜测归属，仍按原有协议错误处理。
+
 The current UUID-based `cited_chunk_ids` contract must be treated as legacy for
 this flow. New prompts and model schemas must use `cited_refs`.
 
@@ -170,6 +185,19 @@ The answer prose citations must describe the same ref set as structured
 `cited_refs`; a draft that says `【E2】` in prose but returns
 `cited_refs=["E1"]` is a protocol error.
 
+Writer 漏掉全部正文标记时，只有同时满足以下条件才允许恢复：
+
+- 正文没有任何模型侧 `【E1】` / `[E1]`、未知 E-ref 或用户侧 `[1]` / `【1】` 引用外观；
+- 每个非空中文终止句均被唯一的一条或多条 `claims.text` 精确覆盖（claim 可省略该句
+  的句末 `。！？`，但不能只覆盖其中一部分或跨句）；
+- 每条 claim 只对应一条正文句，所有 claim 的 `refs` 非空；同一句内的 claim 使用完全
+  相同的 refs 集合；
+- `set(cited_refs)` 恰好等于全部 claim refs 的并集。
+
+恢复只能按原句顺序合并相邻且 refs 集合相同的句组，在该句组末尾插入一组稳定顺序的
+`【E1】` / `【E2】` 标记。它不得改写正文字符、语序或措辞。任一条件不满足时，不能
+把结构化字段当作正文引用的替代品。
+
 The claim verifier must judge factual support only from the answer's actual
 cited refs. To preserve snapshot identity, the backend may render only the
 cited subset into the verifier prompt, but it must keep the original
@@ -222,6 +250,8 @@ display numbers.
 | Answer or verifier output contains a UUID where an `EvidenceRef` is required | Protocol error | Mark the attempt `failed_protocol`; treat as model/protocol leakage |
 | `evidence_sufficient=true` with empty `cited_refs` | Schema/contract error | Reject the draft before verifier execution |
 | Answer prose refs and structured `cited_refs` differ | Protocol error | Reject before verifier execution; do not let verifier judge a different evidence set from the one the answer shows |
+| Writer prose has no citation token, but every sentence has a unique complete same-ref claim mapping | Deterministic recovery | Insert only the missing end-of-run tokens, then require strict prose/structure equality before verifier execution |
+| Writer prose has no citation token, but a claim is partial, duplicated, cross-sentence, has empty refs, conflicts in one sentence, or claim-ref union differs from `cited_refs` | Protocol error | Do not recover; retain the normal diagnosable failure path |
 | Draft claim refs are not a subset of `cited_refs` and snapshot refs | Protocol error | Reject the draft; persist diagnostics |
 | Verifier item has `supported=true` with empty `supporting_refs` | Schema/contract error | Reject verifier output |
 | Verifier item has `supported=false` with non-empty `supporting_refs` | Schema/contract error | Reject verifier output |
@@ -236,6 +266,9 @@ display numbers.
 - Good: retrieval returns `E1`, `E2`, `E3`; the answer first cites `E3` then
   `E1`; all cited refs map back through the snapshot; the API returns display
   references `[1] = E3 -> chunk_uuid_c` and `[2] = E1 -> chunk_uuid_a`.
+- Good: Writer emits `第一项结论成立。第二项结论也成立。` with two unique complete
+  `E1` claims and `cited_refs=["E1"]`; recovery only appends `【E1】` after the
+  second sentence, then strict validation succeeds.
 - Base: all draft claims are supported by their cited refs; skip the final
   composer and render citations directly.
 - Base: one cost-reduction claim is unsupported; the composer rewrites the
@@ -244,6 +277,9 @@ display numbers.
 - Bad: asking the verifier to output `supporting_chunk_ids` UUIDs and rejecting
   the run because it produced a syntactically valid UUID that was not in the
   current evidence set.
+- Bad: a Writer answer already contains `[1]`, `【E9】`, or a partial claim such
+  as `结论` for `结论带有必要限定。`; automatically adding `【E1】` would mix
+  protocols or overstate the evidence boundary.
 - Bad: deleting unsupported sentences with string replacement and publishing
   the remaining prose without re-composition.
 - Bad: showing user citations as `[3] [7]` because the final answer cited `E3`
@@ -265,6 +301,12 @@ display numbers.
 - Prompt/protocol tests must cover verifier cited-subset rendering without
   EvidenceRef renumbering, answer-prose/`cited_refs` mismatch rejection, and
   verifier rejection when `supporting_refs` uses an uncited snapshot ref.
+- Recovery tests must prove that inserted tokens are the only textual change,
+  equal-ref sentence runs are grouped, multi-ref groups retain structured order,
+  and existing/unknown/user-facing citation syntax, partial or duplicate claims,
+  cross-sentence claims, empty refs, and union mismatch are all rejected.
+- Adapter tests must prove `generate_answer()` performs structured-ref validation
+  before recovery and invokes strict canonical validation after recovery.
 - API tests must assert that final references include `display_index`,
   `evidence_ref`, and `chunk_id`, and that display indexes follow first-use
   order without gaps.
@@ -342,6 +384,26 @@ Verifier output: supporting_refs=["E2"]
 ```
 
 EvidenceRef belongs to the answer attempt's snapshot, not to each prompt call.
+
+#### Wrong
+
+```python
+if not evidence_refs_in_text(answer, evidences):
+    return tuple(cited_refs)
+```
+
+这会让只存在于结构化字段中的引用绕过最终正文渲染和证据边界校验。
+
+#### Correct
+
+```python
+recovered = recover_answer_prose_citations(answer, claims, cited_refs)
+if recovered is not None:
+    answer = recovered
+return validate_answer_cited_refs(answer, evidences, cited_refs)
+```
+
+恢复只处理可证明的漏标；无法证明时应当失败，而不是让 `cited_refs` 取代正文引用。
 
 ## Scenario: Conditional Presentation Editing After Successful Verification
 

@@ -72,12 +72,31 @@ class ResearchGraphRunner:
         )
         await self._emit(ResearchRunStage.PREPARING, "正在判断问题需要的证据研究方式。", 0)
         try:
-            decision = await self._call_model(lambda: self._model.route_question(context.question))
-            routing = {
+            route_attempts = 1
+            try:
+                decision = await self._call_model(
+                    lambda: self._model.route_question(context.question)
+                )
+            except ResearchModelProtocolError:
+                # 路由尚未接触证据快照；给瞬时结构化偏差一次受预算约束的重试机会。
+                route_attempts += 1
+                await self._emit(
+                    ResearchRunStage.PREPARING, "正在重新校验问题需要的证据研究方式。", 0
+                )
+                try:
+                    decision = await self._call_model(
+                        lambda: self._model.route_question(context.question)
+                    )
+                except ResearchModelProtocolError as retry_error:
+                    retry_error.diagnostics["route_attempts"] = route_attempts
+                    raise
+            routing: dict[str, object] = {
                 "classifier": "structured_question_router",
                 "mode": decision.mode,
                 "reason": decision.reason,
             }
+            if route_attempts > 1:
+                routing["route_attempts"] = route_attempts
             if decision.mode == ResearchRunMode.MULTI_AGENT.value:
                 return await self._run_complex(context, routing)
             return await self._run_single(context, routing)

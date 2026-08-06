@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import pytest
+from app.modules.agents.contracts import AnswerClaimDraft
 from app.modules.agents.evidence_refs import (
     CitationFragmentationAssessment,
     assess_citation_fragmentation,
+    recover_answer_prose_citations,
 )
 
 
@@ -72,3 +74,102 @@ def test_citation_fragmentation_gate_does_not_split_decimal_text() -> None:
     assert assessment.citation_bearing_sentence_count == 1
     assert assessment.max_same_ref_sentence_run == 1
     assert assessment.repeated_ref is None
+
+
+def test_recover_answer_prose_citations_preserves_text_and_groups_same_ref_sentences() -> None:
+    """完整的单来源主张映射只在连续同源句组末尾补一个标记。"""
+    answer = "第一项结论成立。 \n第二项结论也成立！\n第三项结论来自另一片段？"
+    claims = [
+        AnswerClaimDraft(claim_id="C1", text="第一项结论成立", refs=["E1"]),
+        AnswerClaimDraft(claim_id="C2", text="第二项结论也成立", refs=["E1"]),
+        AnswerClaimDraft(claim_id="C3", text="第三项结论来自另一片段", refs=["E2"]),
+    ]
+
+    recovered = recover_answer_prose_citations(answer, claims, ["E1", "E2"])
+
+    assert (
+        recovered == "第一项结论成立。 \n第二项结论也成立！【E1】\n第三项结论来自另一片段？【E2】"
+    )
+
+
+def test_recover_answer_prose_citations_groups_multiple_refs_in_structured_order() -> None:
+    """同一多来源集合的连续句组在末尾获得一组稳定顺序的引用。"""
+    answer = "第一项结论成立。第二项结论也成立。"
+    claims = [
+        AnswerClaimDraft(claim_id="C1", text="第一项结论成立", refs=["E2", "E1"]),
+        AnswerClaimDraft(claim_id="C2", text="第二项结论也成立", refs=["E1", "E2"]),
+    ]
+
+    recovered = recover_answer_prose_citations(answer, claims, ["E1", "E2"])
+
+    assert recovered == "第一项结论成立。第二项结论也成立。【E1】【E2】"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "结论已经带有正文引用【E1】。",
+        "结论已经带有未知引用【E9】。",
+        "结论已经带有用户编号[1]。",
+        "结论已经带有全角用户编号【1】。",
+        "结论已经带有多个用户编号[1, 2]。",
+    ],
+)
+def test_recover_answer_prose_citations_refuses_any_existing_citation_syntax(answer: str) -> None:
+    """已有有效、未知或用户侧标记时，必须继续走严格校验而非自动补标。"""
+    claims = [AnswerClaimDraft(claim_id="C1", text="结论已经带有正文引用", refs=["E1"])]
+
+    assert recover_answer_prose_citations(answer, claims, ["E1"]) is None
+
+
+@pytest.mark.parametrize(
+    ("answer", "claims", "cited_refs"),
+    [
+        (
+            "结论带有必要限定。",
+            [AnswerClaimDraft(claim_id="C1", text="结论", refs=["E1"])],
+            ["E1"],
+        ),
+        (
+            "重复结论。重复结论。",
+            [AnswerClaimDraft(claim_id="C1", text="重复结论", refs=["E1"])],
+            ["E1"],
+        ),
+        (
+            "同一结论。",
+            [
+                AnswerClaimDraft(claim_id="C1", text="同一结论", refs=["E1"]),
+                AnswerClaimDraft(claim_id="C2", text="同一结论", refs=["E2"]),
+            ],
+            ["E1", "E2"],
+        ),
+        (
+            "结论成立。",
+            [AnswerClaimDraft(claim_id="C1", text="结论成立", refs=["E1"])],
+            ["E1", "E2"],
+        ),
+        (
+            "第一项结论成立。第二项结论也成立。",
+            [
+                AnswerClaimDraft(
+                    claim_id="C1",
+                    text="第一项结论成立。第二项结论也成立",
+                    refs=["E1"],
+                )
+            ],
+            ["E1"],
+        ),
+        (
+            "结论成立。",
+            [AnswerClaimDraft(claim_id="C1", text="结论成立", refs=[])],
+            ["E1"],
+        ),
+    ],
+)
+def test_recover_answer_prose_citations_refuses_ambiguous_or_lossy_mappings(
+    answer: str,
+    claims: list[AnswerClaimDraft],
+    cited_refs: list[str],
+) -> None:
+    """部分、重复、冲突、跨句、空引用或集合不一致的映射均不得恢复。"""
+    assert recover_answer_prose_citations(answer, claims, cited_refs) is None

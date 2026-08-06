@@ -29,6 +29,7 @@ from app.modules.agents.evidence_refs import (
     canonical_answer_cited_refs,
     evidence_refs_for,
     invalid_evidence_refs,
+    recover_answer_prose_citations,
 )
 from app.modules.agents.prompts import (
     REWRITE_QUERY_SYSTEM,
@@ -83,9 +84,21 @@ class OpenAICompatibleResearchModel:
         )
         allowed_refs = set(evidence_refs_for(evidences))
         self._validate_refs(result.cited_refs, allowed_refs, "回答模型")
+        cited_ref_set = set(result.cited_refs)
         for claim in result.claims:
             self._validate_refs(claim.refs, allowed_refs, "回答模型主张")
+            if not set(claim.refs).issubset(cited_ref_set):
+                raise ResearchModelProtocolError("回答模型主张引用不属于 cited_refs。")
         if result.evidence_sufficient:
+            # 仅在正文完全没有任何引用外观时，才允许依据逐句完整匹配的 claims 补标。
+            # 已存在的 E 编号或用户编号必须保留给严格校验拒绝，不能与恢复结果混用。
+            recovered_answer = recover_answer_prose_citations(
+                result.answer,
+                result.claims,
+                result.cited_refs,
+            )
+            if recovered_answer is not None:
+                result = result.model_copy(update={"answer": recovered_answer})
             cited_refs = self._canonical_answer_refs(
                 result.answer, evidences, result.cited_refs, "回答模型"
             )

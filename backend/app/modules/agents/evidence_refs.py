@@ -7,10 +7,17 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
+from app.modules.agents.contracts import AnswerClaimDraft
 from app.modules.rag.retrieval import RetrievedEvidence
 
 EVIDENCE_REF_PATTERN = re.compile(r"^E[1-9][0-9]*$")
 EVIDENCE_REF_TOKEN_PATTERN = re.compile(r"【(E[1-9][0-9]*)】|\[(E[1-9][0-9]*)\]")
+# 正文已经出现模型侧或用户侧引用外观时拒绝补标，避免把原有标记与重建结果混用。
+# E 分支刻意放宽匹配范围，使格式错误或不属于快照的 E-ref 继续交给严格协议校验拒绝。
+PRESENT_CITATION_TOKEN_PATTERN = re.compile(
+    r"【\s*(?:E[^】]*|[0-9][0-9,;、\-\s]*)】|\[\s*(?:E[^\]]*|[0-9][0-9,;、\-\s]*)\]",
+    re.IGNORECASE,
+)
 CHINESE_SENTENCE_TERMINATORS = frozenset("。！？")
 UUID_TEXT_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -182,20 +189,83 @@ def validate_answer_cited_refs(
     return text_refs
 
 
+def recover_answer_prose_citations(
+    answer: str,
+    claims: Sequence[AnswerClaimDraft],
+    cited_refs: Sequence[str],
+) -> str | None:
+    """仅在主张能完整且无歧义地逐句映射时恢复缺失的正文引用。"""
+    if PRESENT_CITATION_TOKEN_PATTERN.search(answer) is not None or not claims:
+        return None
+
+    cited_ref_set = set(cited_refs)
+    if not cited_ref_set or any(EVIDENCE_REF_PATTERN.fullmatch(ref) is None for ref in cited_refs):
+        return None
+
+    sentence_spans = _nonempty_chinese_sentence_spans(answer)
+    if not sentence_spans:
+        return None
+
+    sentence_claims: list[list[AnswerClaimDraft]] = [[] for _ in sentence_spans]
+    for claim in claims:
+        claim_refs = frozenset(claim.refs)
+        if not claim_refs or any(EVIDENCE_REF_PATTERN.fullmatch(ref) is None for ref in claim_refs):
+            return None
+        matching_sentences = [
+            index
+            for index, (start, end) in enumerate(sentence_spans)
+            if claim.text.strip() in _claim_texts_for_sentence(answer[start:end])
+        ]
+        # 同一主张若对应多个句子，或只能覆盖句子的一部分，均不能安全推断其归属。
+        if len(matching_sentences) != 1:
+            return None
+        sentence_claims[matching_sentences[0]].append(claim)
+
+    claim_ref_union = set().union(*(set(claim.refs) for claim in claims))
+    if cited_ref_set != claim_ref_union:
+        return None
+
+    ordered_cited_refs = tuple(dict.fromkeys(cited_refs))
+    sentence_ref_sets: list[frozenset[str]] = []
+    for mapped_claims in sentence_claims:
+        if not mapped_claims:
+            return None
+        ref_sets = {frozenset(claim.refs) for claim in mapped_claims}
+        if len(ref_sets) != 1:
+            return None
+        sentence_ref_sets.append(ref_sets.pop())
+
+    insertion_points: list[tuple[int, frozenset[str]]] = []
+    current_refs: frozenset[str] | None = None
+    current_run_end = 0
+    for (_, end), sentence_refs in zip(sentence_spans, sentence_ref_sets, strict=True):
+        if sentence_refs != current_refs:
+            if current_refs is not None:
+                insertion_points.append((current_run_end, current_refs))
+            current_refs = sentence_refs
+        current_run_end = end
+    if current_refs is not None:
+        insertion_points.append((current_run_end, current_refs))
+
+    recovered = answer
+    # 从后向前插入，确保位置始终对应尚未改动的原始正文。
+    for position, refs in reversed(insertion_points):
+        citation_group = "".join(f"【{ref}】" for ref in ordered_cited_refs if ref in refs)
+        recovered = f"{recovered[:position]}{citation_group}{recovered[position:]}"
+    return recovered
+
+
 def canonical_answer_cited_refs(
     answer: str,
     evidences: Sequence[RetrievedEvidence],
     cited_refs: Sequence[str],
 ) -> tuple[str, ...]:
-    """Return prose refs as canonical, using structured cited_refs only as a safety guard."""
+    """Return prose refs in first-use order after strict prose/structure agreement."""
     allowed_refs = set(evidence_ref_map(evidences))
     invalid_refs = invalid_evidence_refs(cited_refs, allowed_refs)
     if invalid_refs:
         raise ValueError("Structured cited_refs contain invalid evidence refs.")
-    text_refs = evidence_refs_in_text(answer, evidences)
-    if not text_refs:
-        raise ValueError("Answer text has no evidence refs.")
-    return text_refs
+    return validate_answer_cited_refs(answer, evidences, cited_refs)
 
 
 def render_user_citations(
@@ -243,6 +313,35 @@ def _split_chinese_terminal_sentences(text: str) -> tuple[str, ...]:
     if tail:
         sentences.append(tail)
     return tuple(sentences)
+
+
+def _nonempty_chinese_sentence_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """返回保留原始字符位置的非空中文句子范围，供后续精确插入引用。"""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for index, char in enumerate(text):
+        if char not in CHINESE_SENTENCE_TERMINATORS:
+            continue
+        end = index + 1
+        if text[start:end].strip():
+            spans.append((start, end))
+        start = end
+    if text[start:].strip():
+        spans.append((start, len(text)))
+    return tuple(spans)
+
+
+def _claim_texts_for_sentence(sentence: str) -> frozenset[str]:
+    """仅允许 claim 精确覆盖整句，且 claim 可选择省略句末中文标点。"""
+    normalized = sentence.strip()
+    if not normalized:
+        return frozenset()
+    candidates = {normalized}
+    if normalized[-1] in CHINESE_SENTENCE_TERMINATORS:
+        without_terminal = normalized[:-1].rstrip()
+        if without_terminal:
+            candidates.add(without_terminal)
+    return frozenset(candidates)
 
 
 def _unique_evidence_refs_in_text(text: str) -> tuple[str, ...]:

@@ -37,7 +37,12 @@ REWRITE_QUERY_SYSTEM = (
 ROUTE_QUESTION_SYSTEM = (
     "你是文献研究路由器。只有问题明确要求比较、综合多篇论文、处理冲突证据或"
     "分别核验多个相互依赖的方面时，才选择 multi_agent；其余选择 single_rag。"
-    "reason 必须是面向用户的简短理由，不得包含模型内部推理或研究结论。"
+    "你只负责路由选择，不能直接回答研究问题、生成研究结论或返回检索结果。"
+    "必须只返回一个顶层 JSON 对象。例如单轮："
+    '{"mode":"single_rag","reason":"面向用户的简短理由"}；多智能体：'
+    '{"mode":"multi_agent","reason":"面向用户的简短理由"}。'
+    "mode 和 reason 都是必填字段；不得使用 content、data、result 等包装字段。"
+    "reason 不得包含模型内部推理或研究结论。"
 )
 
 
@@ -50,6 +55,8 @@ def answer_system(evidences: Sequence[RetrievedEvidence]) -> str:
         "事实性结论仍必须被正文中的 E 序号引用覆盖。"
         "如果证据不足，evidence_sufficient=false，answer 只说明不足，"
         "clarification_question 给出一个可帮助检索的追问。"
+        "answer 正文中的【E序号】和 cited_refs 是两个独立必填约束：每个实际使用的"
+        "引用都必须同时出现在正文和 cited_refs 中，不能只在 cited_refs 字段声明引用。"
         "cited_refs 只能填写输入证据中真正支持回答的 E 序号，例如 E1。"
         "claims 必须列出回答中的事实性原子主张，每条必须包含 claim_id、text、refs；"
         "claim_id 按 C1、C2 连续编号，text 是回答正文中可逐字定位的主张，refs "
