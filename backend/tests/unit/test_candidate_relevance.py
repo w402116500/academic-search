@@ -13,9 +13,11 @@ from app.modules.search.relevance import (
     CandidateRelevanceClaimVerificationFailure,
     CandidateRelevanceClaimVerificationResult,
     CandidateRelevanceContext,
+    CandidateRelevanceEvaluationOutcome,
     CandidateRelevanceEvaluator,
     CandidateRelevanceStreamIdleTimeout,
     CandidateRelevanceTechnicalFailure,
+    StructuredCandidateRelevanceClaimVerifier,
     collect_streamed_json_object,
 )
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -131,6 +133,21 @@ def _context() -> CandidateRelevanceContext:
     )
 
 
+def _valid_assessment_payload(candidate: UnifiedCandidate) -> dict[str, object]:
+    """构造可通过标题/摘要证据校验的单条模型结果。"""
+    assert candidate.abstract is not None
+    return {
+        "candidate_id": str(candidate.candidate_id),
+        "level": "core",
+        "study_focus": "考察睡眠质量与学业表现之间的关系。",
+        "reason": "研究对象和核心关系与当前方向一致。",
+        "helpful_aspect": "可用于分析睡眠与学业表现的关联。",
+        "limitations": [],
+        "recommendation": "建议优先查看全文。",
+        "evidence": [{"source_field": "abstract", "quote": candidate.abstract}],
+    }
+
+
 def test_payload_preserves_each_candidate_complete_abstract() -> None:
     """完整候选集合判断不能截断单篇摘要。"""
     candidate = _candidate("0123456789abcdef")
@@ -223,8 +240,22 @@ async def test_invalid_stream_json_becomes_a_safe_complete_collection_failure() 
 
 
 @pytest.mark.asyncio
+async def test_invalid_outer_envelope_remains_a_complete_collection_failure() -> None:
+    """只有单项可隔离；缺少数组外层时仍必须整体重试。"""
+    candidate = _candidate()
+    with pytest.raises(CandidateRelevanceTechnicalFailure) as raised:
+        await CandidateRelevanceEvaluator(
+            WorkflowSettings(deepseek_api_key=SecretStr("test")),
+            model=FakeModel({"assessments": "not-an-array"}),
+            claim_verifier=AcceptingClaimVerifier(),
+        ).assess(context=_context(), candidates=(candidate,))
+
+    assert raised.value.code == "candidate_relevance_output_invalid"
+
+
+@pytest.mark.asyncio
 async def test_model_evidence_must_be_found_in_unified_candidate() -> None:
-    """模型引用不存在的原文时，候选必须明确失败而不是展示伪理由。"""
+    """模型引用不存在的原文时，只重试该候选而不展示伪理由。"""
     candidate = _candidate()
     evaluator = CandidateRelevanceEvaluator(
         WorkflowSettings(deepseek_api_key=SecretStr("test")),
@@ -247,15 +278,17 @@ async def test_model_evidence_must_be_found_in_unified_candidate() -> None:
         claim_verifier=AcceptingClaimVerifier(),
     )
 
-    with pytest.raises(CandidateRelevanceTechnicalFailure) as raised:
-        await evaluator.assess(context=_context(), candidates=(candidate,))
+    outcome = await evaluator.assess(context=_context(), candidates=(candidate,))
 
-    assert raised.value.code == "candidate_relevance_output_invalid"
+    assert outcome.resolved_candidates == ()
+    assert outcome.retryable_failures[candidate.candidate_id].code == (
+        "candidate_relevance_output_invalid"
+    )
 
 
 @pytest.mark.asyncio
-async def test_invalid_item_retries_the_complete_collection() -> None:
-    """任一候选结构无效时，不能把不完整集合当作已完成结果。"""
+async def test_invalid_item_keeps_valid_peer_and_retries_only_invalid_candidate() -> None:
+    """无效证据只能阻止自己的候选，不应抹掉同批已核验结果。"""
     first = _candidate()
     second = _candidate("The study examines sleep quality and student wellbeing.")
     evaluator = CandidateRelevanceEvaluator(
@@ -294,10 +327,136 @@ async def test_invalid_item_retries_the_complete_collection() -> None:
         claim_verifier=AcceptingClaimVerifier(),
     )
 
-    with pytest.raises(CandidateRelevanceTechnicalFailure) as raised:
-        await evaluator.assess(context=_context(), candidates=(first, second))
+    outcome = await evaluator.assess(context=_context(), candidates=(first, second))
 
-    assert raised.value.code == "candidate_relevance_output_invalid"
+    assert [candidate.candidate_id for candidate in outcome.resolved_candidates] == [
+        first.candidate_id
+    ]
+    assert outcome.resolved_candidates[0].relevance_state == "completed"
+    assert outcome.retryable_failures[second.candidate_id].code == (
+        "candidate_relevance_output_invalid"
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_missing_and_duplicate_items_are_isolated_per_candidate() -> None:
+    """可解析的外层数组必须隔离坏项目，让其他候选继续完成。"""
+    valid = _candidate()
+    missing = _candidate("The study examines missing candidate output.")
+    duplicated = _candidate("The study examines duplicate candidate output.")
+    malformed = _candidate("The study examines malformed candidate output.")
+    evaluator = CandidateRelevanceEvaluator(
+        WorkflowSettings(deepseek_api_key=SecretStr("test")),
+        model=FakeModel(
+            {
+                "assessments": [
+                    _valid_assessment_payload(valid),
+                    _valid_assessment_payload(duplicated),
+                    _valid_assessment_payload(duplicated),
+                    {"candidate_id": str(malformed.candidate_id), "level": "core"},
+                ]
+            }
+        ),
+        claim_verifier=AcceptingClaimVerifier(),
+    )
+
+    outcome = await evaluator.assess(
+        context=_context(),
+        candidates=(valid, missing, duplicated, malformed),
+    )
+
+    assert isinstance(outcome, CandidateRelevanceEvaluationOutcome)
+    assert [candidate.candidate_id for candidate in outcome.resolved_candidates] == [
+        valid.candidate_id
+    ]
+    assert set(outcome.retryable_failures) == {
+        missing.candidate_id,
+        duplicated.candidate_id,
+        malformed.candidate_id,
+    }
+    assert {failure.code for failure in outcome.retryable_failures.values()} == {
+        "candidate_relevance_output_invalid"
+    }
+
+
+@pytest.mark.asyncio
+async def test_empty_assessment_array_marks_all_candidates_retryable() -> None:
+    """可解析的空数组表示每条有摘要候选都尚未形成评估。"""
+    first = _candidate()
+    second = _candidate("The study examines empty candidate output.")
+    outcome = await CandidateRelevanceEvaluator(
+        WorkflowSettings(deepseek_api_key=SecretStr("test")),
+        model=FakeModel({"assessments": []}),
+        claim_verifier=AcceptingClaimVerifier(),
+    ).assess(context=_context(), candidates=(first, second))
+
+    assert outcome.resolved_candidates == ()
+    assert set(outcome.retryable_failures) == {first.candidate_id, second.candidate_id}
+
+
+@pytest.mark.asyncio
+async def test_technical_claim_verification_failure_keeps_verified_peer() -> None:
+    """同批核验的临时失败不能影响已验证或终态拒绝的候选。"""
+    verified = _candidate()
+    unavailable = _candidate("The study examines sleep quality and student wellbeing.")
+    unsupported = _candidate("The study examines sleep quality and student stress.")
+    settings = WorkflowSettings(deepseek_api_key=SecretStr("test"))
+    evaluator = CandidateRelevanceEvaluator(
+        settings,
+        model=FakeModel(
+            {
+                "assessments": [
+                    _valid_assessment_payload(verified),
+                    _valid_assessment_payload(unavailable),
+                    _valid_assessment_payload(unsupported),
+                ]
+            }
+        ),
+        claim_verifier=StructuredCandidateRelevanceClaimVerifier(
+            settings,
+            model=FakeModel(
+                {
+                    "verifications": [
+                        {
+                            "candidate_id": str(verified.candidate_id),
+                            "supported": True,
+                            "unsupported_fields": [],
+                        },
+                        {
+                            "candidate_id": str(unavailable.candidate_id),
+                            "supported": False,
+                            "unsupported_fields": [],
+                        },
+                        {
+                            "candidate_id": str(unsupported.candidate_id),
+                            "supported": False,
+                            "unsupported_fields": ["reason"],
+                        },
+                    ]
+                }
+            ),
+        ),
+    )
+
+    outcome = await evaluator.assess(
+        context=_context(),
+        candidates=(verified, unavailable, unsupported),
+    )
+
+    assert [candidate.candidate_id for candidate in outcome.resolved_candidates] == [
+        verified.candidate_id,
+        unsupported.candidate_id,
+    ]
+    assert outcome.resolved_candidates[0].relevance_state == "completed"
+    assert outcome.resolved_candidates[1].relevance_state == "excluded"
+    assert outcome.resolved_candidates[1].relevance_error is not None
+    assert (
+        outcome.resolved_candidates[1].relevance_error.code
+        == "candidate_relevance_claim_unsupported"
+    )
+    assert outcome.retryable_failures[unavailable.candidate_id].code == (
+        "candidate_relevance_claim_verification_invalid"
+    )
 
 
 @pytest.mark.asyncio
@@ -310,12 +469,15 @@ async def test_candidate_without_abstract_is_explicitly_insufficient() -> None:
         claim_verifier=AcceptingClaimVerifier(),
     )
 
-    result = await evaluator.assess(context=_context(), candidates=(candidate,))
+    outcome = await evaluator.assess(context=_context(), candidates=(candidate,))
 
-    assert result[0].relevance_state == "excluded"
-    assert result[0].relevance_assessment is not None
-    assert result[0].relevance_assessment.level == "insufficient_information"
-    assert result[0].relevance_assessment.study_focus.startswith("目前只能从题目确认")
+    assert outcome.retryable_failures == {}
+    assert outcome.resolved_candidates[0].relevance_state == "excluded"
+    assert outcome.resolved_candidates[0].relevance_assessment is not None
+    assert outcome.resolved_candidates[0].relevance_assessment.level == "insufficient_information"
+    assert outcome.resolved_candidates[0].relevance_assessment.study_focus.startswith(
+        "目前只能从题目确认"
+    )
 
 
 @pytest.mark.asyncio
@@ -350,7 +512,7 @@ async def test_model_sees_complete_collection_and_keeps_missing_abstract_determi
         claim_verifier=AcceptingClaimVerifier(),
     )
 
-    result = await evaluator.assess(
+    outcome = await evaluator.assess(
         context=_context(),
         candidates=(assessed, missing_abstract),
     )
@@ -362,9 +524,10 @@ async def test_model_sees_complete_collection_and_keeps_missing_abstract_determi
         str(assessed.candidate_id),
         str(missing_abstract.candidate_id),
     ]
-    assert result[0].relevance_state == "completed"
-    assert result[1].relevance_assessment is not None
-    assert result[1].relevance_assessment.level == "insufficient_information"
+    assert outcome.retryable_failures == {}
+    assert outcome.resolved_candidates[0].relevance_state == "completed"
+    assert outcome.resolved_candidates[1].relevance_assessment is not None
+    assert outcome.resolved_candidates[1].relevance_assessment.level == "insufficient_information"
 
 
 @pytest.mark.asyncio
@@ -397,10 +560,14 @@ async def test_unverified_candidate_claims_are_rejected_instead_of_being_display
         claim_verifier=RejectingClaimVerifier(),
     )
 
-    result = await evaluator.assess(context=_context(), candidates=(candidate,))
+    outcome = await evaluator.assess(context=_context(), candidates=(candidate,))
 
-    assert result[0].relevance_state == "excluded"
-    assert result[0].relevance_assessment is None
-    assert result[0].relevance_error is not None
-    assert result[0].relevance_error.code == "candidate_relevance_claim_unsupported"
-    assert result[0].relevance_error.retryable is False
+    assert outcome.retryable_failures == {}
+    assert outcome.resolved_candidates[0].relevance_state == "excluded"
+    assert outcome.resolved_candidates[0].relevance_assessment is None
+    assert outcome.resolved_candidates[0].relevance_error is not None
+    assert (
+        outcome.resolved_candidates[0].relevance_error.code
+        == "candidate_relevance_claim_unsupported"
+    )
+    assert outcome.resolved_candidates[0].relevance_error.retryable is False

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 from uuid import UUID
@@ -51,11 +51,36 @@ class CandidateRelevanceStreamPayloadInvalid(ValueError):
 
 
 class CandidateRelevanceTechnicalFailure(RuntimeError):
-    """整批流、JSON 或独立核验不可用，必须由 Worker 重跑完整候选集合。"""
+    """整批模型调用或外层 JSON 无法完成，必须由 Worker 重跑当前待处理候选。"""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateRelevanceCandidateFailure:
+    """一条候选可由 Worker 单独重试的相关性评估失败。"""
+
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateRelevanceEvaluationOutcome:
+    """区分已落定候选与仍需重试的逐候选相关性评估结果。"""
+
+    resolved_candidates: tuple[UnifiedCandidate, ...]
+    retryable_failures: Mapping[UUID, CandidateRelevanceCandidateFailure]
+
+    def __iter__(self) -> Iterator[UnifiedCandidate]:
+        """兼容现有按候选序列读取评估结果的调用方。"""
+        return iter(self.resolved_candidates)
+
+    def __len__(self) -> int:
+        return len(self.resolved_candidates)
+
+    def __getitem__(self, index: int | slice) -> UnifiedCandidate | tuple[UnifiedCandidate, ...]:
+        return self.resolved_candidates[index]
 
 
 def _stream_chunk_text(chunk: object) -> str:
@@ -269,10 +294,27 @@ class CandidateRelevanceItem(BaseModel):
         )
 
 
-class CandidateRelevanceBatch(BaseModel):
-    """单次批量模型调用的完整、可校验结果。"""
+def _candidate_id_from_raw_item(value: object) -> UUID | None:
+    """从已解析外层数组的原始项目提取可归属的候选 ID。"""
+    candidate_id = (
+        value.get("candidate_id")
+        if isinstance(value, Mapping)
+        else getattr(value, "candidate_id", None)
+    )
+    if isinstance(candidate_id, UUID):
+        return candidate_id
+    if not isinstance(candidate_id, str):
+        return None
+    try:
+        return UUID(candidate_id)
+    except ValueError:
+        return None
 
-    assessments: tuple[CandidateRelevanceItem, ...] = Field(min_length=1)
+
+class CandidateRelevanceBatch(BaseModel):
+    """单次批量模型调用的外层结果，单项校验由评估器逐条处理。"""
+
+    assessments: tuple[object, ...]
 
 
 _CLAIM_FIELD = Literal[
@@ -307,9 +349,9 @@ class CandidateRelevanceClaimVerificationItem(BaseModel):
 
 
 class CandidateRelevanceClaimVerificationBatch(BaseModel):
-    """独立模型对完整、已通过引文存在性检查的候选集合的输出。"""
+    """独立模型的外层结果，单项核验由验证器逐条处理。"""
 
-    verifications: tuple[CandidateRelevanceClaimVerificationItem, ...] = Field(min_length=1)
+    verifications: tuple[object, ...]
 
 
 _SYSTEM_PROMPT = """你是学术文献候选相关性评估器。
@@ -451,21 +493,40 @@ class StructuredCandidateRelevanceClaimVerifier:
 
         expected_ids = {candidate.candidate_id for candidate in candidates}
         grouped: dict[UUID, list[CandidateRelevanceClaimVerificationItem]] = {}
-        for item in result.verifications:
-            if item.candidate_id in expected_ids:
-                grouped.setdefault(item.candidate_id, []).append(item)
+        item_counts: dict[UUID, int] = {}
+        malformed_candidate_ids: set[UUID] = set()
+        for raw_item in result.verifications:
+            candidate_id = _candidate_id_from_raw_item(raw_item)
+            if candidate_id is None or candidate_id not in expected_ids:
+                continue
+            item_counts[candidate_id] = item_counts.get(candidate_id, 0) + 1
+            try:
+                item = CandidateRelevanceClaimVerificationItem.model_validate(raw_item)
+            except ValidationError:
+                malformed_candidate_ids.add(candidate_id)
+                continue
+            grouped.setdefault(item.candidate_id, []).append(item)
 
         verified: set[UUID] = set()
         failures: dict[UUID, CandidateRelevanceClaimVerificationFailure] = {}
         for candidate in candidates:
-            items = grouped.get(candidate.candidate_id, [])
-            if not items:
+            candidate_id = candidate.candidate_id
+            item_count = item_counts.get(candidate_id, 0)
+            if item_count == 0:
                 failures[candidate.candidate_id] = CandidateRelevanceClaimVerificationFailure(
                     code="candidate_relevance_claim_verification_invalid",
                     message="独立核验没有返回这条候选理由，不能展示未经核验的结论。",
                     retryable=True,
                 )
                 continue
+            if item_count != 1 or candidate_id in malformed_candidate_ids:
+                failures[candidate_id] = CandidateRelevanceClaimVerificationFailure(
+                    code="candidate_relevance_claim_verification_invalid",
+                    message="独立核验返回了无法验证的候选理由，不能展示理由。",
+                    retryable=True,
+                )
+                continue
+            items = grouped.get(candidate_id, [])
             if len(items) != 1:
                 failures[candidate.candidate_id] = CandidateRelevanceClaimVerificationFailure(
                     code="candidate_relevance_claim_verification_invalid",
@@ -550,17 +611,18 @@ class CandidateRelevanceEvaluator:
         *,
         context: CandidateRelevanceContext,
         candidates: Sequence[UnifiedCandidate],
-    ) -> tuple[UnifiedCandidate, ...]:
-        """批量评估已经规整的候选，并把验证后的结果附回原对象。"""
+    ) -> CandidateRelevanceEvaluationOutcome:
+        """批量评估候选，并保留已落定结果及可单独重试的失败。"""
         if not candidates:
-            return ()
+            return CandidateRelevanceEvaluationOutcome((), {})
 
         candidates_with_abstract = [candidate for candidate in candidates if candidate.abstract]
         without_abstract = [candidate for candidate in candidates if not candidate.abstract]
-        assessed_candidates: dict[UUID, UnifiedCandidate] = {
+        resolved_candidates: dict[UUID, UnifiedCandidate] = {
             candidate.candidate_id: self._insufficient_candidate(candidate)
             for candidate in without_abstract
         }
+        retryable_failures: dict[UUID, CandidateRelevanceCandidateFailure] = {}
         if candidates_with_abstract:
             try:
                 model = self._model or self._model_from_factory(len(candidates_with_abstract))
@@ -597,51 +659,46 @@ class CandidateRelevanceEvaluator:
                     "候选相关性模型暂时不可用。",
                 ) from exc
             else:
-                assessments, errors = self._validate_batch(candidates_with_abstract, result)
-                if errors:
-                    raise CandidateRelevanceTechnicalFailure(
-                        "candidate_relevance_output_invalid",
-                        "候选相关性模型没有为完整候选集合返回可验证的结果。",
-                    )
-                claim_verification = await self._claim_verifier.verify(
-                    context=context,
-                    candidates=candidates_with_abstract,
-                    assessments=assessments,
+                assessments, failures = self._validate_batch(candidates_with_abstract, result)
+                retryable_failures.update(failures)
+                candidates_for_verification = tuple(
+                    candidate
+                    for candidate in candidates_with_abstract
+                    if candidate.candidate_id in assessments
                 )
-                technical_verification_failure = next(
-                    (
-                        failure
-                        for failure in claim_verification.failures.values()
-                        if failure.code != "candidate_relevance_claim_unsupported"
-                    ),
-                    None,
-                )
-                if technical_verification_failure is not None:
-                    raise CandidateRelevanceTechnicalFailure(
-                        technical_verification_failure.code,
-                        "候选理由暂时无法完成独立证据核验。",
+                if candidates_for_verification:
+                    claim_verification = await self._claim_verifier.verify(
+                        context=context,
+                        candidates=candidates_for_verification,
+                        assessments=assessments,
                     )
-                for candidate in candidates_with_abstract:
-                    assessment = assessments.get(candidate.candidate_id)
-                    if assessment is None:
-                        raise CandidateRelevanceTechnicalFailure(
-                            "candidate_relevance_output_invalid",
-                            "候选相关性模型没有为完整候选集合返回可验证的结果。",
-                        )
+                else:
+                    claim_verification = CandidateRelevanceClaimVerificationResult(frozenset(), {})
+                for candidate in candidates_for_verification:
+                    assessment = assessments[candidate.candidate_id]
                     verification_failure = claim_verification.failures.get(candidate.candidate_id)
                     if verification_failure is not None:
-                        assessed_candidates[candidate.candidate_id] = exclude_candidate_relevance(
-                            candidate,
-                            verification_failure.message,
-                            code=verification_failure.code,
-                        )
+                        if verification_failure.code == "candidate_relevance_claim_unsupported":
+                            resolved_candidates[candidate.candidate_id] = (
+                                exclude_candidate_relevance(
+                                    candidate,
+                                    verification_failure.message,
+                                    code=verification_failure.code,
+                                )
+                            )
+                        else:
+                            retryable_failures[candidate.candidate_id] = (
+                                CandidateRelevanceCandidateFailure(code=verification_failure.code)
+                            )
                         continue
                     if candidate.candidate_id not in claim_verification.verified_candidate_ids:
-                        raise CandidateRelevanceTechnicalFailure(
-                            "candidate_relevance_claim_verification_invalid",
-                            "候选理由暂时无法完成独立证据核验。",
+                        retryable_failures[candidate.candidate_id] = (
+                            CandidateRelevanceCandidateFailure(
+                                code="candidate_relevance_claim_verification_invalid"
+                            )
                         )
-                    assessed_candidates[candidate.candidate_id] = candidate.model_copy(
+                        continue
+                    resolved_candidates[candidate.candidate_id] = candidate.model_copy(
                         update={
                             "relevance_state": (
                                 CandidateRelevanceState.COMPLETED
@@ -652,7 +709,14 @@ class CandidateRelevanceEvaluator:
                             "relevance_error": None,
                         }
                     )
-        return tuple(assessed_candidates[candidate.candidate_id] for candidate in candidates)
+        return CandidateRelevanceEvaluationOutcome(
+            resolved_candidates=tuple(
+                resolved_candidates[candidate.candidate_id]
+                for candidate in candidates
+                if candidate.candidate_id in resolved_candidates
+            ),
+            retryable_failures=retryable_failures,
+        )
 
     def _model_from_factory(self, candidate_count: int) -> StructuredRelevanceModel:
         """按完整候选集合规模取得评估模型，不在业务模块构造基础设施。"""
@@ -704,23 +768,46 @@ class CandidateRelevanceEvaluator:
     def _validate_batch(
         candidates: Sequence[UnifiedCandidate],
         result: CandidateRelevanceBatch,
-    ) -> tuple[dict[UUID, CandidateRelevanceAssessment], dict[UUID, str]]:
+    ) -> tuple[
+        dict[UUID, CandidateRelevanceAssessment],
+        dict[UUID, CandidateRelevanceCandidateFailure],
+    ]:
         """逐条核验模型输出，坏记录不能抹掉同批已通过验证的结果。"""
         expected = {candidate.candidate_id: candidate for candidate in candidates}
         grouped: dict[UUID, list[CandidateRelevanceItem]] = {}
-        for item in result.assessments:
-            if item.candidate_id in expected:
-                grouped.setdefault(item.candidate_id, []).append(item)
+        item_counts: dict[UUID, int] = {}
+        malformed_candidate_ids: set[UUID] = set()
+        for raw_item in result.assessments:
+            candidate_id = _candidate_id_from_raw_item(raw_item)
+            if candidate_id is None or candidate_id not in expected:
+                continue
+            item_counts[candidate_id] = item_counts.get(candidate_id, 0) + 1
+            try:
+                item = CandidateRelevanceItem.model_validate(raw_item)
+            except ValidationError:
+                malformed_candidate_ids.add(candidate_id)
+                continue
+            grouped.setdefault(item.candidate_id, []).append(item)
 
         valid: dict[UUID, CandidateRelevanceAssessment] = {}
-        errors: dict[UUID, str] = {}
+        errors: dict[UUID, CandidateRelevanceCandidateFailure] = {}
         for candidate_id, candidate in expected.items():
-            items = grouped.get(candidate_id, [])
-            if not items:
-                errors[candidate_id] = "模型没有返回这条候选的相关性评估结果。"
+            item_count = item_counts.get(candidate_id, 0)
+            if item_count == 0:
+                errors[candidate_id] = CandidateRelevanceCandidateFailure(
+                    code="candidate_relevance_output_invalid"
+                )
                 continue
+            if item_count != 1 or candidate_id in malformed_candidate_ids:
+                errors[candidate_id] = CandidateRelevanceCandidateFailure(
+                    code="candidate_relevance_output_invalid"
+                )
+                continue
+            items = grouped.get(candidate_id, [])
             if len(items) != 1:
-                errors[candidate_id] = "模型为同一候选返回了重复的相关性评估结果。"
+                errors[candidate_id] = CandidateRelevanceCandidateFailure(
+                    code="candidate_relevance_output_invalid"
+                )
                 continue
             assessment = items[0].to_assessment(candidate)
             evidence_error = CandidateRelevanceEvaluator._validate_evidence(
@@ -728,7 +815,9 @@ class CandidateRelevanceEvaluator:
                 assessment,
             )
             if evidence_error is not None:
-                errors[candidate_id] = evidence_error
+                errors[candidate_id] = CandidateRelevanceCandidateFailure(
+                    code="candidate_relevance_output_invalid"
+                )
                 continue
             valid[candidate_id] = assessment
         return valid, errors

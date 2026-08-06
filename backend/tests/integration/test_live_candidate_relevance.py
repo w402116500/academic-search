@@ -10,6 +10,7 @@ from app.core.workflow_settings import get_workflow_settings
 from app.infra.llm.candidate_relevance import build_candidate_relevance_evaluator
 from app.modules.search.contracts import (
     CandidateLanguage,
+    CandidateRelevanceState,
     RawCandidate,
     SourceName,
     TriageDecision,
@@ -96,23 +97,28 @@ async def test_live_candidate_relevance_assessment_never_exposes_unverified_clai
         candidates=candidates,
     )
 
-    assert len(result) == len(candidates)
-    assert {candidate.candidate_id for candidate in result} == {
+    resolved_candidates = result.resolved_candidates
+    retryable_failures = result.retryable_failures
+    resolved_candidate_ids = {candidate.candidate_id for candidate in resolved_candidates}
+    retryable_candidate_ids = set(retryable_failures)
+    assert resolved_candidate_ids.isdisjoint(retryable_candidate_ids)
+    assert resolved_candidate_ids | retryable_candidate_ids == {
         candidate.candidate_id for candidate in candidates
     }
-    completed_count = 0
+    verified_count = 0
     rejected_count = 0
-    for candidate in result:
-        if candidate.relevance_state == "failed":
+    for candidate in resolved_candidates:
+        if candidate.relevance_assessment is None:
             rejected_count += 1
-            assert candidate.relevance_assessment is None
             assert candidate.relevance_error is not None
             assert candidate.relevance_error.code.startswith("candidate_relevance_claim_")
             continue
 
-        completed_count += 1
-        assert candidate.relevance_state == "completed"
-        assert candidate.relevance_assessment is not None
+        verified_count += 1
+        assert candidate.relevance_state in {
+            CandidateRelevanceState.COMPLETED,
+            CandidateRelevanceState.EXCLUDED,
+        }
         assert candidate.relevance_assessment.study_focus
         assert candidate.relevance_assessment.reason
         assert candidate.relevance_assessment.helpful_aspect
@@ -125,8 +131,9 @@ async def test_live_candidate_relevance_assessment_never_exposes_unverified_clai
                 source.casefold().split()
             )
 
-    assert completed_count + rejected_count == len(candidates)
+    assert verified_count + rejected_count + len(retryable_failures) == len(candidates)
     print(
         "live relevance claim-verification acceptance passed: "
-        f"{completed_count} completed, {rejected_count} rejected"
+        f"{verified_count} verified, {rejected_count} rejected, "
+        f"{len(retryable_failures)} retryable"
     )

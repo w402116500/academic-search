@@ -1,9 +1,10 @@
-"""独立 Worker 执行完整候选集合的流式相关性分析。"""
+"""独立 Worker 执行候选相关性批量分析与子集重试。"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from typing import Any
 from uuid import UUID, uuid4
@@ -17,11 +18,14 @@ from app.modules.search.contracts import (
 )
 from app.modules.search.queue import CandidateRelevanceJobQueue, CandidateRelevanceQueueError
 from app.modules.search.relevance import (
+    CandidateRelevanceCandidateFailure,
+    CandidateRelevanceEvaluationOutcome,
     CandidateRelevanceEvaluator,
     CandidateRelevanceTechnicalFailure,
     build_candidate_relevance_context,
     exclude_candidate_relevance,
     is_screening_candidate,
+    mark_candidate_relevance_insufficient,
 )
 from app.modules.search.run_models import SearchRunRecord
 from app.modules.search.run_repository import SearchRunRepository
@@ -37,10 +41,11 @@ logger = logging.getLogger(__name__)
 
 _LEASE_TTL_SECONDS = 90
 _LEASE_HEARTBEAT_SECONDS = 30
+_RETRY_CANDIDATE_IDS_KEY = "relevance_retry_candidate_ids"
 
 
 class CandidateRelevanceRunExecutor:
-    """以完整集合流式调用模型，并通过 Redis 合并保护其他候选更新。"""
+    """首次以完整集合调用模型，并通过 Redis 合并保护其他候选更新。"""
 
     def __init__(
         self,
@@ -134,30 +139,68 @@ class CandidateRelevanceRunExecutor:
             for candidate in candidates
             if candidate.triage is not None and candidate.triage.included
         )
+        assessment_candidates = self._candidates_for_attempt(snapshot, included)
         try:
-            assessed = await self._assess_collection(run, included)
+            outcome = await self._assess_collection(run, assessment_candidates)
         except CandidateRelevanceTechnicalFailure as failure:
-            if await self._retry_technical_failure(
-                run=run,
-                session_key=session_key,
-                failure=failure,
-            ):
-                return {"search_run_id": str(run.id), "status": "retry_queued"}
-            logger.error(
-                "Candidate relevance attempts exhausted: run_id=%s code=%s",
-                run.id,
-                failure.code,
-            )
-            assessed = self._exclude_pending_candidates(
-                included,
-                code=failure.code,
-                message="候选相关性无法形成可靠结论，当前候选不会进入筛选。",
+            outcome = CandidateRelevanceEvaluationOutcome(
+                resolved_candidates=tuple(
+                    mark_candidate_relevance_insufficient(candidate)
+                    for candidate in assessment_candidates
+                    if candidate.relevance_state is CandidateRelevanceState.PENDING
+                    and not candidate.abstract
+                ),
+                retryable_failures={
+                    candidate.candidate_id: CandidateRelevanceCandidateFailure(code=failure.code)
+                    for candidate in assessment_candidates
+                    if candidate.relevance_state is CandidateRelevanceState.PENDING
+                    and candidate.abstract
+                },
             )
 
-        merged = await self._session_store.merge_snapshot(
-            session_key,
-            lambda current: self._merge_relevance(current, assessed),
-        )
+        merged = snapshot
+        if outcome.retryable_failures:
+            retry_candidate_ids = tuple(outcome.retryable_failures)
+            retry_code = next(iter(outcome.retryable_failures.values())).code
+            retry_queued, retry_snapshot = await self._retry_technical_failure(
+                run=run,
+                session_key=session_key,
+                candidate_ids=retry_candidate_ids,
+                failure_code=retry_code,
+                resolved_candidates=outcome.resolved_candidates,
+            )
+            if retry_queued:
+                return {"search_run_id": str(run.id), "status": "retry_queued"}
+            if retry_snapshot is not None:
+                merged = retry_snapshot
+            elif outcome.resolved_candidates:
+                merged = await self._session_store.merge_snapshot(
+                    session_key,
+                    lambda current: self._merge_relevance(current, outcome.resolved_candidates),
+                )
+            logger.error(
+                "Candidate relevance attempts exhausted: run_id=%s candidate_count=%s code=%s",
+                run.id,
+                len(retry_candidate_ids),
+                retry_code,
+            )
+            excluded = self._exclude_unresolved_candidates(
+                self._deserialize_candidates(merged),
+                failure_codes={
+                    candidate_id: failure.code
+                    for candidate_id, failure in outcome.retryable_failures.items()
+                },
+            )
+            merged = await self._session_store.merge_snapshot(
+                session_key,
+                lambda current: self._merge_relevance(current, excluded),
+            )
+        elif outcome.resolved_candidates:
+            merged = await self._session_store.merge_snapshot(
+                session_key,
+                lambda current: self._merge_relevance(current, outcome.resolved_candidates),
+            )
+
         merged = await self._session_store.merge_snapshot(
             session_key,
             lambda current: self._set_snapshot_stage(current, SearchRunStage.CITATION_ENRICHMENT),
@@ -220,10 +263,10 @@ class CandidateRelevanceRunExecutor:
         self,
         run: SearchRunRecord,
         candidates: tuple[UnifiedCandidate, ...],
-    ) -> tuple[UnifiedCandidate, ...]:
-        """一次输入完整已纳入集合；技术性错误交给 Worker 统一重投。"""
+    ) -> CandidateRelevanceEvaluationOutcome:
+        """一次输入当前批次；技术性错误交给 Worker 按未解决候选重投。"""
         if not candidates:
-            return ()
+            return CandidateRelevanceEvaluationOutcome((), {})
         plan = await self._runs.get_plan(run.research_plan_id)
         if plan is None:
             raise CandidateRelevanceTechnicalFailure(
@@ -260,18 +303,64 @@ class CandidateRelevanceRunExecutor:
             ) from exc
 
     @staticmethod
-    def _exclude_pending_candidates(
+    def _exclude_unresolved_candidates(
         candidates: tuple[UnifiedCandidate, ...],
         *,
-        code: str,
-        message: str,
+        failure_codes: Mapping[UUID, str],
     ) -> tuple[UnifiedCandidate, ...]:
         return tuple(
-            exclude_candidate_relevance(candidate, message, code=code)
+            exclude_candidate_relevance(
+                candidate,
+                "候选相关性无法形成可靠结论，当前候选不会进入筛选。",
+                code=code,
+            )
             if candidate.relevance_state is CandidateRelevanceState.PENDING
+            and (code := failure_codes.get(candidate.candidate_id)) is not None
             else candidate
             for candidate in candidates
         )
+
+    def _candidates_for_attempt(
+        self,
+        snapshot: Mapping[str, Any],
+        included: Sequence[UnifiedCandidate],
+    ) -> tuple[UnifiedCandidate, ...]:
+        """第二次仅重试快照中记录且仍待处理的候选。"""
+        if self._attempt_no == 1:
+            return tuple(included)
+        pending_candidates = tuple(
+            candidate
+            for candidate in included
+            if candidate.relevance_state is CandidateRelevanceState.PENDING
+        )
+        retry_candidate_ids = self._retry_candidate_ids(snapshot)
+        pending_candidate_ids = frozenset(
+            candidate.candidate_id for candidate in pending_candidates
+        )
+        if retry_candidate_ids is None or retry_candidate_ids != pending_candidate_ids:
+            return pending_candidates
+        return tuple(
+            candidate
+            for candidate in pending_candidates
+            if candidate.candidate_id in retry_candidate_ids
+        )
+
+    @staticmethod
+    def _retry_candidate_ids(snapshot: Mapping[str, Any]) -> frozenset[UUID] | None:
+        """读取私有重试子集；旧快照缺少该字段时兼容待处理候选。"""
+        raw_ids = snapshot.get(_RETRY_CANDIDATE_IDS_KEY)
+        if raw_ids is None:
+            return None
+        if (
+            not isinstance(raw_ids, list)
+            or not raw_ids
+            or not all(isinstance(value, str) for value in raw_ids)
+        ):
+            return None
+        try:
+            return frozenset(UUID(candidate_id) for candidate_id in raw_ids)
+        except ValueError:
+            return None
 
     @staticmethod
     def _deserialize_candidates(snapshot: dict[str, Any]) -> tuple[UnifiedCandidate, ...]:
@@ -320,20 +409,27 @@ class CandidateRelevanceRunExecutor:
         *,
         run: SearchRunRecord,
         session_key: str,
-        failure: CandidateRelevanceTechnicalFailure,
-    ) -> bool:
-        """只对同一完整候选集合自动补跑一次，浏览器始终只看到正常分析进度。"""
-        if self._attempt_no >= 2 or self._relevance_queue is None:
-            return False
+        candidate_ids: Sequence[UUID],
+        failure_code: str,
+        resolved_candidates: Sequence[UnifiedCandidate],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """原子保存有效结果与重试子集，再为未解决候选安排一次批量重试。"""
+        if not candidate_ids or self._attempt_no >= 2 or self._relevance_queue is None:
+            return False, None
 
         next_attempt_no = self._attempt_no + 1
         snapshot = await self._session_store.merge_snapshot(
             session_key,
-            lambda current: self._schedule_retry_snapshot(current, next_attempt_no),
+            lambda current: self._merge_relevance_and_schedule_retry(
+                current,
+                resolved_candidates,
+                next_attempt_no,
+                candidate_ids,
+            ),
         )
         candidate_counts = snapshot.get("candidate_counts", {})
         if not isinstance(candidate_counts, dict):
-            return False
+            return False, snapshot
         await self._workflow_service.update_progress(
             search_run_id=run.id,
             stage=SearchRunStage.RELEVANCE_ASSESSMENT,
@@ -347,25 +443,51 @@ class CandidateRelevanceRunExecutor:
             )
         except CandidateRelevanceQueueError:
             logger.exception(
-                "Candidate relevance automatic retry could not be queued: run_id=%s code=%s",
+                "Candidate relevance automatic retry could not be queued: run_id=%s "
+                "candidate_count=%s code=%s",
                 run.id,
-                failure.code,
+                len(candidate_ids),
+                failure_code,
             )
-            return False
+            return False, snapshot
         await self._publish(
             run=run,
             snapshot=snapshot,
             stage=SearchRunStage.RELEVANCE_ASSESSMENT,
             message="正在分析候选相关性。",
         )
-        return True
+        return True, snapshot
 
     @staticmethod
-    def _schedule_retry_snapshot(snapshot: dict[str, Any], attempt_no: int) -> dict[str, Any]:
+    def _merge_relevance_and_schedule_retry(
+        snapshot: dict[str, Any],
+        resolved_candidates: Sequence[UnifiedCandidate],
+        attempt_no: int,
+        candidate_ids: Sequence[UUID],
+    ) -> dict[str, Any]:
+        """将局部成功和下一次重试状态作为一次 Redis 快照变换提交。"""
+        merged = (
+            CandidateRelevanceRunExecutor._merge_relevance(snapshot, tuple(resolved_candidates))
+            if resolved_candidates
+            else dict(snapshot)
+        )
+        return CandidateRelevanceRunExecutor._schedule_retry_snapshot(
+            merged,
+            attempt_no,
+            candidate_ids,
+        )
+
+    @staticmethod
+    def _schedule_retry_snapshot(
+        snapshot: dict[str, Any],
+        attempt_no: int,
+        candidate_ids: Sequence[UUID],
+    ) -> dict[str, Any]:
         updated = dict(snapshot)
         updated["status"] = SearchRunStatus.RUNNING.value
         updated["stage"] = SearchRunStage.RELEVANCE_ASSESSMENT.value
         updated["relevance_attempt_no"] = attempt_no
+        updated[_RETRY_CANDIDATE_IDS_KEY] = [str(candidate_id) for candidate_id in candidate_ids]
         return updated
 
     async def _prune_selection(
@@ -456,6 +578,7 @@ class CandidateRelevanceRunExecutor:
         merged["status"] = status.value
         merged["stage"] = SearchRunStage.COMPLETED.value
         merged["candidate_counts"] = candidate_counts
+        merged.pop(_RETRY_CANDIDATE_IDS_KEY, None)
         return merged
 
     @staticmethod

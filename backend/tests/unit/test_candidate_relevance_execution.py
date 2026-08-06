@@ -25,7 +25,11 @@ from app.modules.search.contracts import (
     TriageDecision,
     UnifiedCandidate,
 )
-from app.modules.search.relevance import CandidateRelevanceTechnicalFailure
+from app.modules.search.relevance import (
+    CandidateRelevanceCandidateFailure,
+    CandidateRelevanceEvaluationOutcome,
+    CandidateRelevanceTechnicalFailure,
+)
 from app.modules.search.relevance_execution import CandidateRelevanceRunExecutor
 from app.modules.search.run_models import SearchRunRecord
 from app.modules.search.run_repository import SearchRunRepository
@@ -41,6 +45,7 @@ class FakeRelevanceStore:
         self.snapshot = snapshot
         self.events: list[dict[str, Any]] = []
         self.released_locks: list[tuple[str, str]] = []
+        self.merge_calls = 0
 
     async def read_snapshot(self, _key: str) -> dict[str, Any]:
         return self.snapshot
@@ -50,6 +55,7 @@ class FakeRelevanceStore:
         _key: str,
         transform: Any,
     ) -> dict[str, Any]:
+        self.merge_calls += 1
         self.snapshot = transform(self.snapshot)
         return self.snapshot
 
@@ -81,13 +87,18 @@ class FakeWorkflowService:
 
     def __init__(self) -> None:
         self.progress_updates: list[dict[str, Any]] = []
+        self.completed_runs: list[dict[str, Any]] = []
 
     async def update_progress(self, **kwargs: Any) -> None:
         self.progress_updates.append(kwargs)
 
+    async def complete_run(self, **kwargs: Any) -> None:
+        self.completed_runs.append(kwargs)
+        return None
+
 
 class RecordingRelevanceQueue:
-    """记录完整集合的自动重投，不实现任何逐候选接口。"""
+    """记录相关性自动重投，队列本身不携带逐候选参数。"""
 
     def __init__(self) -> None:
         self.calls: list[tuple[UUID, int]] = []
@@ -107,12 +118,14 @@ class FakeSearchRunRepository:
         return self.run if self.run.id == search_run_id else None
 
 
-def _candidate() -> UnifiedCandidate:
+def _candidate(
+    abstract: str | None = "The study examines sleep quality and mental health outcomes.",
+) -> UnifiedCandidate:
     source = RawCandidate(
         source=SourceName.OPENALEX,
         source_record_id="relevance-merge",
         title="Sleep quality and mental health",
-        abstract="The study examines sleep quality and mental health outcomes.",
+        abstract=abstract,
     )
     return UnifiedCandidate(
         doi="10.1000/relevance.merge",
@@ -222,8 +235,8 @@ def test_relevance_merge_only_replaces_relevance_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_first_technical_failure_queues_one_full_collection_retry() -> None:
-    """首轮技术失败只安排第 2 次完整集合任务，不重调 Provider 或拆分候选。"""
+async def test_first_technical_failure_queues_only_unresolved_candidates() -> None:
+    """首轮失败仅将未解决候选写入快照，队列合同仍只包含运行与尝试序号。"""
     run = _run()
     candidate = _candidate()
     store = FakeRelevanceStore(_snapshot(candidate))
@@ -240,25 +253,25 @@ async def test_first_technical_failure_queues_one_full_collection_retry() -> Non
     workflow = FakeWorkflowService()
     executor._workflow_service = cast(SearchRunService, workflow)
 
-    queued = await executor._retry_technical_failure(
+    queued, _retry_snapshot = await executor._retry_technical_failure(
         run=run,
         session_key=run.redis_session_key or "",
-        failure=CandidateRelevanceTechnicalFailure(
-            "candidate_relevance_model_unavailable",
-            "模型暂时不可用。",
-        ),
+        candidate_ids=(candidate.candidate_id,),
+        failure_code="candidate_relevance_model_unavailable",
+        resolved_candidates=(),
     )
 
     assert queued is True
     assert queue.calls == [(run.id, 2)]
     assert store.snapshot["relevance_attempt_no"] == 2
+    assert store.snapshot["relevance_retry_candidate_ids"] == [str(candidate.candidate_id)]
     assert store.snapshot["stage"] == SearchRunStage.RELEVANCE_ASSESSMENT.value
     assert workflow.progress_updates[0]["stage"] is SearchRunStage.RELEVANCE_ASSESSMENT
 
 
 @pytest.mark.asyncio
 async def test_stale_relevance_attempt_is_ignored_before_model_work() -> None:
-    """旧任务序号不能覆盖已经排队的后续完整集合尝试。"""
+    """旧任务序号不能覆盖已经排队的后续相关性尝试。"""
     run = _run()
     store = FakeRelevanceStore(_snapshot(_candidate(), attempt_no=2))
     executor = CandidateRelevanceRunExecutor(
@@ -276,20 +289,267 @@ async def test_stale_relevance_attempt_is_ignored_before_model_work() -> None:
     assert store.released_locks
 
 
-def test_second_technical_failure_excludes_only_pending_candidates() -> None:
-    """第二次完整集合失败后，未形成结论的项安全排除，已有结果保持不变。"""
+def test_second_technical_failure_excludes_only_retry_subset() -> None:
+    """第二次失败后只排除重试子集，已完成和终态候选不变。"""
     pending = _candidate()
     completed = _with_level(_candidate(), CandidateRelevanceLevel.CORE)
+    terminal = _with_level(_candidate(), CandidateRelevanceLevel.NOT_RECOMMENDED).model_copy(
+        update={"relevance_state": CandidateRelevanceState.EXCLUDED}
+    )
 
-    excluded = CandidateRelevanceRunExecutor._exclude_pending_candidates(
-        (pending, completed),
-        code="candidate_relevance_output_invalid",
-        message="候选相关性无法形成可靠结论。",
+    excluded = CandidateRelevanceRunExecutor._exclude_unresolved_candidates(
+        (pending, completed, terminal),
+        failure_codes={pending.candidate_id: "candidate_relevance_output_invalid"},
     )
 
     assert excluded[0].relevance_state is CandidateRelevanceState.EXCLUDED
     assert excluded[0].relevance_assessment is None
     assert excluded[1] == completed
+    assert excluded[2] == terminal
+
+
+def test_corrupt_retry_subset_falls_back_to_pending_candidates() -> None:
+    """损坏的重试快照不能让仍待处理的候选被提前完成。"""
+    pending = _candidate()
+    other_pending = _candidate()
+    snapshot = _snapshot(pending, other_pending, attempt_no=2)
+    executor = CandidateRelevanceRunExecutor(
+        runs=cast(SearchRunRepository, object()),
+        search_run_id=_run().id,
+        session_store=cast(SearchSessionStore, object()),
+        citation_enrichment_limit=0,
+        citation_enricher=None,
+        attempt_no=2,
+    )
+
+    snapshot["relevance_retry_candidate_ids"] = []
+    assert executor._candidates_for_attempt(snapshot, (pending, other_pending)) == (
+        pending,
+        other_pending,
+    )
+
+    snapshot["relevance_retry_candidate_ids"] = ["00000000-0000-0000-0000-000000009999"]
+    assert executor._candidates_for_attempt(snapshot, (pending, other_pending)) == (
+        pending,
+        other_pending,
+    )
+
+    snapshot["relevance_retry_candidate_ids"] = [str(pending.candidate_id)]
+    assert executor._candidates_for_attempt(snapshot, (pending, other_pending)) == (
+        pending,
+        other_pending,
+    )
+
+    snapshot["relevance_retry_candidate_ids"] = [
+        str(pending.candidate_id),
+        "00000000-0000-0000-0000-000000009999",
+    ]
+    assert executor._candidates_for_attempt(snapshot, (pending, other_pending)) == (
+        pending,
+        other_pending,
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_result_merges_valid_peer_before_scheduling_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同批一条无效结果不能回退已经完成核验的同伴。"""
+    run = _run()
+    valid_peer = _candidate()
+    completed = _with_level(valid_peer, CandidateRelevanceLevel.CORE)
+    unresolved = _candidate()
+    store = FakeRelevanceStore(_snapshot(valid_peer, unresolved))
+    queue = RecordingRelevanceQueue()
+    executor = CandidateRelevanceRunExecutor(
+        runs=cast(SearchRunRepository, object()),
+        search_run_id=run.id,
+        session_store=cast(SearchSessionStore, store),
+        citation_enrichment_limit=0,
+        citation_enricher=None,
+        attempt_no=1,
+        relevance_queue=queue,
+    )
+    workflow = FakeWorkflowService()
+    executor._workflow_service = cast(SearchRunService, workflow)
+    assessed_ids: list[tuple[UUID, ...]] = []
+
+    async def assess_collection(
+        _run: SearchRunRecord,
+        candidates: tuple[UnifiedCandidate, ...],
+    ) -> CandidateRelevanceEvaluationOutcome:
+        assessed_ids.append(tuple(candidate.candidate_id for candidate in candidates))
+        return CandidateRelevanceEvaluationOutcome(
+            resolved_candidates=(completed,),
+            retryable_failures={
+                unresolved.candidate_id: CandidateRelevanceCandidateFailure(
+                    code="candidate_relevance_output_invalid"
+                )
+            },
+        )
+
+    monkeypatch.setattr(executor, "_assess_collection", assess_collection)
+
+    result = await executor._execute_locked(run, run.redis_session_key or "")
+    stored = {
+        candidate.candidate_id: candidate
+        for candidate in CandidateRelevanceRunExecutor._deserialize_candidates(store.snapshot)
+    }
+
+    assert result == {"search_run_id": str(run.id), "status": "retry_queued"}
+    assert assessed_ids == [(completed.candidate_id, unresolved.candidate_id)]
+    assert stored[completed.candidate_id].relevance_state is CandidateRelevanceState.COMPLETED
+    assert stored[unresolved.candidate_id].relevance_state is CandidateRelevanceState.PENDING
+    assert store.snapshot["relevance_retry_candidate_ids"] == [str(unresolved.candidate_id)]
+    assert queue.calls == [(run.id, 2)]
+    assert store.merge_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unparseable_batch_schedules_all_current_unresolved_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """整批 JSON 不可用时，重试范围恰好是当前调用的待处理集合。"""
+    run = _run()
+    first = _candidate()
+    second = _candidate()
+    store = FakeRelevanceStore(_snapshot(first, second))
+    queue = RecordingRelevanceQueue()
+    executor = CandidateRelevanceRunExecutor(
+        runs=cast(SearchRunRepository, object()),
+        search_run_id=run.id,
+        session_store=cast(SearchSessionStore, store),
+        citation_enrichment_limit=0,
+        citation_enricher=None,
+        attempt_no=1,
+        relevance_queue=queue,
+    )
+    executor._workflow_service = cast(SearchRunService, FakeWorkflowService())
+
+    async def assess_collection(
+        _run: SearchRunRecord,
+        _candidates: tuple[UnifiedCandidate, ...],
+    ) -> CandidateRelevanceEvaluationOutcome:
+        raise CandidateRelevanceTechnicalFailure(
+            "candidate_relevance_output_invalid",
+            "候选相关性模型没有返回可验证的完整结果。",
+        )
+
+    monkeypatch.setattr(executor, "_assess_collection", assess_collection)
+
+    result = await executor._execute_locked(run, run.redis_session_key or "")
+
+    assert result == {"search_run_id": str(run.id), "status": "retry_queued"}
+    assert store.snapshot["relevance_retry_candidate_ids"] == [
+        str(first.candidate_id),
+        str(second.candidate_id),
+    ]
+    assert queue.calls == [(run.id, 2)]
+
+
+@pytest.mark.asyncio
+async def test_unparseable_batch_keeps_empty_abstract_candidate_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """空摘要与缺失摘要一致，不应在整批失败时遗留为待处理或被重试。"""
+    run = _run()
+    assessable = _candidate()
+    empty_abstract = _candidate("")
+    store = FakeRelevanceStore(_snapshot(assessable, empty_abstract))
+    queue = RecordingRelevanceQueue()
+    executor = CandidateRelevanceRunExecutor(
+        runs=cast(SearchRunRepository, object()),
+        search_run_id=run.id,
+        session_store=cast(SearchSessionStore, store),
+        citation_enrichment_limit=0,
+        citation_enricher=None,
+        attempt_no=1,
+        relevance_queue=queue,
+    )
+    executor._workflow_service = cast(SearchRunService, FakeWorkflowService())
+
+    async def assess_collection(
+        _run: SearchRunRecord,
+        _candidates: tuple[UnifiedCandidate, ...],
+    ) -> CandidateRelevanceEvaluationOutcome:
+        raise CandidateRelevanceTechnicalFailure(
+            "candidate_relevance_output_invalid",
+            "候选相关性模型没有返回可验证的完整结果。",
+        )
+
+    monkeypatch.setattr(executor, "_assess_collection", assess_collection)
+
+    await executor._execute_locked(run, run.redis_session_key or "")
+    stored = {
+        candidate.candidate_id: candidate
+        for candidate in CandidateRelevanceRunExecutor._deserialize_candidates(store.snapshot)
+    }
+
+    assert store.snapshot["relevance_retry_candidate_ids"] == [str(assessable.candidate_id)]
+    assert stored[empty_abstract.candidate_id].relevance_state is CandidateRelevanceState.EXCLUDED
+    assessment = stored[empty_abstract.candidate_id].relevance_assessment
+    assert assessment is not None
+    assert assessment.level is CandidateRelevanceLevel.INSUFFICIENT_INFORMATION
+
+
+@pytest.mark.asyncio
+async def test_exhausted_retry_assesses_and_excludes_only_snapshot_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """第二次任务不重算已解决同伴，耗尽时也只安全排除未解决项。"""
+    run = _run()
+    completed = _with_level(_candidate(), CandidateRelevanceLevel.CORE)
+    unresolved = _candidate()
+    terminal = _with_level(_candidate(), CandidateRelevanceLevel.NOT_RECOMMENDED).model_copy(
+        update={"relevance_state": CandidateRelevanceState.EXCLUDED}
+    )
+    store = FakeRelevanceStore(_snapshot(completed, unresolved, terminal, attempt_no=2))
+    store.snapshot["relevance_retry_candidate_ids"] = [str(unresolved.candidate_id)]
+    queue = RecordingRelevanceQueue()
+    executor = CandidateRelevanceRunExecutor(
+        runs=cast(SearchRunRepository, object()),
+        search_run_id=run.id,
+        session_store=cast(SearchSessionStore, store),
+        citation_enrichment_limit=0,
+        citation_enricher=None,
+        attempt_no=2,
+        relevance_queue=queue,
+    )
+    workflow = FakeWorkflowService()
+    executor._workflow_service = cast(SearchRunService, workflow)
+    assessed_ids: list[tuple[UUID, ...]] = []
+
+    async def assess_collection(
+        _run: SearchRunRecord,
+        candidates: tuple[UnifiedCandidate, ...],
+    ) -> CandidateRelevanceEvaluationOutcome:
+        assessed_ids.append(tuple(candidate.candidate_id for candidate in candidates))
+        return CandidateRelevanceEvaluationOutcome(
+            resolved_candidates=(),
+            retryable_failures={
+                unresolved.candidate_id: CandidateRelevanceCandidateFailure(
+                    code="candidate_relevance_output_invalid"
+                )
+            },
+        )
+
+    monkeypatch.setattr(executor, "_assess_collection", assess_collection)
+
+    await executor._execute_locked(run, run.redis_session_key or "")
+    stored = {
+        candidate.candidate_id: candidate
+        for candidate in CandidateRelevanceRunExecutor._deserialize_candidates(store.snapshot)
+    }
+
+    assert assessed_ids == [(unresolved.candidate_id,)]
+    assert stored[completed.candidate_id] == completed
+    assert stored[terminal.candidate_id] == terminal
+    assert stored[unresolved.candidate_id].relevance_state is CandidateRelevanceState.EXCLUDED
+    relevance_error = stored[unresolved.candidate_id].relevance_error
+    assert relevance_error is not None
+    assert relevance_error.code == "candidate_relevance_output_invalid"
+    assert "relevance_retry_candidate_ids" not in store.snapshot
+    assert queue.calls == []
 
 
 @pytest.mark.asyncio
