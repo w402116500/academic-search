@@ -92,6 +92,7 @@ export type CollectionDocumentsResponse = Omit<
 };
 export type CollectionBuildResponse = Response<Schemas["CollectionBuildResponse"]>;
 export type ConversationStatus = Schemas["ConversationStatus"];
+export type ResearchQuestionMode = Schemas["ResearchQuestionMode"];
 export type ResearchRunMode = Schemas["ResearchRunMode"];
 export type ResearchRunStatus = Schemas["ResearchRunStatus"];
 export type ResearchRunStage = Schemas["ResearchRunStage"];

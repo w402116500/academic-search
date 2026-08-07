@@ -130,6 +130,24 @@ class SqlAlchemyResearchExecutionAdapter:
             self._mark_cancelled(run, datetime.now(UTC))
             return True
 
+    async def finalize_requested_cancellations(self) -> tuple[UUID, ...]:
+        """Worker 重启时收敛已请求取消但来不及确认的 running 运行。"""
+        async with self._session.begin():
+            runs = list(
+                await self._session.scalars(
+                    select(ResearchRun)
+                    .where(
+                        ResearchRun.status == ResearchRunStatus.RUNNING.value,
+                        ResearchRun.cancel_requested_at.is_not(None),
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            finished_at = datetime.now(UTC)
+            for run in runs:
+                self._mark_cancelled(run, finished_at)
+            return tuple(run.id for run in runs)
+
     async def complete(
         self, research_run_id: UUID, outcome: ResearchOutcome
     ) -> ResearchRunStatus | None:

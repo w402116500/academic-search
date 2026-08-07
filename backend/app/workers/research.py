@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 from uuid import UUID
 
@@ -35,12 +35,25 @@ from app.modules.agents.contracts import (
     ResearchModelProtocolError,
     ResearchRunCancelled,
 )
+from app.modules.agents.fast_rag import FastRagRunner
 from app.modules.agents.graph import ResearchGraphRunner
-from app.modules.rag.retrieval import ResearchReranker, ResearchRetriever
+from app.modules.agents.state import ResearchGraphOutcome
+from app.modules.rag.retrieval import (
+    ResearchReranker,
+    ResearchRerankerError,
+    ResearchRetriever,
+    RetrievalUnavailableError,
+)
 from app.modules.research.contracts import (
     ResearchProgressEvent,
     ResearchRunStage,
     ResearchRunStatus,
+)
+from app.modules.research.question_mode import (
+    ResearchExecutionMode,
+    ResearchModeDecision,
+    research_question_mode_from_config,
+    resolve_research_execution_mode,
 )
 from app.modules.research.settings import ResearchSettings, get_research_settings
 
@@ -65,6 +78,15 @@ class ResearchWorkerDependencies:
     model: ResearchChatModel
 
 
+@dataclass(frozen=True, slots=True)
+class ResearchFailureDetails:
+    """Worker 写入失败终态所需的稳定错误字段。"""
+
+    code: str
+    message: str
+    diagnostics: dict[str, Any] | None
+
+
 async def startup(ctx: dict[str, Any]) -> None:
     """启动时读取配置；外部模型和向量连接只在任务实际调用时建立。"""
     ingestion_settings = get_ingestion_settings()
@@ -81,6 +103,30 @@ async def startup(ctx: dict[str, Any]) -> None:
         ),
         model=OpenAICompatibleResearchModel(workflow_settings, research_settings),
     )
+    await _finalize_interrupted_cancellations(research_settings)
+
+
+async def _finalize_interrupted_cancellations(settings: ResearchSettings) -> None:
+    """Worker 重启后回收已请求取消、但上一进程未能确认终态的运行。"""
+    async with async_session_factory() as session:
+        run_ids = await SqlAlchemyResearchExecutionAdapter(
+            session
+        ).finalize_requested_cancellations()
+    if not run_ids:
+        return
+    logger.warning("已回收 %s 条悬挂的研究取消请求。", len(run_ids))
+    for run_id in run_ids:
+        try:
+            await _publish_terminal_event(
+                run_id=run_id,
+                settings=settings,
+                status=ResearchRunStatus.CANCELLED,
+                stage=ResearchRunStage.CANCELLED,
+                message="研究任务已取消。",
+                evidence_count=0,
+            )
+        except Exception:
+            logger.exception("研究取消回收终态事件发布失败：research_run_id=%s", run_id)
 
 
 async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, str | int]:
@@ -143,16 +189,30 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
                 settings=dependencies.research_settings,
                 reranker=dependencies.reranker,
             )
-            outcome = await ResearchGraphRunner(
-                retriever=retriever,
-                model=dependencies.model,
-                settings=dependencies.research_settings,
-                graph_executor=PostgresResearchGraphExecutor(
-                    dependencies.research_settings.checkpoint_database_url
-                ),
-                stage_callback=publish_stage,
-                cancellation_checker=cancellation_requested,
-            ).run(context)
+            mode_decision = resolve_research_execution_mode(
+                context.question,
+                research_question_mode_from_config(context.model_config),
+            )
+            if mode_decision.execution_mode is ResearchExecutionMode.FAST_RAG:
+                outcome = await FastRagRunner(
+                    retriever=retriever,
+                    model=dependencies.model,
+                    settings=dependencies.research_settings,
+                    stage_callback=publish_stage,
+                    cancellation_checker=cancellation_requested,
+                ).run(context, mode_decision)
+            else:
+                strict_outcome = await ResearchGraphRunner(
+                    retriever=retriever,
+                    model=dependencies.model,
+                    settings=dependencies.research_settings,
+                    graph_executor=PostgresResearchGraphExecutor(
+                        dependencies.research_settings.checkpoint_database_url
+                    ),
+                    stage_callback=publish_stage,
+                    cancellation_checker=cancellation_requested,
+                ).run(context)
+                outcome = _with_strict_research_trace(strict_outcome, mode_decision)
     except ResearchRunCancelled:
         async with async_session_factory() as cancellation_session:
             cancelled = await SqlAlchemyResearchExecutionAdapter(
@@ -178,12 +238,18 @@ async def run_research(ctx: dict[str, Any], research_run_id: str) -> dict[str, s
         error_code = "research_model_failed"
         error_message = "研究模型调用失败，未生成可核验回答。"
         failure_diagnostics = None
-    except Exception:
+    except Exception as exc:
         # 详细堆栈只写入 Worker 日志，数据库和 API 继续返回稳定、无敏感信息的错误。
-        logger.exception("研究运行执行失败：research_run_id=%s", run_id)
-        error_code = "research_execution_failed"
-        error_message = "研究任务执行失败，请稍后重试。"
-        failure_diagnostics = None
+        failure = _failure_from_unexpected_exception(exc)
+        logger.exception(
+            "研究运行执行失败：research_run_id=%s failure_code=%s error_type=%s",
+            run_id,
+            failure.code,
+            exc.__class__.__name__,
+        )
+        error_code = failure.code
+        error_message = failure.message
+        failure_diagnostics = failure.diagnostics
     else:
         async with async_session_factory() as completion_session:
             persisted_status = await SqlAlchemyResearchExecutionAdapter(
@@ -269,6 +335,52 @@ async def _publish_terminal_event(
         )
     finally:
         await redis.aclose()
+
+
+def _with_strict_research_trace(
+    outcome: ResearchGraphOutcome, decision: ResearchModeDecision
+) -> ResearchGraphOutcome:
+    """Preserve the old graph mode while exposing that the strict chain was selected."""
+    trace = {
+        **outcome.retrieval_trace,
+        "execution_mode": ResearchExecutionMode.STRICT_RESEARCH.value,
+        "requested_mode": decision.requested_mode.value,
+        "execution_routing": decision.to_trace(),
+    }
+    if outcome.status is ResearchRunStatus.COMPLETED:
+        trace = {
+            **trace,
+            "citation_checked": bool(outcome.cited_chunk_ids),
+            "claim_verified": "answer_claim_verification" in trace or "answer_repair" in trace,
+        }
+    return replace(outcome, retrieval_trace=trace)
+
+
+def _failure_from_unexpected_exception(exc: Exception) -> ResearchFailureDetails:
+    """把跨外部依赖的异常压缩为可展示、可排查且不含敏感信息的失败详情。"""
+    if isinstance(exc, RetrievalUnavailableError):
+        return ResearchFailureDetails(
+            code=exc.code,
+            message=str(exc) or "当前集合暂时无法检索文献证据，请稍后重试。",
+            diagnostics={
+                "component": "retrieval",
+                "error_type": exc.__class__.__name__,
+            },
+        )
+    if isinstance(exc, ResearchRerankerError):
+        return ResearchFailureDetails(
+            code="research_reranker_failed",
+            message="证据重排服务暂时不可用，请稍后重试。",
+            diagnostics={
+                "component": "reranker",
+                "error_type": exc.__class__.__name__,
+            },
+        )
+    return ResearchFailureDetails(
+        code="research_execution_failed",
+        message="研究任务执行失败，请稍后重试。",
+        diagnostics=None,
+    )
 
 
 class WorkerSettings:

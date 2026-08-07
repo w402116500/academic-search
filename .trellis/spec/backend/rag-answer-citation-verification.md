@@ -257,7 +257,7 @@ display numbers.
 | Verifier item has `supported=false` with non-empty `supporting_refs` | Schema/contract error | Reject verifier output |
 | Verifier `supporting_refs` contains a snapshot ref not cited by the answer | Protocol error | Reject verifier output; the verifier cannot use uncited evidence to rescue an answer claim |
 | Verifier returns `supported=false` with `supporting_refs=[]` | Semantic unsupported | Enter composer repair path; do not treat as an ID failure |
-| Composer output contains an unknown ref or UUID | Protocol error | Mark the repair attempt failed; persist diagnostics |
+| Composer output contains an unknown ref, UUID, or invalid structure | Repair protocol failure | Retry the composer once under the normal model budget; if the retry also fails, return an `awaiting_clarification` terminal state with `answer_repair.status="fallback"` and do not publish the unrepaired answer |
 | Composer path's second verifier still finds unsupported factual claims | Evidence insufficient | Return a bounded insufficiency answer or clarification; do not silently publish unsupported claims |
 | Final answer first uses `E3` then `E1` | Display remapping | Render `E3 -> [1]`, `E1 -> [2]`; never show `[3]` then `[1]` |
 
@@ -363,6 +363,12 @@ checks the repaired answer.
 
 The verifier is the judge. The final composer is the editor.
 
+If the final composer itself violates the structured contract, the repair node
+may retry it once because no answer has been published yet. A repeated composer
+protocol failure must not create an assistant answer from the original draft;
+end the run as clarification / insufficiently stable repair and preserve
+`answer_repair.fallback_reason="protocol_error"` in `retrieval_trace`.
+
 #### Wrong
 
 ```text
@@ -404,6 +410,159 @@ return validate_answer_cited_refs(answer, evidences, cited_refs)
 ```
 
 恢复只处理可证明的漏标；无法证明时应当失败，而不是让 `cited_refs` 取代正文引用。
+
+## Scenario: Fast RAG Default And Strict Research Mode Selection
+
+### 1. Scope / Trigger
+
+Use this contract when changing research-chat question submission, worker
+dispatch, execution-mode routing, answer trace payloads, or the frontend
+research-chat composer. The user-facing question mode is separate from the
+persisted `ResearchRun.mode` database value.
+
+### 2. Signatures
+
+Request DTO:
+
+```python
+class ResearchQuestionMode(StrEnum):
+    FAST = "fast"
+    STRICT = "strict"
+    AUTO = "auto"
+
+class AskResearchQuestionRequest(BaseModel):
+    content: str
+    mode: ResearchQuestionMode = ResearchQuestionMode.FAST
+```
+
+Worker-side execution mode:
+
+```python
+class ResearchExecutionMode(StrEnum):
+    FAST_RAG = "fast_rag"
+    STRICT_RESEARCH = "strict_research"
+
+RESEARCH_QUESTION_MODE_CONFIG_KEY = "research_question_mode"
+```
+
+`ResearchRun.mode` remains constrained to existing persisted graph modes such
+as `single_rag` and `multi_agent`; do not add `fast_rag` there unless a real
+database migration is part of the task.
+
+### 3. Contracts
+
+The question mode is stored in `ResearchRun.model_config` under
+`research_question_mode` and mirrored in `retrieval_trace.requested_mode`.
+Old runs or old clients with no mode must default to `fast`.
+
+Fast RAG is the default execution path. It must skip:
+
+- `route_question()`
+- `verify_answer_claims()`
+- `compose_final_answer()`
+- presentation editing
+
+Fast RAG must still run one bounded retrieval pass, call `generate_answer()`,
+validate prose `EvidenceRef` citations against structured `cited_refs`, render
+user citations with `render_user_citations()`, and persist real chunk UUIDs via
+`chunk_ids_for_refs()`.
+
+外部 Reranker 属于排序增强，不是 Fast RAG 成功前置条件。配置了真实
+Reranker 时，如果适配器抛出 `ResearchRerankerError`，检索器应退回 RRF
+截断结果继续回答，并在 trace 的 `reranker.status` 写入
+`failed_fallback`、保留 adapter / candidate_count / returned_count 等安全诊断。
+这种降级只能影响证据排序分数，不能跳过 EvidenceRef 正文/结构化引用一致性校验。
+
+Strict Research is selected only when the user explicitly requests `strict`, or
+when `auto` mode hits a strong complex intent marker such as comparison,
+cross-paper synthesis, conflict checking, or per-claim verification. Ambiguous
+questions remain Fast RAG.
+
+Public trace fields must expose the tradeoff:
+
+```json
+{
+  "execution_mode": "fast_rag | strict_research",
+  "requested_mode": "fast | strict | auto",
+  "routing": {"classifier": "local_fast_rag_router"},
+  "citation_checked": true,
+  "claim_verified": false,
+  "answer_claim_verification": {"status": "skipped", "reason": "fast_rag"}
+}
+```
+
+For Strict Research, preserve the graph's existing `routing` and `mode`
+semantics, and add the local selection result under a separate field such as
+`execution_routing`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Action |
+| --- | --- |
+| Request omits `mode` | Treat as `fast`; write `requested_mode="fast"` to trace |
+| Request uses `mode="fast"` | Run Fast RAG without model router or claim verifier |
+| Request uses `mode="strict"` | Run existing `ResearchGraphRunner` strict chain |
+| Request uses `mode="auto"` with strong complex intent | Run Strict Research |
+| Request uses `mode="auto"` without strong complex intent | Run Fast RAG |
+| Fast RAG retrieves no evidence | Return `awaiting_clarification`; do not auto-upgrade |
+| Fast RAG writer returns `evidence_sufficient=false` | Return clarification and `suggested_next_mode="strict_research"` |
+| Fast RAG prose refs and `cited_refs` differ | Raise protocol error; do not publish an answer |
+
+### 5. Good / Base / Bad Cases
+
+- Good: default frontend submission sends `mode="fast"`, worker does one
+  retrieval and one Writer call, answer cites `【E2】` then `【E1】`, API stores
+  chunk UUIDs and displays `[1]` then `[2]`.
+- Base: user switches to 深度研究; strict graph still decides
+  `single_rag` vs `multi_agent` internally and performs claim verification.
+- Base: auto mode sees “比较多篇论文是否一致” and selects strict.
+- Bad: adding `fast_rag` to `ResearchRunMode` without updating the database
+  check constraint.
+- Bad: treating Fast RAG's `cited_refs` as sufficient when the answer prose has
+  no matching `EvidenceRef` markers.
+- Bad: silently upgrading a failed Fast RAG answer to Strict Research; the user
+  must choose the latency/rigor tradeoff.
+
+### 6. Tests Required
+
+- DTO test: `AskResearchQuestionRequest` defaults to `mode=fast`.
+- Routing test: explicit fast/strict bypass local ambiguity; auto only stricts
+  on strong complex markers.
+- Fast runner test: successful Fast RAG does not call router, verifier,
+  composer, or presentation editor.
+- Fast runner test: user citation rendering follows first-use order and maps to
+  real chunk UUIDs.
+- Fast runner test: empty retrieval and writer evidence-insufficient results
+  return clarification with `suggested_next_mode="strict_research"`.
+- Protocol test: Fast RAG rejects prose/structured citation mismatch before any
+  answer is persisted.
+- Frontend type/check: composer sends `mode`, generated OpenAPI types are
+  updated, and labels do not claim Fast RAG performed claim verification.
+
+### 7. Wrong Vs Correct
+
+#### Wrong
+
+```python
+run.mode = "fast_rag"
+outcome = await ResearchGraphRunner(...).run(context)
+```
+
+This violates the persisted DB mode contract and still pays the model-router
+latency before reaching single RAG.
+
+#### Correct
+
+```python
+decision = resolve_research_execution_mode(question, requested_mode)
+if decision.execution_mode is ResearchExecutionMode.FAST_RAG:
+    outcome = await FastRagRunner(...).run(context, decision)
+else:
+    outcome = await ResearchGraphRunner(...).run(context)
+```
+
+Fast RAG bypasses the slow strict chain while keeping deterministic citation
+validation; Strict Research remains the path for deep verification.
 
 ## Scenario: Conditional Presentation Editing After Successful Verification
 

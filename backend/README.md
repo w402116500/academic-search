@@ -109,12 +109,14 @@ uv run pytest tests/integration/test_live_candidate_relevance.py -m live -s
 
 ## Workers
 
-Run the workflow, relevance, and RAG ingestion workers in separate terminals:
+Run the workflow, relevance, RAG ingestion, and research workers in separate
+terminals:
 
 ```powershell
 uv run --directory backend arq app.workers.workflow.WorkerSettings
 uv run --directory backend arq app.workers.relevance.WorkerSettings
 uv run --directory backend arq app.workers.ingestion.WorkerSettings
+uv run --directory backend arq app.workers.research.WorkerSettings
 ```
 
 The workflow worker reads the root `.env` and consumes intent-analysis, Provider search and candidate-fulltext jobs from
@@ -136,4 +138,6 @@ model calls; the timeout is only the period without any stream activity, not a w
 abstract remain deterministic `insufficient_information`. The worker validates returned evidence against the same candidate
 metadata; a retryable failure is retried as a complete current-candidate collection, without hiding other candidates. The
 workflow worker validates a JSON research-plan draft before making it available
-for user confirmation.
+for user confirmation. The research worker consumes `arq:queue:research` and
+executes RAG question-answer runs against the confirmed collection without
+sharing concurrency slots with search, fulltext or ingestion work.

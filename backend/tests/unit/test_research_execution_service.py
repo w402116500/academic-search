@@ -37,8 +37,14 @@ _INPUT_MESSAGE_ID = UUID("00000000-0000-0000-0000-000000000905")
 class FakeExecutionSession:
     """只实现研究运行服务使用到的异步会话表面。"""
 
-    def __init__(self, scalar_values: list[object | None]) -> None:
+    def __init__(
+        self,
+        scalar_values: list[object | None],
+        *,
+        scalars_values: list[list[object]] | None = None,
+    ) -> None:
         self._scalar_values = iter(scalar_values)
+        self._scalars_values = iter(scalars_values or [])
         self.added: list[object] = []
         self.executed: list[object] = []
         self.commit_count = 0
@@ -49,6 +55,9 @@ class FakeExecutionSession:
 
     async def scalar(self, _statement: object) -> object | None:
         return next(self._scalar_values)
+
+    async def scalars(self, _statement: object) -> list[object]:
+        return next(self._scalars_values)
 
     async def execute(self, statement: object) -> object:
         self.executed.append(statement)
@@ -188,6 +197,27 @@ async def test_finalize_cancellation_closes_the_active_stage_before_cancelling()
     assert run.status == ResearchRunStatus.CANCELLED.value
     assert run.stage == ResearchRunStage.CANCELLED.value
     assert _recorded_stage(run) == ResearchRunStage.HYBRID_RETRIEVAL.value
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_finalize_requested_cancellations_recovers_interrupted_worker_run() -> None:
+    """Worker 重启时应回收已请求取消、但上一进程未确认终态的运行。"""
+    run = _run(stage=ResearchRunStage.PREPARING)
+    run.cancel_requested_at = datetime.now(UTC)
+    session = FakeExecutionSession([], scalars_values=[[run]])
+
+    run_ids = await SqlAlchemyResearchExecutionAdapter(
+        cast(AsyncSession, session)
+    ).finalize_requested_cancellations()
+
+    assert run_ids == (_RUN_ID,)
+    assert run.status == ResearchRunStatus.CANCELLED.value
+    assert run.stage == ResearchRunStage.CANCELLED.value
+    assert run.finished_at is not None
+    assert run.stage_started_at is None
+    assert run.retrieval_trace["cancellation"]["state"] == "confirmed"
+    assert _recorded_stage(run) == ResearchRunStage.PREPARING.value
     assert session.added == []
 
 

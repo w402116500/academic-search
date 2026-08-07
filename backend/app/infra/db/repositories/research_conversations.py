@@ -29,6 +29,10 @@ from app.modules.research.contracts import (
     ResearchRunStage,
     ResearchRunStatus,
 )
+from app.modules.research.question_mode import (
+    RESEARCH_QUESTION_MODE_CONFIG_KEY,
+    research_question_mode_from_config,
+)
 from app.modules.research.queue import ResearchJobQueue, ResearchQueueError
 from app.modules.research.settings import ResearchSettings, get_research_settings
 
@@ -159,6 +163,11 @@ class SqlAlchemyResearchConversationAdapter:
         )
         await self._require_researchable_documents(collection_id)
         quota = await self._assert_submission_quota(owner_user_id)
+        requested_mode = research_question_mode_from_config(model_config)
+        stored_model_config = {
+            **model_config,
+            RESEARCH_QUESTION_MODE_CONFIG_KEY: requested_mode.value,
+        }
 
         now = datetime.now(UTC)
         user_message = Message(
@@ -178,10 +187,11 @@ class SqlAlchemyResearchConversationAdapter:
             status=ResearchRunStatus.QUEUED.value,
             stage=ResearchRunStage.DISPATCH.value,
             langgraph_thread_id=f"research-{uuid4()}",
-            model_config=dict(model_config),
+            model_config=stored_model_config,
             retrieval_trace={
                 "stage": ResearchRunStage.DISPATCH.value,
                 "rewrite_attempts": 0,
+                "requested_mode": requested_mode.value,
                 "governance": {"submission_quota": quota},
             },
         )
@@ -257,7 +267,16 @@ class SqlAlchemyResearchConversationAdapter:
         run.finished_at = None
         run.stage_started_at = None
         run.arq_job_id = None
-        run.retrieval_trace = {"stage": ResearchRunStage.DISPATCH.value, "rewrite_attempts": 0}
+        requested_mode = research_question_mode_from_config(run.model_config)
+        run.retrieval_trace = {
+            "stage": ResearchRunStage.DISPATCH.value,
+            "rewrite_attempts": 0,
+            "requested_mode": requested_mode.value,
+        }
+        run.model_config = {
+            **run.model_config,
+            RESEARCH_QUESTION_MODE_CONFIG_KEY: requested_mode.value,
+        }
         await self._session.commit()
         try:
             run.arq_job_id = await self._queue_or_raise().enqueue_research(run.id, retry=True)

@@ -152,7 +152,11 @@ class ResearchGraphRunner:
             lambda state: state["route"],
             {"answer": END, "repair": "repair_answer", "clarify": "clarify"},
         )
-        graph.add_edge("repair_answer", "verify_answer")
+        graph.add_conditional_edges(
+            "repair_answer",
+            lambda state: state["route"],
+            {"answer": "verify_answer", "clarify": "clarify"},
+        )
         graph.add_edge("clarify", END)
         initial_state: SingleRagState = {
             "question": context.question,

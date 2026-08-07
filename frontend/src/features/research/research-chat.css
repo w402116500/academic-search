@@ -555,11 +555,52 @@
 }
 
 .research-chat-composer,
+.research-chat-mode-selector,
 .research-chat-composer-note,
 .research-chat-operation-error {
   width: min(100%, 880px);
   margin-right: auto;
   margin-left: auto;
+}
+
+.research-chat-mode-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.research-chat-mode-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 31px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.research-chat-mode-option:hover:not(:disabled) {
+  border-color: #9bb8f2;
+  color: var(--blue-dark);
+}
+
+.research-chat-mode-option.active {
+  border-color: var(--blue);
+  background: #edf4ff;
+  color: var(--blue-dark);
+}
+
+.research-chat-mode-option:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .research-chat-composer {

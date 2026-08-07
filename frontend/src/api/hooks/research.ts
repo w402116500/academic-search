@@ -18,7 +18,7 @@ import {
   retryResearchRun,
 } from "@/api/research";
 import { confirmPlan, getPlan, regeneratePlan, startResearch, startSearch } from "@/api/workflow";
-import type { ResearchScope } from "@/api/types";
+import type { ResearchQuestionMode, ResearchScope } from "@/api/types";
 import { queryKeys } from "./query-keys";
 
 export function useWorkspaceQuery(workspaceId: MaybeRefOrGetter<string>) {
@@ -166,10 +166,12 @@ export function useResearchQueries(
     mutationFn: ({
       conversationId: targetId,
       content,
+      mode,
     }: {
       conversationId: string;
       content: string;
-    }) => askResearchQuestion(toValue(workspaceId), targetId, content),
+      mode: ResearchQuestionMode;
+    }) => askResearchQuestion(toValue(workspaceId), targetId, content, mode),
   });
   const retryRunMutation = useMutation({
     mutationFn: ({ conversationId: targetId, runId }: { conversationId: string; runId: string }) =>

@@ -14,6 +14,7 @@ from app.modules.rag.retrieval import (
     LexicalMatch,
     RerankMatch,
     ResearchReranker,
+    ResearchRerankerError,
     ResearchRetrievalRepository,
     ResearchRetriever,
     ResearchVectorSearch,
@@ -43,6 +44,24 @@ class FakeReranker:
         assert isinstance(evidences, tuple)
         assert limit == 1
         return (RerankMatch(index=1, score=0.98),)
+
+
+class FailingReranker:
+    """模拟真实重排服务短暂失败，检索器应保留可用 RRF 结果。"""
+
+    name = "failing_reranker"
+
+    async def rerank(
+        self,
+        *,
+        query: str,
+        evidences: object,
+        limit: int,
+    ) -> tuple[RerankMatch, ...]:
+        assert query == "test query"
+        assert isinstance(evidences, tuple)
+        assert limit == 1
+        raise ResearchRerankerError("真实 Reranker 调用失败。")
 
 
 def _evidence(chunk_id: UUID) -> RetrievedEvidence:
@@ -133,6 +152,35 @@ async def test_configured_reranker_reorders_evidence_and_sets_real_score() -> No
         "adapter": "fake_reranker",
         "candidate_count": 2,
         "returned_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_configured_reranker_failure_falls_back_to_rrf_trace() -> None:
+    """真实重排失败时不应让快速问答失败，而是明确退回 RRF 截断结果。"""
+    retriever = ResearchRetriever(
+        cast(ResearchRetrievalRepository, object()),
+        embedder=cast(TextEmbedder, object()),
+        vector_search=cast(ResearchVectorSearch, object()),
+        settings=ResearchSettings(rag_final_evidence_limit=1),
+        reranker=cast(ResearchReranker, FailingReranker()),
+    )
+
+    final, trace = await retriever._rerank(
+        query="test query",
+        evidences=(_evidence(_CHUNK_A), _evidence(_CHUNK_B)),
+    )
+
+    assert [item.chunk_id for item in final] == [_CHUNK_A]
+    assert final[0].rerank_score is None
+    assert trace == {
+        "enabled": True,
+        "status": "failed_fallback",
+        "adapter": "failing_reranker",
+        "candidate_count": 2,
+        "returned_count": 1,
+        "reason": "真实 Reranker 调用失败，已按 RRF 结果降级。",
+        "failure_type": "ResearchRerankerError",
     }
 
 

@@ -249,11 +249,26 @@ class ResearchRetriever:
                 },
             )
         pool = tuple(evidences[: self._settings.rag_reranker_candidate_limit])
-        matches = await self._reranker.rerank(
-            query=query,
-            evidences=pool,
-            limit=self._settings.rag_final_evidence_limit,
-        )
+        try:
+            matches = await self._reranker.rerank(
+                query=query,
+                evidences=pool,
+                limit=self._settings.rag_final_evidence_limit,
+            )
+        except ResearchRerankerError as exc:
+            fallback = tuple(evidences[: self._settings.rag_final_evidence_limit])
+            return (
+                fallback,
+                {
+                    "enabled": True,
+                    "status": "failed_fallback",
+                    "adapter": self._reranker.name,
+                    "candidate_count": len(pool),
+                    "returned_count": len(fallback),
+                    "reason": "真实 Reranker 调用失败，已按 RRF 结果降级。",
+                    "failure_type": exc.__class__.__name__,
+                },
+            )
         reranked = tuple(replace(pool[match.index], rerank_score=match.score) for match in matches)
         return (
             reranked,

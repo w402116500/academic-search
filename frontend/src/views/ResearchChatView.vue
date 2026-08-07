@@ -18,6 +18,7 @@ import {
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { useResearchQueries } from "@/api/hooks/research";
+import type { ResearchQuestionMode } from "@/api/types";
 import {
   isResearchRunTerminal,
   useResearchProgress,
@@ -25,10 +26,12 @@ import {
 import ConversationSidebar from "@/features/research/ConversationSidebar.vue";
 import {
   cancellationRequested,
+  citationAuditLabel,
   conversationTitle,
   evidenceAuthors,
   evidenceLocation,
   governanceSummary,
+  researchExecutionModeLabel,
   rerankerDisabled,
   researchRunForOutputMessage,
 } from "@/features/research/research-chat-presentation";
@@ -41,6 +44,7 @@ const auth = useAuthStore();
 const workspaceId = computed(() => String(route.params.workspaceId));
 const selectedConversationId = ref("");
 const question = ref("");
+const questionMode = ref<ResearchQuestionMode>("fast");
 const accountMenuOpen = ref(false);
 const sidebarCollapsed = ref(false);
 // 窄屏下侧栏以抽屉呈现，避免会话历史因布局压缩而不可访问。
@@ -139,7 +143,11 @@ async function handleSubmit(): Promise<void> {
   operationError.value = null;
   try {
     const conversationId = selectedConversationId.value || (await createAndSelectConversation());
-    const result = await askQuestionMutation.mutateAsync({ conversationId, content });
+    const result = await askQuestionMutation.mutateAsync({
+      conversationId,
+      content,
+      mode: questionMode.value,
+    });
     question.value = "";
     activeRun.value = result.research_run;
     progressEvent.value = null;
@@ -394,12 +402,18 @@ watch(
                   <span
                     v-if="
                       message.role === 'assistant' &&
-                      runForOutputMessage(message.id)?.evidences?.length
+                      citationAuditLabel(runForOutputMessage(message.id))
                     "
                     ><ShieldCheck :size="13" />{{
-                      runForOutputMessage(message.id)?.evidences?.length
-                    }}
-                    条引用已核验</span
+                      citationAuditLabel(runForOutputMessage(message.id))
+                    }}</span
+                  >
+                  <span
+                    v-if="
+                      message.role === 'assistant' &&
+                      researchExecutionModeLabel(runForOutputMessage(message.id))
+                    "
+                    >{{ researchExecutionModeLabel(runForOutputMessage(message.id)) }}</span
                   >
                   <span
                     v-if="
@@ -533,6 +547,32 @@ watch(
         <p v-if="operationError" class="research-chat-operation-error" role="alert">
           {{ operationError }}
         </p>
+        <div class="research-chat-mode-selector" role="radiogroup" aria-label="研究模式">
+          <button
+            class="research-chat-mode-option"
+            :class="{ active: questionMode === 'fast' }"
+            type="button"
+            role="radio"
+            :aria-checked="questionMode === 'fast'"
+            :disabled="composerDisabled"
+            title="快速问答"
+            @click="questionMode = 'fast'"
+          >
+            <Sparkles :size="14" /><span>快速问答</span>
+          </button>
+          <button
+            class="research-chat-mode-option"
+            :class="{ active: questionMode === 'strict' }"
+            type="button"
+            role="radio"
+            :aria-checked="questionMode === 'strict'"
+            :disabled="composerDisabled"
+            title="深度研究"
+            @click="questionMode = 'strict'"
+          >
+            <ShieldCheck :size="14" /><span>深度研究</span>
+          </button>
+        </div>
         <form class="research-chat-composer" @submit.prevent="handleSubmit">
           <textarea
             v-model="question"

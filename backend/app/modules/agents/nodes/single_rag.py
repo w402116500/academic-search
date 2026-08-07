@@ -217,7 +217,56 @@ class SingleRagNodes:
             "正在按已核验证据修复回答。",
             len(evidences),
         )
-        final_answer = await self._call_model_with_snapshot(
+        try:
+            final_answer = await self._compose_final_answer_once(state, verification, evidences)
+            repair_protocol_attempts = 1
+        except ResearchModelProtocolError:
+            repair_protocol_attempts = 2
+            await self._emit(
+                ResearchRunStage.ANSWERING,
+                "正在重新生成符合证据协议的修复回答。",
+                len(evidences),
+            )
+            try:
+                final_answer = await self._compose_final_answer_once(state, verification, evidences)
+            except ResearchModelProtocolError:
+                return {
+                    "route": "clarify",
+                    "clarification_question": (
+                        "当前检索到的原文无法稳定生成可核验的修复回答。"
+                        "请缩小问题范围或限定到具体论文后重试。"
+                    ),
+                    "retrieval_trace": {
+                        **state["retrieval_trace"],
+                        "answer_repair": {
+                            "status": "fallback",
+                            "fallback_reason": "protocol_error",
+                            "protocol_attempts": repair_protocol_attempts,
+                        },
+                    },
+                }
+        return {
+            "route": "answer",
+            "answer": final_answer.answer,
+            "cited_refs": list(final_answer.cited_refs),
+            "repair_count": state["repair_count"] + 1,
+            "retrieval_trace": {
+                **state["retrieval_trace"],
+                "answer_repair": {
+                    "status": "completed",
+                    "protocol_attempts": repair_protocol_attempts,
+                },
+            },
+        }
+
+    async def _compose_final_answer_once(
+        self,
+        state: SingleRagState,
+        verification: AnswerClaimVerification,
+        evidences: Sequence[RetrievedEvidence],
+    ) -> Any:
+        """调用一次最终答案编辑器；协议重试由调用方控制预算和次数。"""
+        return await self._call_model_with_snapshot(
             lambda: self._model.compose_final_answer(
                 question=state["question"],
                 draft_answer=state["answer"],
@@ -226,12 +275,6 @@ class SingleRagNodes:
             ),
             evidences,
         )
-        return {
-            "route": "answer",
-            "answer": final_answer.answer,
-            "cited_refs": list(final_answer.cited_refs),
-            "repair_count": state["repair_count"] + 1,
-        }
 
     async def _call_model_with_snapshot(
         self,

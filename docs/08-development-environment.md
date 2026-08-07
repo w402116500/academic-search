@@ -55,19 +55,20 @@ uv run --directory backend python -c "import secrets; print(secrets.token_urlsaf
 
 访问 `http://127.0.0.1:8000/docs` 可查看 OpenAPI 文档；`GET /healthz` 仅用于确认 API 进程存活，不检查外部服务。
 
-另开三个终端分别启动工作流、相关性分析和 RAG 文献入库 Worker：
+另开四个终端分别启动工作流、相关性分析、RAG 文献入库和研究问答 Worker：
 
 ```powershell
 uv run --directory backend arq app.workers.workflow.WorkerSettings
 uv run --directory backend arq app.workers.relevance.WorkerSettings
 uv run --directory backend arq app.workers.ingestion.WorkerSettings
+uv run --directory backend arq app.workers.research.WorkerSettings
 ```
 
-三个 Worker 都会从 `REDIS_URL` 连接 arq，但绝不共享任务队列：工作流 Worker 只消费 `arq:queue:workflow` 中的意图分析、检索和候选全文任务；相关性 Worker 只消费 `arq:queue:relevance` 中的候选相关性批量分析任务；入库 Worker 只消费 `arq:queue:ingestion` 中的 PDF 解析、嵌入和 Milvus 写入任务。工作流 Worker 在用户调用 `POST /api/v1/collections/research` 后访问聊天模型，返回经过 Pydantic 校验的 2-3 个研究方向和方向对应检索表达式；检索运行与候选全文获取也由同一个 Worker 消费。它只在用户确认计划后调用 OpenAlex、Crossref、arXiv 和 Semantic Scholar，并将候选放入 Redis 短期会话；基础初筛后先发布候选快照并投递相关性 Worker。相关性 Worker 首轮以完整已初筛候选集合执行流式相关性判断，并只对通过该判断的候选执行流式独立主张核验；服务端逐条验证结果、原子合并有效同伴，再将未解决候选的 ID 保存在快照中安排一次批量重试。重试队列消息仍只携带搜索运行 ID 和尝试次数，成员从 Redis 快照派生。候选数量不会以固定阈值阻断首轮完整集合判断，也不会被隐式拆成串行批次；仅实际输入或预留输出限制可触发有界批次。候选全文仅可使用该会话中服务端已发现的直接 PDF URL。入库 Worker 只在用户确认构建集合后接收 `queued` 文献，随后访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。
+四类 Worker 都会从 `REDIS_URL` 连接 arq，但不共享任务队列：工作流 Worker 消费 `arq:queue:workflow` 中的意图分析、检索和候选全文任务；相关性 Worker 消费 `arq:queue:relevance` 中的候选相关性批量分析任务；入库 Worker 消费 `arq:queue:ingestion` 中的 PDF 解析、嵌入和 Milvus 写入任务；研究 Worker 消费 `arq:queue:research` 中的 RAG 问答任务。工作流 Worker 在用户调用 `POST /api/v1/collections/research` 后访问聊天模型，返回经过 Pydantic 校验的 2-3 个研究方向和方向对应检索表达式；检索运行与候选全文获取也由同一个 Worker 入口消费。它只在用户确认计划后调用 OpenAlex、Crossref、arXiv 和 Semantic Scholar，并将候选放入 Redis 短期会话；基础初筛后先发布候选快照并投递相关性 Worker。相关性 Worker 首轮以完整已初筛候选集合执行流式相关性判断，并只对通过该判断的候选执行流式独立主张核验；服务端逐条验证结果、原子合并有效同伴，再将未解决候选的 ID 保存在快照中安排一次批量重试。重试队列消息仍只携带搜索运行 ID 和尝试次数，成员从 Redis 快照派生。候选数量不会以固定阈值阻断首轮完整集合判断，也不会被隐式拆成串行批次；仅实际输入或预留输出限制可触发有界批次。候选全文仅可使用该会话中服务端已发现的直接 PDF URL。入库 Worker 只在用户确认构建集合后接收 `queued` 文献，随后访问 MinIO、PostgreSQL、OpenAI 兼容 embedding 服务和 Milvus。研究 Worker 使用当前集合中已完成入库的文献证据执行 RAG 问答，并把阶段进度与终态事件写回 PostgreSQL 和 Redis SSE。
 
 意图分析、候选相关性评估和后续研究对话使用 `WORKFLOW_CHAT_PROVIDER` 选择聊天后端，当前默认值为 `deepseek`，对应 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_CHAT_MODEL`。如需切换到其他 OpenAI 兼容聊天服务，将其改为 `openai_compatible` 并配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_CHAT_MODEL`。`WORKFLOW_RELEVANCE_STREAM_IDLE_TIMEOUT_SECONDS=120` 只在当前相关性模型流连续 120 秒没有任何模型活动时失败；它不是整次调用总时长，也不限制候选数量或摘要长度。`WORKFLOW_RELEVANCE_OUTPUT_TOKENS_PER_CANDIDATE` 与 `WORKFLOW_RELEVANCE_VERIFICATION_OUTPUT_TOKENS_PER_CANDIDATE` 分别让相关性判断和独立核验的输出预算随当前批次的有摘要候选数增加。完整摘要和候选数量都不是截断或失败条件；`OPENAI_*` 也继续用于 RAG embedding 配置。模型输出不符合计划结构时，工作区会进入 `failed`，用户可修改原始要求并调用重新生成接口；候选相关性的技术异常只由专用 Worker 自动重试当前未解决子集一次，不重新请求文献来源，也不公开模型流正文、重试或取消控制。
 
-确认研究计划后，前端调用 `POST /api/v1/collections/{collection_id}/search-runs` 显式启动多源检索。检索 Worker 由同一个 `app.workers.workflow.WorkerSettings` 消费，按已确认查询并发调用已启用来源，并通过下列接口恢复状态：
+确认研究计划后，前端调用 `POST /api/v1/collections/{collection_id}/search-runs` 显式启动多源检索。检索任务由 `app.workers.workflow.WorkerSettings` 消费，按已确认查询并发调用已启用来源，并通过下列接口恢复状态：
 
 - `GET /api/v1/collections/{collection_id}/search-runs/current`：刷新页面时读取最近一次运行。
 - `GET /api/v1/collections/{collection_id}/search-runs/{run_id}`：读取 PostgreSQL 中的运行状态和来源摘要。

@@ -3,6 +3,7 @@ import type {
   AskResearchQuestionResponse,
   Conversation,
   ConversationDetailResponse,
+  ResearchQuestionMode,
   ResearchRun,
 } from "./types";
 
@@ -27,10 +28,11 @@ export const askResearchQuestion = (
   workspaceId: string,
   conversationId: string,
   content: string,
+  mode: ResearchQuestionMode = "fast",
 ): Promise<AskResearchQuestionResponse> =>
   apiFetch<AskResearchQuestionResponse>(
     `/api/v1/collections/${workspaceId}/conversations/${conversationId}/questions`,
-    { method: "POST", body: JSON.stringify({ content }) },
+    { method: "POST", body: JSON.stringify({ content, mode }) },
   );
 
 export const getResearchRun = (

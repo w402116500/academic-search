@@ -51,6 +51,25 @@ function isTraceRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+export function researchExecutionModeLabel(run: ResearchRun | null): string | null {
+  const trace = run?.retrieval_trace;
+  if (!trace) return null;
+  const executionMode = trace.execution_mode ?? trace.mode;
+  if (executionMode === "fast_rag") return "快速问答";
+  if (executionMode === "strict_research") return "深度研究";
+  return null;
+}
+
+export function citationAuditLabel(run: ResearchRun | null): string | null {
+  const citationCount = run?.evidences?.length ?? 0;
+  if (!citationCount) return null;
+  const claimVerified = run?.retrieval_trace.claim_verified;
+  if (claimVerified === true) return `${citationCount} 条引用与主张已核验`;
+  const citationChecked = run?.retrieval_trace.citation_checked;
+  if (citationChecked === true) return `${citationCount} 条引用已检查`;
+  return `${citationCount} 条引用`;
+}
+
 export function governanceSummary(run: ResearchRun | null): string | null {
   const trace = run?.retrieval_trace;
   if (!trace) return null;
@@ -58,6 +77,8 @@ export function governanceSummary(run: ResearchRun | null): string | null {
   const budget = trace.budget;
   const timing = trace.timing;
   const parts: string[] = [];
+  const modeLabel = researchExecutionModeLabel(run);
+  if (modeLabel) parts.push(modeLabel);
   if (isTraceRecord(routing)) {
     const reason = routing.reason;
     if (typeof reason === "string") parts.push(reason);

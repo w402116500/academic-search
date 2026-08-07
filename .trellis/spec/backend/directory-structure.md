@@ -33,6 +33,16 @@ References: `backend/app/api/deps/services.py`, `backend/app/modules/auth/servic
 `backend/app/infra/db/repositories/users.py`, `backend/app/workers/research.py`,
 `backend/alembic/env.py`, `backend/tests/`.
 
+## Retired Paths
+
+Do not recreate the pre-refactor source directories `backend/app/db`,
+`backend/app/modules/collections`, `backend/app/modules/fulltext`,
+`backend/app/modules/ingestion`, or `backend/app/modules/workflow`. They were
+split into the current owners: `backend/app/infra/db`,
+`backend/app/modules/research`, `backend/app/modules/documents`,
+`backend/app/modules/rag/ingestion`, `backend/app/modules/search`, and
+`backend/app/modules/agents`.
+
 ## Dependency Direction
 
 Business modules do not import API routers, Workers, or infrastructure

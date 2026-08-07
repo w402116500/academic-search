@@ -865,6 +865,11 @@ export interface components {
        * @description 需要从当前集合核验的问题
        */
       content: string;
+      /**
+       * @description 研究问题执行偏好：快速问答、深度研究或自动判断
+       * @default fast
+       */
+      mode: components["schemas"]["ResearchQuestionMode"];
     };
     /**
      * AskResearchQuestionResponse
@@ -2009,6 +2014,12 @@ export interface components {
       stage: components["schemas"]["ResearchRunStage"];
       status: components["schemas"]["ResearchRunStatus"];
     };
+    /**
+     * ResearchQuestionMode
+     * @description 用户提交研究问题时选择的执行偏好，不直接写入数据库 mode 约束。
+     * @enum {string}
+     */
+    ResearchQuestionMode: "fast" | "strict" | "auto";
     /**
      * ResearchRunMode
      * @description 研究运行使用的受控图模式。

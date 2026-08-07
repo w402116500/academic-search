@@ -26,6 +26,14 @@ class ResearchRunMode(StrEnum):
     RESEARCH_NOTE = "research_note"  # 结构化研究笔记。
 
 
+class ResearchQuestionMode(StrEnum):
+    """用户提交研究问题时选择的执行偏好，不直接写入数据库 mode 约束。"""
+
+    FAST = "fast"  # 快速引用问答，默认跳过逐 claim LLM 核验。
+    STRICT = "strict"  # 深度研究，沿用完整路由、核验、修复链路。
+    AUTO = "auto"  # 仅在强复杂意图命中时升档为深度研究。
+
+
 class ResearchRunStatus(StrEnum):
     """研究运行写入 PostgreSQL 的稳定状态值。"""
 
@@ -139,6 +147,10 @@ class AskResearchQuestionRequest(BaseModel):
     """用户提交给当前研究会话的问题。"""
 
     content: str = Field(min_length=1, max_length=8_000, description="需要从当前集合核验的问题")
+    mode: ResearchQuestionMode = Field(
+        default=ResearchQuestionMode.FAST,
+        description="研究问题执行偏好：快速问答、深度研究或自动判断",
+    )
 
     @field_validator("content")
     @classmethod

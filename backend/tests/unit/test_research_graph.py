@@ -126,6 +126,7 @@ class FakeModel:
         verification_claim: str | None = None,
         route_mode: Literal["single_rag", "multi_agent"] = "single_rag",
         route_protocol_failures: int = 0,
+        compose_protocol_failures: int = 0,
     ) -> None:
         self.sufficient = sufficient
         self.claims_supported = claims_supported
@@ -139,6 +140,7 @@ class FakeModel:
         self.verification_claim = verification_claim
         self.route_mode: Literal["single_rag", "multi_agent"] = route_mode
         self.route_protocol_failures = route_protocol_failures
+        self.compose_protocol_failures = compose_protocol_failures
         self.route_calls = 0
         self.rewrite_count = 0
         self.verify_answer_calls = 0
@@ -250,6 +252,9 @@ class FakeModel:
         assert verification.claims
         assert evidences
         self.compose_calls += 1
+        if self.compose_protocol_failures:
+            self.compose_protocol_failures -= 1
+            raise ResearchModelProtocolError("最终答案编辑器返回了不符合结构约束的结果。")
         return FinalAnswerDraft(
             answer=self.repaired_answer,
             cited_refs=["E1"],
@@ -673,6 +678,53 @@ async def test_single_rag_rejects_an_answer_with_an_unsupported_atomic_claim() -
     assert model.verify_answer_calls == 2
     assert model.presentation_edit_calls == 0
     assert outcome.retrieval_trace["answer_claim_verification"]["status"] == "supported"
+
+
+@pytest.mark.asyncio
+async def test_single_rag_retries_one_repair_composer_protocol_failure() -> None:
+    """最终答案编辑器首次结构化失败时可重试一次，成功后仍需二次 verifier。"""
+    retriever = FakeRetriever([RetrievalResult(evidences=(_evidence(),), trace={"final": 1})])
+    model = FakeModel(claims_supported=False, compose_protocol_failures=1)
+    outcome = await ResearchGraphRunner(
+        retriever=retriever,
+        model=model,
+        settings=ResearchSettings(),
+        graph_executor=DirectResearchGraphExecutor(),
+    ).run(_context("该方法的实验结果是什么？"))
+
+    assert outcome.status is ResearchRunStatus.COMPLETED
+    assert outcome.answer == "该结论由原文结果段支持。[1]"
+    assert model.compose_calls == 2
+    assert model.verify_answer_calls == 2
+    assert outcome.retrieval_trace["answer_repair"] == {
+        "status": "completed",
+        "protocol_attempts": 2,
+    }
+    assert outcome.retrieval_trace["budget"]["model_calls"] == 6
+
+
+@pytest.mark.asyncio
+async def test_single_rag_clarifies_when_repair_composer_protocol_retry_fails() -> None:
+    """最终答案编辑器连续结构化失败时不能发布未经二次核验的回答。"""
+    retriever = FakeRetriever([RetrievalResult(evidences=(_evidence(),), trace={"final": 1})])
+    model = FakeModel(claims_supported=False, compose_protocol_failures=2)
+    outcome = await ResearchGraphRunner(
+        retriever=retriever,
+        model=model,
+        settings=ResearchSettings(),
+        graph_executor=DirectResearchGraphExecutor(),
+    ).run(_context("该方法的实验结果是什么？"))
+
+    assert outcome.status is ResearchRunStatus.AWAITING_CLARIFICATION
+    assert "缩小问题范围" in outcome.answer
+    assert outcome.cited_chunk_ids == ()
+    assert model.compose_calls == 2
+    assert model.verify_answer_calls == 1
+    assert outcome.retrieval_trace["answer_repair"] == {
+        "status": "fallback",
+        "fallback_reason": "protocol_error",
+        "protocol_attempts": 2,
+    }
 
 
 @pytest.mark.asyncio

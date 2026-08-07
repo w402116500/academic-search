@@ -31,6 +31,7 @@ from app.modules.research.contracts import (
 )
 from app.modules.research.conversation import ResearchConversationUseCases
 from app.modules.research.events import ResearchEventStore
+from app.modules.research.question_mode import model_config_with_question_mode
 
 router = APIRouter(prefix="/collections", tags=["证据研究会话"])
 
@@ -143,7 +144,10 @@ async def ask_research_question(
             collection_id=collection_id,
             conversation_id=conversation_id,
             content=request.content,
-            model_config=get_workflow_settings().model_snapshot,
+            model_config=model_config_with_question_mode(
+                get_workflow_settings().model_snapshot,
+                request.mode,
+            ),
         )
     except ResearchError as exc:
         raise _research_error_response(exc) from exc

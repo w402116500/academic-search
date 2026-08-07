@@ -86,6 +86,11 @@
             "minLength": 1,
             "title": "Content",
             "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ResearchQuestionMode",
+            "default": "fast",
+            "description": "研究问题执行偏好：快速问答、深度研究或自动判断"
           }
         },
         "required": ["content"],
@@ -2614,6 +2619,12 @@
         "required": ["run_id", "status", "stage"],
         "title": "ResearchProgressEvent",
         "type": "object"
+      },
+      "ResearchQuestionMode": {
+        "description": "用户提交研究问题时选择的执行偏好，不直接写入数据库 mode 约束。",
+        "enum": ["fast", "strict", "auto"],
+        "title": "ResearchQuestionMode",
+        "type": "string"
       },
       "ResearchRunMode": {
         "description": "研究运行使用的受控图模式。",
