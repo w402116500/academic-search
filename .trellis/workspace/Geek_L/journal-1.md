@@ -83,3 +83,24 @@ Verified backend and frontend quality gates, corrected specification drift, and 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 4: RAG 默认快速问答模式收尾
+
+**Date**: 2026-08-07
+**Task**: RAG 默认快速问答模式收尾
+**Branch**: `main`
+
+### Summary
+
+完成并验证 Fast RAG 默认快速问答模式、Strict Research 显式模式、前端模式选择、引用校验与 Research Worker 取消恢复。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `436d665` | (see git log) |
+
+### Status
+
+[OK] **Completed**
