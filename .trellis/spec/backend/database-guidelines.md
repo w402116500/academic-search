@@ -52,6 +52,15 @@ workspace ID and `owner_user_id` before a mutation.
 
 Reference: `backend/app/infra/db/repositories/workspaces.py`.
 
+Protected API routes usually authenticate through `get_current_user` before
+calling a business service. That authentication read can put the request-scoped
+`AsyncSession` into SQLAlchemy autobegin state. Write repositories that open an
+explicit transaction after protected-route reads must either reuse and
+commit/rollback the existing transaction, following
+`SqlAlchemyCollectionBibliographyRepository.upsert_from_candidate()`, or end the
+read transaction before calling `session.begin()`. Do not assume
+`async with self._session.begin()` is safe at every repository method entry.
+
 ## Migrations
 
 Alembic runs against the async `DATABASE_URL`; `backend/alembic/env.py` filters

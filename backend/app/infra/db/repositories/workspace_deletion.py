@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import TypeVar
 from uuid import UUID
 
 from sqlalchemy import delete, select, update
@@ -18,6 +20,8 @@ from app.modules.research.state import ResearchPlanStatus
 from app.modules.research.workspace_deletion import WorkspaceDeletionSnapshot
 from app.modules.search.state import SearchRunStage, SearchRunStatus
 
+_T = TypeVar("_T")
+
 
 class SqlAlchemyWorkspaceDeletionRepository:
     """以 ``deleting`` 状态围栏工作区，并提供可重试的清理快照。"""
@@ -29,42 +33,12 @@ class SqlAlchemyWorkspaceDeletionRepository:
         self, *, owner_user_id: UUID, workspace_id: UUID
     ) -> WorkspaceDeletionSnapshot | None:
         """原子阻断新写入、请求运行停止，并读取本次外部清理清单。"""
-        async with self._session.begin():
-            collection = await self._session.scalar(
-                select(ResearchCollection)
-                .where(
-                    ResearchCollection.id == workspace_id,
-                    ResearchCollection.owner_user_id == owner_user_id,
-                    ResearchCollection.status.in_(("active", "archived", "deleting")),
-                )
-                .with_for_update()
+        return await self._run_write_transaction(
+            lambda: self._begin_deletion(
+                owner_user_id=owner_user_id,
+                workspace_id=workspace_id,
             )
-            if collection is None:
-                return None
-
-            now = datetime.now(UTC)
-            collection.status = "deleting"
-            await self._cancel_background_work(workspace_id=workspace_id, now=now)
-
-            ingestion_run_ids = tuple(
-                await self._session.scalars(
-                    select(IngestionRun.id)
-                    .join(Document, Document.id == IngestionRun.document_id)
-                    .where(Document.collection_id == workspace_id)
-                    .order_by(IngestionRun.id)
-                )
-            )
-            document_object_keys = tuple(
-                await self._session.scalars(
-                    select(Document.object_key)
-                    .where(Document.collection_id == workspace_id)
-                    .order_by(Document.id)
-                )
-            )
-            return WorkspaceDeletionSnapshot(
-                ingestion_run_ids=ingestion_run_ids,
-                document_object_keys=document_object_keys,
-            )
+        )
 
     async def has_running_ingestion(self, *, workspace_id: UUID) -> bool:
         """只有运行中的入库会阻挡根记录删除，排队任务已在开始删除时终态取消。"""
@@ -95,32 +69,87 @@ class SqlAlchemyWorkspaceDeletionRepository:
 
     async def delete_root(self, *, owner_user_id: UUID, workspace_id: UUID) -> bool:
         """按审计外键要求清理私有记录，再删除已经完成外部清理的根记录。"""
-        async with self._session.begin():
-            collection = await self._session.scalar(
-                select(ResearchCollection)
-                .where(
-                    ResearchCollection.id == workspace_id,
-                    ResearchCollection.owner_user_id == owner_user_id,
-                    ResearchCollection.status == "deleting",
-                )
-                .with_for_update()
+        return await self._run_write_transaction(
+            lambda: self._delete_root(
+                owner_user_id=owner_user_id,
+                workspace_id=workspace_id,
             )
-            if collection is None:
-                return False
+        )
 
-            research_run_ids = select(ResearchRun.id).where(
-                ResearchRun.collection_id == workspace_id
+    async def _run_write_transaction(self, operation: Callable[[], Awaitable[_T]]) -> _T:
+        if self._session.in_transaction():
+            try:
+                result = await operation()
+            except Exception:
+                await self._session.rollback()
+                raise
+            await self._session.commit()
+            return result
+
+        async with self._session.begin():
+            return await operation()
+
+    async def _begin_deletion(
+        self, *, owner_user_id: UUID, workspace_id: UUID
+    ) -> WorkspaceDeletionSnapshot | None:
+        collection = await self._session.scalar(
+            select(ResearchCollection)
+            .where(
+                ResearchCollection.id == workspace_id,
+                ResearchCollection.owner_user_id == owner_user_id,
+                ResearchCollection.status.in_(("active", "archived", "deleting")),
             )
-            await self._session.execute(
-                delete(ResearchEvidence).where(
-                    ResearchEvidence.research_run_id.in_(research_run_ids)
-                )
+            .with_for_update()
+        )
+        if collection is None:
+            return None
+
+        now = datetime.now(UTC)
+        collection.status = "deleting"
+        await self._cancel_background_work(workspace_id=workspace_id, now=now)
+
+        ingestion_run_ids = tuple(
+            await self._session.scalars(
+                select(IngestionRun.id)
+                .join(Document, Document.id == IngestionRun.document_id)
+                .where(Document.collection_id == workspace_id)
+                .order_by(IngestionRun.id)
             )
-            await self._session.execute(
-                delete(ResearchRun).where(ResearchRun.collection_id == workspace_id)
+        )
+        document_object_keys = tuple(
+            await self._session.scalars(
+                select(Document.object_key)
+                .where(Document.collection_id == workspace_id)
+                .order_by(Document.id)
             )
-            await self._session.delete(collection)
-            return True
+        )
+        return WorkspaceDeletionSnapshot(
+            ingestion_run_ids=ingestion_run_ids,
+            document_object_keys=document_object_keys,
+        )
+
+    async def _delete_root(self, *, owner_user_id: UUID, workspace_id: UUID) -> bool:
+        collection = await self._session.scalar(
+            select(ResearchCollection)
+            .where(
+                ResearchCollection.id == workspace_id,
+                ResearchCollection.owner_user_id == owner_user_id,
+                ResearchCollection.status == "deleting",
+            )
+            .with_for_update()
+        )
+        if collection is None:
+            return False
+
+        research_run_ids = select(ResearchRun.id).where(ResearchRun.collection_id == workspace_id)
+        await self._session.execute(
+            delete(ResearchEvidence).where(ResearchEvidence.research_run_id.in_(research_run_ids))
+        )
+        await self._session.execute(
+            delete(ResearchRun).where(ResearchRun.collection_id == workspace_id)
+        )
+        await self._session.delete(collection)
+        return True
 
     async def _cancel_background_work(self, *, workspace_id: UUID, now: datetime) -> None:
         """持久化取消事实，不依赖 HTTP 进程或 Redis 队列仍然存活。"""
