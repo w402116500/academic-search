@@ -128,3 +128,24 @@ Verified backend and frontend quality gates, corrected specification drift, and 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 6: 拆分候选审核、研究集合与 RAG 范围
+
+**Date**: 2026-08-08
+**Task**: 拆分候选审核、研究集合与 RAG 范围
+**Branch**: `main`
+
+### Summary
+
+实现候选自动题录/PDF 状态呈现、研究集合书目持久化与 RAG 研究范围分离；完成后端、前端、迁移、OpenAPI 与测试同步。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1e99dea` | (see git log) |
+
+### Status
+
+[OK] **Completed**
