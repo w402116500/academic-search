@@ -90,6 +90,62 @@ final answer's first-use order. It is presentation-only and maps back through
 the answer's Evidence Snapshot.
 _Avoid_: Evidence Ref, chunk ID
 
+**Cited Evidence**:
+An evidence item that has a User Citation Index in the final answer and directly
+supports visible answer prose. It is shown by default in the user-facing
+"引用来源" list and must correspond to a citation in the answer body.
+_Avoid_: Candidate evidence, all retrieved evidence, source-document metadata
+
+**Cited Evidence List**:
+The collapsed-by-default list of Cited Evidence beneath a completed answer. A
+Citation Inspection opens it and focuses the matching evidence item.
+_Avoid_: Permanently expanded source wall, hidden citations, candidate evidence
+list
+
+**Candidate Evidence**:
+An item from the Evidence Snapshot that was retrieved or assessed but has no
+User Citation Index in the final answer. It may be shown separately in an
+advanced Deep Research view, but must not appear in the default
+"引用来源" list.
+_Avoid_: Cited evidence, answer source
+
+**Safe Answer Markdown**:
+The constrained presentation format for an assistant answer. It supports
+headings, paragraphs, emphasis, lists, block quotes, and tables, while raw
+HTML, embedded media, and executable content are not rendered. User Citation
+Indices remain controlled UI elements rather than model-supplied HTML.
+_Avoid_: Raw model HTML, rich-text execution, untrusted v-html
+
+**Research Process Summary**:
+The user-visible account of how one answer was produced. Fast RAG presents
+only the current state and a compact completed audit summary. Deep Research may
+add an expandable stage trace and separately exposed Candidate Evidence.
+_Avoid_: Simulated token streaming, mandatory diagnostic logs, uniform detail
+across modes
+
+**Citation Audit Label**:
+The compact user-visible statement of the verification boundary for one answer.
+Fast RAG may state that its citations were checked; only Deep Research may state
+that both citations and answer claims were verified. Both forms include the
+actual cited-evidence count.
+_Avoid_: Treating citation presence as claim verification, mode-agnostic trust
+badge
+
+**Citation Inspection**:
+The in-place review action triggered by a User Citation Index. It expands the
+Cited Evidence list, scrolls to the matching evidence item, and highlights it
+without navigating away from the answer. Opening a document detail view is a
+separate, deliberate action on the source title.
+_Avoid_: Automatic route navigation, opaque citation tooltip, document-page
+redirect
+
+**Evidence-Insufficient Answer**:
+A response state in which the current collection cannot support a factual
+answer. It makes that boundary explicit, contains no Cited Evidence list, and
+may ask a clarifying question or offer a Deep Research retry. It is not a
+weaker form of a supported answer.
+_Avoid_: Uncited conclusion, generic assistant error, hidden retrieval failure
+
 **Claim Verifier**:
 The independent checker that decides whether each factual claim in a draft
 answer is supported by the provided evidence. It judges support; it does not
@@ -116,3 +172,43 @@ _Avoid_: Final Composer, Claim Verifier, Answer Writer
 The successful publication of an original verified answer when the optional
 Presentation Editor cannot produce another verified form.
 _Avoid_: Research failure, clarification, editor retry
+
+## Workspace Lifecycle
+
+**Permanent Workspace Deletion**:
+An irreversible user action that removes a Research Workspace and its
+workspace-owned research material to reclaim storage. It has no archive or
+recovery period.
+_Avoid_: Archive, hide, soft delete
+
+**Deletion-Pending Workspace**:
+A Research Workspace whose permanent deletion has started but whose private
+resources have not all been removed. It remains visible but cannot accept
+research work; the same deletion action may continue its cleanup. It is not
+an active or archived workspace, and it is not yet deleted.
+_Avoid_: Deleted workspace, temporarily archived workspace, active workspace
+
+**Deletion Completion Barrier**:
+The condition that every active workspace operation has been cancelled and
+reached a terminal state before permanent workspace deletion completes.
+_Avoid_: Force deletion, orphaned work
+
+**Research Run Input Reference**:
+An input message identifies the prompt that initiated a Research Run. Outside
+of permanent workspace deletion, that reference and each evidence-to-chunk
+reference protect the audit trail from accidental physical deletion. Permanent
+workspace deletion explicitly removes the workspace's evidence and runs as one
+private data set before removing the workspace root.
+_Avoid_: Implicit cascade of ordinary audit data, cross-workspace run history
+
+**Research Scope Document Detail**:
+The metadata view for a document in the current research scope, available
+without leaving evidence research. It includes bibliographic facts, citation,
+source link, and ingestion state, but is not an in-app full-text reader.
+_Avoid_: Candidate review, PDF reader, evidence-chunk viewer
+
+**Irreversible Deletion Confirmation**:
+The explicit second confirmation for permanent workspace deletion. It names
+the workspace and warns that associated storage cannot be recovered, without
+requiring manual name re-entry.
+_Avoid_: Silent deletion, name re-entry
