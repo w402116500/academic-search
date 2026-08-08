@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/candidate-relevance-execution.md", "reason": "候选审核快照、批量受限重试与状态合并的所有者契约。"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "集合书目条目、Document 关联与 Alembic migration 的持久化边界。"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "候选 Redis 会话、持久化集合状态和 RAG 范围的前端事实边界。"}
