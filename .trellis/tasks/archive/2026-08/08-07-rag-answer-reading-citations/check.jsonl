@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"前端包约束、命令与质量入口。"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"审查交互语义、无障碍和特性组件边界。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"审查生成 DTO 和严格 TypeScript 边界。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"审查所需的 format、lint、类型与浏览器验证。"}

@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/index.md","reason":"前端包约束、命令与质量入口。"}
+{"file":".trellis/spec/frontend/component-guidelines.md","reason":"Vue 组件拆分、可访问性和样式约束。"}
+{"file":".trellis/spec/frontend/state-management.md","reason":"页面本地状态与服务端状态边界。"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"TypeScript 与 OpenAPI DTO 使用规则。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"格式、静态检查、单元与浏览器验收要求。"}
