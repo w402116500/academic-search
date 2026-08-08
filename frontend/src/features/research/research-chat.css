@@ -76,7 +76,15 @@
   border-radius: 6px;
   background: #1d2a40;
   color: #dce6f7;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
   text-decoration: none;
+}
+
+.research-chat-collection-link:hover {
+  border-color: #5a75aa;
+  background: #23334d;
 }
 
 .research-chat-collection-link > span {
@@ -393,101 +401,6 @@
   white-space: pre-wrap;
 }
 
-.research-chat-evidence-details {
-  margin-top: 15px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-}
-
-.research-chat-evidence-details summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 11px 12px;
-  color: var(--ink-soft);
-  cursor: pointer;
-  font-size: 12px;
-  list-style: none;
-}
-
-.research-chat-evidence-details summary::-webkit-details-marker {
-  display: none;
-}
-
-.research-chat-evidence-details summary > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--ink);
-  font-weight: 600;
-}
-
-.research-chat-evidence-details summary small {
-  color: var(--muted);
-}
-
-.research-chat-evidence-list {
-  display: grid;
-  gap: 14px;
-  margin: 0;
-  padding: 4px 13px 14px;
-  border-top: 1px solid var(--line);
-  list-style: none;
-}
-
-.research-chat-evidence-list li {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
-  gap: 9px;
-}
-
-.research-chat-evidence-index {
-  display: grid;
-  place-items: center;
-  width: 21px;
-  height: 21px;
-  margin-top: 1px;
-  border-radius: 50%;
-  background: var(--blue-soft);
-  color: var(--blue-dark);
-  font-family: var(--mono);
-  font-size: 10px;
-}
-
-.research-chat-evidence-list strong,
-.research-chat-evidence-list a,
-.research-chat-evidence-list span,
-.research-chat-evidence-list small {
-  display: block;
-}
-
-.research-chat-evidence-list strong {
-  color: var(--ink);
-  font-size: 12px;
-}
-
-.research-chat-evidence-list a,
-.research-chat-evidence-list span {
-  margin-top: 3px;
-  color: var(--blue-dark);
-  font-size: 11px;
-}
-
-.research-chat-evidence-list p {
-  margin: 7px 0 5px;
-  color: var(--ink-soft);
-  font-size: 12px;
-  font-style: italic;
-  line-height: 1.65;
-}
-
-.research-chat-evidence-list small {
-  color: var(--muted);
-  font-size: 10px;
-}
-
 .research-chat-run-status {
   display: flex;
   align-items: flex-start;
@@ -515,7 +428,8 @@
 }
 
 .research-chat-run-status.run-failed .research-chat-assistant-avatar,
-.research-chat-run-status.run-cancelled .research-chat-assistant-avatar {
+.research-chat-run-status.run-cancelled .research-chat-assistant-avatar,
+.research-chat-run-status.run-awaiting_clarification .research-chat-assistant-avatar {
   border-color: #efc0ca;
   background: #fff0f2;
   color: var(--red);
@@ -963,6 +877,10 @@
   }
 
   .research-chat-header p span:last-child {
+    display: none;
+  }
+
+  .research-chat-header-collection {
     display: none;
   }
 

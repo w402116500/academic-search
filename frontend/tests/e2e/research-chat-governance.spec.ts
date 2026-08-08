@@ -6,6 +6,7 @@ const workspaceId = "11111111-1111-4111-8111-111111111111";
 const conversationId = "22222222-2222-4222-8222-222222222222";
 const runId = "33333333-3333-4333-8333-333333333333";
 const userMessageId = "44444444-4444-4444-8444-444444444444";
+const assistantMessageId = "44444444-4444-4444-8444-444444444445";
 
 const user = {
   id: "55555555-5555-4555-8555-555555555555",
@@ -33,6 +34,45 @@ const conversation = {
   updated_at: "2026-08-03T00:00:00Z",
   message_count: 1,
 };
+
+const scopeDocuments = [
+  {
+    document_id: "66666666-6666-4666-8666-666666666661",
+    paper_id: "66666666-6666-4666-8666-666666666671",
+    doi: "10.1000/scope-one",
+    title: "范围内的第一篇文献",
+    authors: [{ given: "Ming", family: "Li" }],
+    publication_year: 2024,
+    venue: "研究方法学报",
+    citation_text: "Li M. 范围内的第一篇文献[J]. 研究方法学报, 2024.",
+    tags: [],
+    note: null,
+    original_filename: "scope-one.pdf",
+    byte_size: 2048,
+    source_url: "https://example.test/scope-one",
+    access_rights: "open",
+    added_at: "2026-08-03T00:00:00Z",
+    latest_ingestion_run: null,
+  },
+  {
+    document_id: "66666666-6666-4666-8666-666666666662",
+    paper_id: "66666666-6666-4666-8666-666666666672",
+    doi: "10.1000/scope-two",
+    title: "范围内的第二篇文献",
+    authors: [{ literal: "证据研究团队" }],
+    publication_year: 2025,
+    venue: "证据研究",
+    citation_text: "证据研究团队. 范围内的第二篇文献[J]. 证据研究, 2025.",
+    tags: ["比较"],
+    note: "用于核对第二组证据。",
+    original_filename: "scope-two.pdf",
+    byte_size: 4096,
+    source_url: null,
+    access_rights: "restricted",
+    added_at: "2026-08-03T00:00:00Z",
+    latest_ingestion_run: null,
+  },
+];
 
 function runningRun(cancelRequested = false): ResearchRun {
   return {
@@ -63,7 +103,109 @@ function runningRun(cancelRequested = false): ResearchRun {
   };
 }
 
-async function openResearchChat(page: Page): Promise<{ cancelRequests: () => number }> {
+function completedRun(executionMode: "fast_rag" | "strict_research"): ResearchRun {
+  return {
+    ...runningRun(),
+    output_message_id: assistantMessageId,
+    mode: executionMode === "fast_rag" ? "single_rag" : "multi_agent",
+    status: "completed",
+    stage: "completed",
+    stage_display: { label: "回答已完成", description: "回答与证据已保存。" },
+    finished_at: "2026-08-03T00:00:05Z",
+    retrieval_trace: {
+      execution_mode: executionMode,
+      citation_checked: true,
+      claim_verified: executionMode === "strict_research",
+      timing: { total_duration_ms: 1200 },
+    },
+    evidences: [
+      {
+        id: "77777777-7777-4777-8777-777777777771",
+        paper_id: scopeDocuments[0].paper_id,
+        title: scopeDocuments[0].title,
+        authors: [{ name: "Ming Li" }],
+        publication_year: 2024,
+        source_url: null,
+        citation_excerpt: "第一篇文献中的可引用原文片段。",
+        locator_snapshot: { page_start: 4, section_path: ["结果"] },
+        is_cited: true,
+        display_index: 1,
+      },
+      {
+        id: "77777777-7777-4777-8777-777777777772",
+        paper_id: scopeDocuments[1].paper_id,
+        title: scopeDocuments[1].title,
+        authors: [{ name: "证据研究团队" }],
+        publication_year: 2025,
+        source_url: null,
+        citation_excerpt: "第二篇文献中的候选原文片段。",
+        locator_snapshot: { page_start: 8, section_path: ["讨论"] },
+        is_cited: false,
+        display_index: null,
+      },
+    ],
+  } as unknown as ResearchRun;
+}
+
+function completedChat(executionMode: "fast_rag" | "strict_research") {
+  return {
+    messages: [
+      {
+        id: userMessageId,
+        conversation_id: conversationId,
+        role: "user",
+        content: "请比较当前集合中的两组证据。",
+        status: "completed",
+        metadata: {},
+        created_at: "2026-08-03T00:00:00Z",
+        research_run_id: runId,
+      },
+      {
+        id: assistantMessageId,
+        conversation_id: conversationId,
+        role: "assistant",
+        content: "## 可核查结论\n\n当前证据支持这一结论 [1]。",
+        status: "completed",
+        metadata: {},
+        created_at: "2026-08-03T00:00:05Z",
+        research_run_id: runId,
+      },
+    ],
+    runs: [completedRun(executionMode)],
+  };
+}
+
+function evidenceInsufficientChat() {
+  const run = {
+    ...runningRun(),
+    status: "awaiting_clarification",
+    stage: "completed",
+    stage_display: { label: "需要补充信息", description: "当前集合缺少可引用证据。" },
+    finished_at: "2026-08-03T00:00:05Z",
+    evidences: [],
+  } as ResearchRun;
+  return {
+    messages: [
+      {
+        id: userMessageId,
+        conversation_id: conversationId,
+        role: "user",
+        content: "请比较当前集合中的两组证据。",
+        status: "completed",
+        metadata: {},
+        created_at: "2026-08-03T00:00:00Z",
+        research_run_id: runId,
+      },
+    ],
+    runs: [run],
+  };
+}
+
+async function openResearchChat(
+  page: Page,
+  documents: typeof scopeDocuments = [],
+  chat?: { messages: object[]; runs: ResearchRun[] },
+): Promise<{ cancelRequests: () => number }> {
   let cancellationRequested = false;
   let cancelRequestCount = 0;
   await page.addInitScript(() =>
@@ -80,7 +222,7 @@ async function openResearchChat(page: Page): Promise<{ cancelRequests: () => num
       return route.fulfill({
         json: {
           collection_id: workspaceId,
-          documents: [],
+          documents,
           summary: {
             active_document_count: 1,
             researchable_document_count: 1,
@@ -96,7 +238,7 @@ async function openResearchChat(page: Page): Promise<{ cancelRequests: () => num
       return route.fulfill({
         json: {
           conversation,
-          messages: [
+          messages: chat?.messages ?? [
             {
               id: userMessageId,
               conversation_id: conversationId,
@@ -108,7 +250,7 @@ async function openResearchChat(page: Page): Promise<{ cancelRequests: () => num
               research_run_id: runId,
             },
           ],
-          runs: [runningRun(cancellationRequested)],
+          runs: chat?.runs ?? [runningRun(cancellationRequested)],
         },
       });
     }
@@ -141,4 +283,69 @@ test("研究会话显示治理摘要，并将运行中取消转为协作停止�
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "请求停止" })).toHaveCount(0);
   expect(api.cancelRequests()).toBe(1);
+});
+
+test("研究范围在当前会话内展示文献详情", async ({ page }) => {
+  await openResearchChat(page, scopeDocuments);
+
+  await page.getByRole("button", { name: "打开研究范围" }).click();
+  const drawer = page.getByRole("dialog", { name: "研究范围文献" });
+  await expect(drawer).toBeVisible();
+  await expect(drawer).toContainText("范围内的第一篇文献");
+
+  await drawer.getByRole("button", { name: /范围内的第二篇文献/ }).click();
+  await expect(drawer).toContainText("证据研究团队. 范围内的第二篇文献[J]. 证据研究, 2025.");
+  await expect(drawer).toContainText("用于核对第二组证据。");
+
+  await drawer.getByRole("button", { name: "关闭研究范围", exact: true }).click();
+  await expect(drawer).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: conversation.title })).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "打开研究范围" }).click();
+  await drawer.getByRole("button", { name: /范围内的第二篇文献/ }).click();
+  await expect(drawer.getByRole("button", { name: "返回文献列表" })).toBeVisible();
+  await drawer.getByRole("button", { name: "返回文献列表" }).click();
+  await expect(drawer.getByRole("button", { name: /范围内的第二篇文献/ })).toBeVisible();
+});
+
+test("快速回答只展示实际引用，并可原地检查和打开文献详情", async ({ page }) => {
+  await openResearchChat(page, scopeDocuments, completedChat("fast_rag"));
+
+  await expect(page.getByRole("heading", { name: "可核查结论" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "查看引用 1" })).toBeVisible();
+  await expect(page.getByText("候选证据", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("1 条引用已检查", { exact: true })).toBeVisible();
+
+  const sourceDetails = page.locator(".research-chat-evidence-details").first();
+  await expect(sourceDetails).not.toHaveAttribute("open", "");
+  await page.getByRole("button", { name: "查看引用 1" }).click();
+  await expect(sourceDetails).toHaveAttribute("open", "");
+
+  const evidence = page.locator(
+    "#research-evidence-33333333-3333-4333-8333-333333333333-77777777-7777-4777-8777-777777777771",
+  );
+  await expect(evidence).toHaveClass(/is-highlighted/);
+  await expect(evidence).toBeFocused();
+  await evidence.getByRole("button", { name: "范围内的第一篇文献" }).click();
+  const drawer = page.getByRole("dialog", { name: "研究范围文献" });
+  await expect(drawer.getByRole("heading", { name: "范围内的第一篇文献" })).toBeVisible();
+});
+
+test("深度研究隔离候选证据", async ({ page }) => {
+  await openResearchChat(page, scopeDocuments, completedChat("strict_research"));
+
+  await expect(page.getByText("1 条引用与主张已核验", { exact: true })).toBeVisible();
+  await expect(page.getByText("候选证据", { exact: true })).toBeVisible();
+});
+
+test("证据不足引导切换模式", async ({ page }) => {
+  await openResearchChat(page, scopeDocuments, evidenceInsufficientChat());
+  await expect(page.getByText("当前集合的证据不足", { exact: true })).toBeVisible();
+  await expect(page.getByText("引用来源", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "切换为深度研究" }).click();
+  await expect(page.getByRole("radio", { name: "深度研究" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
 });

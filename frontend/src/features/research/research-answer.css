@@ -1,0 +1,341 @@
+.research-answer-markdown {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.85;
+}
+
+.research-answer-markdown > :first-child {
+  margin-top: 0;
+}
+
+.research-answer-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.research-answer-markdown h1,
+.research-answer-markdown h2,
+.research-answer-markdown h3,
+.research-answer-markdown h4,
+.research-answer-markdown h5,
+.research-answer-markdown h6 {
+  margin: 23px 0 9px;
+  color: var(--ink);
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.research-answer-markdown h1 {
+  font-size: 19px;
+}
+
+.research-answer-markdown h2 {
+  font-size: 17px;
+}
+
+.research-answer-markdown h3,
+.research-answer-markdown h4,
+.research-answer-markdown h5,
+.research-answer-markdown h6 {
+  font-size: 15px;
+}
+
+.research-answer-markdown p {
+  margin: 0 0 12px;
+  white-space: pre-wrap;
+}
+
+.research-answer-markdown ul,
+.research-answer-markdown ol {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 13px;
+  padding-left: 23px;
+}
+
+.research-answer-markdown blockquote {
+  margin: 14px 0;
+  padding: 6px 0 6px 13px;
+  border-left: 3px solid #a8c4ed;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+}
+
+.research-answer-markdown code {
+  padding: 1px 4px;
+  border: 1px solid #d9e3f1;
+  border-radius: 3px;
+  background: #f4f7fb;
+  color: #23466d;
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+.research-answer-table-wrap {
+  max-width: 100%;
+  margin: 14px 0;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.research-answer-table-wrap table {
+  width: 100%;
+  min-width: 440px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.research-answer-table-wrap th,
+.research-answer-table-wrap td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.research-answer-table-wrap th {
+  background: #f4f7fb;
+  color: var(--ink-soft);
+  font-weight: 650;
+}
+
+.research-answer-table-wrap tr:last-child td {
+  border-bottom: 0;
+}
+
+.research-answer-citation {
+  margin: 0 1px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--blue-dark);
+  cursor: pointer;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 0.9em;
+  font-weight: 650;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.research-answer-citation:hover,
+.research-answer-citation:focus-visible {
+  color: var(--blue);
+  outline: 0;
+}
+
+.research-answer-insufficient {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 13px;
+  border-left: 3px solid #d99c36;
+  background: #fff8e8;
+  color: #76501b;
+}
+
+.research-answer-insufficient strong,
+.research-answer-insufficient p {
+  display: block;
+}
+
+.research-answer-insufficient strong {
+  font-size: 13px;
+}
+
+.research-answer-insufficient p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.research-run-audit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 9px;
+  margin-top: 11px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.research-run-audit-mode,
+.research-run-audit-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.research-run-audit-mode {
+  color: var(--blue-dark);
+  font-weight: 600;
+}
+
+.research-run-audit-check {
+  color: var(--cyan);
+}
+
+.research-run-audit > small {
+  flex-basis: 100%;
+  color: var(--muted);
+}
+
+.research-run-stage-details {
+  flex-basis: 100%;
+  margin-top: 3px;
+  color: var(--ink-soft);
+}
+
+.research-run-stage-details summary {
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.research-run-stage-details ol {
+  display: grid;
+  gap: 4px;
+  margin: 7px 0 0;
+  padding-left: 18px;
+}
+
+.research-chat-evidence-details {
+  margin-top: 15px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.research-chat-evidence-details summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+
+.research-chat-evidence-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.research-chat-evidence-details summary > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.research-chat-evidence-details summary small {
+  color: var(--muted);
+}
+
+.research-chat-evidence-list {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 4px 13px 14px;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+
+.research-chat-evidence-list li {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 9px;
+  padding: 6px;
+  border-radius: 6px;
+  outline: 0;
+  transition:
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.research-chat-evidence-list li.is-highlighted {
+  background: #edf4ff;
+  box-shadow: inset 0 0 0 1px #9cbbf3;
+}
+
+.research-chat-evidence-index {
+  display: grid;
+  place-items: center;
+  width: 21px;
+  height: 21px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--blue-soft);
+  color: var(--blue-dark);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.research-chat-evidence-title,
+.research-chat-evidence-meta,
+.research-chat-evidence-list small {
+  display: block;
+}
+
+.research-chat-evidence-title {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+  text-align: left;
+}
+
+.research-chat-evidence-title:hover,
+.research-chat-evidence-title:focus-visible {
+  color: var(--blue-dark);
+  outline: 0;
+  text-decoration: underline;
+}
+
+.research-chat-evidence-meta {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.research-chat-evidence-list p {
+  margin: 7px 0 5px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-style: italic;
+  line-height: 1.65;
+}
+
+.research-chat-evidence-list small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.research-chat-evidence-notice {
+  display: block;
+  margin-top: 6px;
+  color: #9b5d16;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.research-chat-candidates-details {
+  border-color: #d5e0ee;
+  background: #f9fbfd;
+}
+
+.research-chat-candidates-details .research-chat-evidence-index {
+  border-radius: 6px;
+  background: #e9f0f6;
+  color: #46627c;
+}

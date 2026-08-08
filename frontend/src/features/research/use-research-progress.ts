@@ -20,11 +20,12 @@ export function useResearchProgress(
 ) {
   const activeRun = ref<ResearchRun | null>(null);
   const progressEvent = ref<ResearchProgressEvent | null>(null);
+  const progressHistoryByRun = ref<Record<string, ResearchProgressEvent[]>>({});
   const eventController = ref<AbortController | null>(null);
   const streamedRunId = ref<string | null>(null);
   let reconnectTimer: number | null = null;
 
-  function stop(): void {
+  function stop(clearHistory = true): void {
     eventController.value?.abort();
     eventController.value = null;
     streamedRunId.value = null;
@@ -32,6 +33,18 @@ export function useResearchProgress(
       window.clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+    if (clearHistory) progressHistoryByRun.value = {};
+  }
+
+  function clearProgressHistory(runId: string): void {
+    progressHistoryByRun.value = { ...progressHistoryByRun.value, [runId]: [] };
+  }
+
+  function recordProgress(runId: string, event: ResearchProgressEvent): void {
+    const history = progressHistoryByRun.value[runId] ?? [];
+    const latest = history.at(-1);
+    if (latest?.stage === event.stage && latest.status === event.status) return;
+    progressHistoryByRun.value = { ...progressHistoryByRun.value, [runId]: [...history, event] };
   }
 
   function reset(): void {
@@ -50,7 +63,7 @@ export function useResearchProgress(
 
   async function streamRun(run: ResearchRun): Promise<void> {
     if (isResearchRunTerminal(run.status) || streamedRunId.value === run.id) return;
-    stop();
+    stop(false);
 
     const controller = new AbortController();
     eventController.value = controller;
@@ -83,6 +96,7 @@ export function useResearchProgress(
           try {
             const event = JSON.parse(dataLine.slice(5).trim()) as ResearchProgressEvent;
             progressEvent.value = event;
+            recordProgress(run.id, event);
             activeRun.value = {
               ...run,
               ...activeRun.value,
@@ -118,5 +132,13 @@ export function useResearchProgress(
 
   onScopeDispose(stop);
 
-  return { activeRun, progressEvent, streamRun, stop, reset };
+  return {
+    activeRun,
+    progressEvent,
+    progressHistoryByRun,
+    streamRun,
+    stop,
+    reset,
+    clearProgressHistory,
+  };
 }

@@ -18,7 +18,10 @@ import {
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { useResearchQueries } from "@/api/hooks/research";
-import type { ResearchQuestionMode } from "@/api/types";
+import type { ResearchEvidence, ResearchQuestionMode, ResearchRun } from "@/api/types";
+import ResearchAnswerMarkdown from "@/features/research/ResearchAnswerMarkdown.vue";
+import ResearchEvidencePanel from "@/features/research/ResearchEvidencePanel.vue";
+import ResearchRunAudit from "@/features/research/ResearchRunAudit.vue";
 import ResearchScopeDrawer from "@/features/research/ResearchScopeDrawer.vue";
 import {
   isResearchRunTerminal,
@@ -27,12 +30,12 @@ import {
 import ConversationSidebar from "@/features/research/ConversationSidebar.vue";
 import {
   cancellationRequested,
-  citationAuditLabel,
+  citedEvidenceIndexes,
+  citedEvidences,
   conversationTitle,
-  evidenceAuthors,
-  evidenceLocation,
+  evidenceElementId,
   governanceSummary,
-  researchExecutionModeLabel,
+  isEvidenceInsufficientRun,
   rerankerDisabled,
   researchRunForOutputMessage,
 } from "@/features/research/research-chat-presentation";
@@ -53,6 +56,10 @@ const mobileSidebarOpen = ref(false);
 const deleteConfirmId = ref<string | null>(null);
 const researchScopeOpen = ref(false);
 const selectedScopeDocumentId = ref<string | null>(null);
+const sourceOpenByMessageId = ref<Record<string, boolean>>({});
+const highlightedEvidence = ref<{ runId: string; evidenceId: string } | null>(null);
+const unavailableDocumentEvidenceId = ref<string | null>(null);
+const questionInput = ref<HTMLTextAreaElement | null>(null);
 const researchQueries = useResearchQueries(workspaceId, selectedConversationId);
 const {
   workspaceQuery,
@@ -74,7 +81,8 @@ const researchProgress = useResearchProgress(workspaceId, selectedConversationId
     if (message) operationError.value = message;
   },
 });
-const { activeRun, progressEvent, streamRun } = researchProgress;
+const { activeRun, progressEvent, progressHistoryByRun, streamRun, clearProgressHistory } =
+  researchProgress;
 
 const readyCount = computed(
   () => documentsQuery.data.value?.summary.researchable_document_count ?? 0,
@@ -109,6 +117,60 @@ function runForOutputMessage(messageId: string) {
   return researchRunForOutputMessage(conversationDetail.value?.runs ?? [], messageId);
 }
 
+function sourcesOpen(messageId: string): boolean {
+  return sourceOpenByMessageId.value[messageId] ?? false;
+}
+
+function setSourcesOpen(messageId: string, open: boolean): void {
+  sourceOpenByMessageId.value = { ...sourceOpenByMessageId.value, [messageId]: open };
+}
+
+function isEvidenceHighlighted(run: ResearchRun, evidenceId: string): boolean {
+  return (
+    highlightedEvidence.value?.runId === run.id &&
+    highlightedEvidence.value.evidenceId === evidenceId
+  );
+}
+
+async function inspectCitation(messageId: string, citationIndex: number): Promise<void> {
+  const run = runForOutputMessage(messageId);
+  const evidence = citedEvidences(run).find((item) => item.display_index === citationIndex);
+  if (!run || !evidence) return;
+
+  unavailableDocumentEvidenceId.value = null;
+  setSourcesOpen(messageId, true);
+  highlightedEvidence.value = { runId: run.id, evidenceId: evidence.id };
+  await nextTick();
+
+  const target = document.getElementById(evidenceElementId(run.id, evidence.id));
+  if (!(target instanceof HTMLElement)) return;
+  target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  target.focus({ preventScroll: true });
+}
+
+function openEvidenceDocument(evidence: ResearchEvidence): void {
+  const document = (documentsQuery.data.value?.documents ?? []).find(
+    (item) => item.paper_id === evidence.paper_id,
+  );
+  if (!document) {
+    unavailableDocumentEvidenceId.value = evidence.id;
+    return;
+  }
+  unavailableDocumentEvidenceId.value = null;
+  selectedScopeDocumentId.value = document.document_id;
+  researchScopeOpen.value = true;
+}
+
+function prepareDeepResearchRetry(run: ResearchRun): void {
+  const originalQuestion = conversationDetail.value?.messages.find(
+    (message) => message.id === run.input_message_id,
+  )?.content;
+  if (originalQuestion) question.value = originalQuestion;
+  questionMode.value = "strict";
+  operationError.value = null;
+  void nextTick(() => questionInput.value?.focus());
+}
+
 async function refreshConversation(): Promise<void> {
   await refreshResearchQueries();
   if (activeRun.value && isTerminal(activeRun.value.status)) activeRun.value = null;
@@ -119,6 +181,10 @@ async function chooseConversation(conversationId: string): Promise<void> {
   researchProgress.reset();
   selectedConversationId.value = conversationId;
   mobileSidebarOpen.value = false;
+  sourceOpenByMessageId.value = {};
+  highlightedEvidence.value = null;
+  unavailableDocumentEvidenceId.value = null;
+  selectedScopeDocumentId.value = null;
   await router.replace({ query: { conversation: conversationId } });
 }
 
@@ -154,6 +220,7 @@ async function handleSubmit(): Promise<void> {
     question.value = "";
     activeRun.value = result.research_run;
     progressEvent.value = null;
+    clearProgressHistory(result.research_run.id);
     await refreshConversation();
     await streamRun(result.research_run);
   } catch (error) {
@@ -179,6 +246,7 @@ async function retryCurrentRun(): Promise<void> {
     });
     activeRun.value = retried;
     progressEvent.value = null;
+    clearProgressHistory(retried.id);
     await refreshConversation();
     await streamRun(retried);
   } catch (error) {
@@ -255,6 +323,10 @@ watch(
   },
   { deep: true },
 );
+
+watch(researchScopeOpen, (open) => {
+  if (!open) selectedScopeDocumentId.value = null;
+});
 </script>
 
 <template>
@@ -413,74 +485,64 @@ watch(
                   <span
                     v-if="
                       message.role === 'assistant' &&
-                      citationAuditLabel(runForOutputMessage(message.id))
-                    "
-                    ><ShieldCheck :size="13" />{{
-                      citationAuditLabel(runForOutputMessage(message.id))
-                    }}</span
-                  >
-                  <span
-                    v-if="
-                      message.role === 'assistant' &&
-                      researchExecutionModeLabel(runForOutputMessage(message.id))
-                    "
-                    >{{ researchExecutionModeLabel(runForOutputMessage(message.id)) }}</span
-                  >
-                  <span
-                    v-if="
-                      message.role === 'assistant' &&
                       rerankerDisabled(runForOutputMessage(message.id))
                     "
                     >未启用模型重排</span
                   >
-                  <small
-                    v-if="
-                      message.role === 'assistant' &&
-                      governanceSummary(runForOutputMessage(message.id))
-                    "
-                    >{{ governanceSummary(runForOutputMessage(message.id)) }}</small
-                  >
                   <span v-if="message.status !== 'completed'">处理中</span>
                 </div>
-                <p class="research-chat-message-body">{{ message.content }}</p>
-                <details
-                  v-if="runForOutputMessage(message.id)?.evidences?.length"
-                  class="research-chat-evidence-details"
+                <section
+                  v-if="
+                    message.role === 'assistant' &&
+                    isEvidenceInsufficientRun(runForOutputMessage(message.id))
+                  "
+                  class="research-answer-insufficient"
+                  role="status"
                 >
-                  <summary>
-                    <span><BookOpenCheck :size="16" />引用来源</span
-                    ><small
-                      >{{ runForOutputMessage(message.id)?.evidences?.length }} 个证据片段</small
-                    >
-                  </summary>
-                  <ol class="research-chat-evidence-list">
-                    <li
-                      v-for="(evidence, index) in runForOutputMessage(message.id)?.evidences ?? []"
-                      :key="evidence.id"
-                    >
-                      <span class="research-chat-evidence-index">{{
-                        evidence.display_index ?? index + 1
-                      }}</span>
-                      <div>
-                        <strong>{{ evidence.title }}</strong>
-                        <a
-                          v-if="evidence.source_url"
-                          :href="evidence.source_url"
-                          target="_blank"
-                          rel="noreferrer"
-                          >{{ evidenceAuthors(evidence) }} ·
-                          {{ evidence.publication_year ?? "年份待补全" }}</a
-                        >
-                        <span v-else
-                          >{{ evidenceAuthors(evidence) }} ·
-                          {{ evidence.publication_year ?? "年份待补全" }}</span
-                        >
-                        <p>{{ evidence.citation_excerpt ?? "该证据未返回可展示摘录。" }}</p>
-                        <small>{{ evidenceLocation(evidence) }}</small>
-                      </div>
-                    </li>
-                  </ol>
-                </details>
+                  <CircleAlert :size="17" />
+                  <div>
+                    <strong>当前集合的证据不足</strong>
+                    <p>这次问题无法由已保存的原文片段可靠支持，请补充研究范围或改用深度研究。</p>
+                  </div>
+                </section>
+                <ResearchAnswerMarkdown
+                  v-else-if="message.role === 'assistant'"
+                  :content="message.content"
+                  :citation-indexes="citedEvidenceIndexes(runForOutputMessage(message.id))"
+                  @inspect-citation="inspectCitation(message.id, $event)"
+                />
+                <p v-else class="research-chat-message-body">{{ message.content }}</p>
+                <ResearchRunAudit
+                  v-if="
+                    message.role === 'assistant' &&
+                    runForOutputMessage(message.id) &&
+                    !isEvidenceInsufficientRun(runForOutputMessage(message.id))
+                  "
+                  :run="runForOutputMessage(message.id)!"
+                  :progress-history="
+                    progressHistoryByRun[runForOutputMessage(message.id)!.id] ?? []
+                  "
+                />
+                <ResearchEvidencePanel
+                  v-if="
+                    message.role === 'assistant' &&
+                    runForOutputMessage(message.id) &&
+                    !isEvidenceInsufficientRun(runForOutputMessage(message.id))
+                  "
+                  :run="runForOutputMessage(message.id)!"
+                  :sources-open="sourcesOpen(message.id)"
+                  :highlighted-evidence-id="
+                    isEvidenceHighlighted(
+                      runForOutputMessage(message.id)!,
+                      highlightedEvidence?.evidenceId ?? '',
+                    )
+                      ? highlightedEvidence?.evidenceId
+                      : null
+                  "
+                  :unavailable-document-evidence-id="unavailableDocumentEvidenceId"
+                  @update:sources-open="setSourcesOpen(message.id, $event)"
+                  @open-document="openEvidenceDocument"
+                />
               </div>
             </article>
 
@@ -497,15 +559,19 @@ watch(
               /></span>
               <div>
                 <strong>{{
-                  cancellationRequested(pendingRun)
-                    ? "已请求停止，正在等待当前调用返回。"
-                    : (progressEvent?.message ?? pendingRun.stage_display.label)
+                  isEvidenceInsufficientRun(pendingRun)
+                    ? "当前集合的证据不足"
+                    : cancellationRequested(pendingRun)
+                      ? "已请求停止，正在等待当前调用返回。"
+                      : (progressEvent?.message ?? pendingRun.stage_display.label)
                 }}</strong>
                 <p>
                   {{
-                    cancellationRequested(pendingRun)
-                      ? "任务会在当前模型或检索调用结束后的安全边界停止，不会生成回答或新的引用证据。"
-                      : (pendingRun.error_message ?? pendingRun.stage_display.description)
+                    isEvidenceInsufficientRun(pendingRun)
+                      ? "这次问题没有得到可引用的原文支持。可补充研究范围，或将原问题带入深度研究继续探索。"
+                      : cancellationRequested(pendingRun)
+                        ? "任务会在当前模型或检索调用结束后的安全边界停止，不会生成回答或新的引用证据。"
+                        : (pendingRun.error_message ?? pendingRun.stage_display.description)
                   }}
                 </p>
                 <small v-if="governanceSummary(pendingRun)">{{
@@ -522,6 +588,18 @@ watch(
                     @click="retryCurrentRun"
                   >
                     <RotateCcw :size="15" />重新投递
+                  </button>
+                </div>
+                <div
+                  v-else-if="isEvidenceInsufficientRun(pendingRun)"
+                  class="research-chat-run-actions"
+                >
+                  <button
+                    class="secondary-button"
+                    type="button"
+                    @click="prepareDeepResearchRetry(pendingRun)"
+                  >
+                    <ShieldCheck :size="15" />切换为深度研究
                   </button>
                 </div>
                 <div
@@ -586,6 +664,7 @@ watch(
         </div>
         <form class="research-chat-composer" @submit.prevent="handleSubmit">
           <textarea
+            ref="questionInput"
             v-model="question"
             rows="1"
             :disabled="composerDisabled"
