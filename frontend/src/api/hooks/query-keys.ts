@@ -3,6 +3,7 @@ export const queryKeys = {
     current: () => ["auth", "current"] as const,
   },
   workspace: {
+    listRoot: () => ["workspaces"] as const,
     detail: (workspaceId: string) => ["workspace", workspaceId] as const,
     list: () => ["workspaces", "sidebar"] as const,
     search: (query: string) => ["workspaces", query] as const,

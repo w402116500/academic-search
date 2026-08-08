@@ -28,11 +28,13 @@ ignore_imports =
     app.api.deps.services -> app.infra.db.repositories.literature_admission
     app.api.deps.services -> app.infra.db.repositories.collection_builds
     app.api.deps.services -> app.infra.db.repositories.research_conversations
+    app.api.deps.services -> app.infra.db.repositories.workspace_deletion
     app.api.deps.services -> app.infra.redis.connection
     app.api.deps.services -> app.infra.redis.job_queues
     app.api.deps.services -> app.infra.redis.research_events
     app.api.deps.services -> app.infra.redis.search_session
     app.api.deps.services -> app.infra.storage.documents
+    app.api.deps.services -> app.infra.milvus.document_chunks
 
 [importlinter:contract:literature-does-not-import-candidate-workflows]
 name = Literature does not import Search or Documents workflows

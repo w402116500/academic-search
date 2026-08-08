@@ -12,6 +12,9 @@ import type {
 export const getWorkspace = (workspaceId: string): Promise<Workspace> =>
   apiFetch<Workspace>(`/api/v1/collections/${workspaceId}`);
 
+export const deleteWorkspace = (workspaceId: string): Promise<void> =>
+  apiFetch<void>(`/api/v1/collections/${workspaceId}`, { method: "DELETE" });
+
 export const listWorkspaces = (
   query = "",
   cursor?: string | null,

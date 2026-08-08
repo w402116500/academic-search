@@ -37,6 +37,7 @@ class FakeWorkspaceRepository:
         self._list_batches = iter(list_batches or [])
         self.created_commands: list[CreateResearchWorkspace] = []
         self.detail_updates: list[UpdateWorkspaceDetails] = []
+        self.list_queries: list[WorkspaceListFilter] = []
 
     async def create(self, command: CreateResearchWorkspace) -> ResearchWorkspace:
         self.created_commands.append(command)
@@ -55,6 +56,7 @@ class FakeWorkspaceRepository:
         return workspace
 
     async def list_owned(self, query: WorkspaceListFilter) -> list[ResearchWorkspace]:
+        self.list_queries.append(query)
         return next(self._list_batches)
 
     async def get_owned(
@@ -221,6 +223,22 @@ async def test_list_owned_uses_an_opaque_cursor_for_the_next_page() -> None:
 
     assert second_page.items == [final]
     assert second_page.next_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_list_owned_keeps_deletion_pending_workspace_visible_to_its_owner() -> None:
+    """删除中的工作区只作为恢复入口出现在列表，详情读取仍由仓储拒绝。"""
+    active = _listed_collection(collection_id=UUID(int=305), updated_at=datetime.now(UTC))
+    deleting = replace(
+        _listed_collection(collection_id=UUID(int=306), updated_at=datetime.now(UTC)),
+        status="deleting",
+    )
+    workspaces = FakeWorkspaceRepository(list_batches=[[deleting, active]])
+
+    page = await ResearchWorkspaceService(workspaces).list_owned(owner_user_id=_OWNER_ID)
+
+    assert page.items == [deleting, active]
+    assert workspaces.list_queries[0].statuses == ("active", "deleting")
 
 
 @pytest.mark.asyncio

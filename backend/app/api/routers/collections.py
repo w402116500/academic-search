@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.api.deps.auth import get_current_user
-from app.api.deps.services import get_workspace_service
+from app.api.deps.services import get_workspace_deletion_service, get_workspace_service
 from app.modules.auth.models import UserAccount
 from app.modules.research.workspace_contracts import (
     CreateWorkspaceRequest,
@@ -18,6 +18,7 @@ from app.modules.research.workspace_contracts import (
     WorkspaceListResponse,
     WorkspaceResponse,
 )
+from app.modules.research.workspace_deletion import ResearchWorkspaceDeletionService
 from app.modules.research.workspace_service import ResearchWorkspaceService
 
 router = APIRouter(prefix="/collections", tags=["研究工作区"])
@@ -29,6 +30,8 @@ def _workspace_error_response(error: WorkspaceError) -> HTTPException:
         WorkspaceErrorCode.NOT_FOUND: status.HTTP_404_NOT_FOUND,
         WorkspaceErrorCode.NOT_ACTIVE: status.HTTP_409_CONFLICT,
         WorkspaceErrorCode.INVALID_CURSOR: status.HTTP_422_UNPROCESSABLE_CONTENT,
+        WorkspaceErrorCode.DELETION_IN_PROGRESS: status.HTTP_409_CONFLICT,
+        WorkspaceErrorCode.DELETION_CLEANUP_FAILED: status.HTTP_503_SERVICE_UNAVAILABLE,
     }
     return HTTPException(
         status_code=status_code_by_error[error.code],
@@ -74,7 +77,7 @@ async def list_workspaces(
     ),
     limit: int = Query(default=20, ge=1, le=50, description="本次最多返回的工作区数量"),
 ) -> WorkspaceListResponse:
-    """供工作区切换器按需加载，默认只显示活动工作区。"""
+    """供工作区切换器按需加载，默认显示活动与待完成删除工作区。"""
     try:
         page = await service.list_owned(
             owner_user_id=current_user.id,
@@ -125,6 +128,25 @@ async def update_workspace(
     except WorkspaceError as exc:
         raise _workspace_error_response(exc) from exc
     return WorkspaceResponse.model_validate(collection)
+
+
+@router.delete(
+    "/{collection_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    summary="永久删除研究工作区",
+)
+async def delete_workspace(
+    collection_id: UUID,
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    service: Annotated[ResearchWorkspaceDeletionService, Depends(get_workspace_deletion_service)],
+) -> Response:
+    """清理工作区私有数据、向量与全文对象；此操作不可恢复。"""
+    try:
+        await service.delete(owner_user_id=current_user.id, collection_id=collection_id)
+    except WorkspaceError as exc:
+        raise _workspace_error_response(exc) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{collection_id}/archive", response_model=WorkspaceResponse, summary="归档研究工作区")

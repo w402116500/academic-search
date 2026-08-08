@@ -9,6 +9,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.fulltext_settings import get_fulltext_acquisition_settings
+from app.core.ingestion_settings import get_ingestion_settings
 from app.core.settings import get_literature_source_settings
 from app.core.workflow_settings import get_workflow_settings
 from app.infra.db.repositories.collection_builds import SqlAlchemyCollectionBuildAdapter
@@ -21,8 +22,10 @@ from app.infra.db.repositories.research_conversations import (
 from app.infra.db.repositories.research_plans import SqlAlchemyResearchPlanRepository
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
 from app.infra.db.repositories.users import SqlAlchemyUserRepository
+from app.infra.db.repositories.workspace_deletion import SqlAlchemyWorkspaceDeletionRepository
 from app.infra.db.repositories.workspaces import SqlAlchemyWorkspaceRepository
 from app.infra.db.session import get_db_session
+from app.infra.milvus.document_chunks import MilvusDocumentChunkIndex
 from app.infra.redis.connection import redis_client_from_environment
 from app.infra.redis.job_queues import (
     ArqCandidateFulltextJobQueue,
@@ -44,6 +47,7 @@ from app.modules.research.conversation import ResearchConversationUseCases
 from app.modules.research.events import ResearchEventStore
 from app.modules.research.plan_service import ResearchPlanService
 from app.modules.research.settings import get_research_settings
+from app.modules.research.workspace_deletion import ResearchWorkspaceDeletionService
 from app.modules.research.workspace_service import ResearchWorkspaceService
 from app.modules.search.citation_service import CandidateCitationService
 from app.modules.search.fulltext_candidate import SearchCandidateFulltextLookup
@@ -73,6 +77,17 @@ def get_workspace_service(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ResearchWorkspaceService:
     return ResearchWorkspaceService(SqlAlchemyWorkspaceRepository(session))
+
+
+def get_workspace_deletion_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ResearchWorkspaceDeletionService:
+    """组装删除工作区所需的持久化、对象存储和向量清理适配器。"""
+    return ResearchWorkspaceDeletionService(
+        SqlAlchemyWorkspaceDeletionRepository(session),
+        Boto3StagingObjectStorage(get_fulltext_acquisition_settings()),
+        MilvusDocumentChunkIndex(get_ingestion_settings()),
+    )
 
 
 async def get_search_session_store() -> AsyncIterator[SearchSessionStore]:

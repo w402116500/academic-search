@@ -14,6 +14,7 @@ class IngestionErrorCode(StrEnum):
 
     INGESTION_RUN_NOT_FOUND = "ingestion_run_not_found"
     INGESTION_ALREADY_RUNNING = "ingestion_already_running"
+    CANCELLED = "ingestion_cancelled"
     COLLECTION_UNAVAILABLE = "collection_unavailable"
     STORAGE_READ_FAILED = "storage_read_failed"
     PDF_PARSE_FAILED = "pdf_parse_failed"

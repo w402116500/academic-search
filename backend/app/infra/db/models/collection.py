@@ -31,7 +31,7 @@ class ResearchCollection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "research_collections"
     __table_args__ = (
-        CheckConstraint("status IN ('active', 'archived', 'deleted')", name="status"),
+        CheckConstraint("status IN ('active', 'archived', 'deleted', 'deleting')", name="status"),
         CheckConstraint(
             "workflow_stage IN ('draft', 'analyzing', 'plan_review', 'retrieving', "
             "'screening', 'collection_building', 'researching', 'failed')",

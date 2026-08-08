@@ -203,6 +203,11 @@ class IngestionRun(UUIDPrimaryKeyMixin, Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="运行结束时间"
     )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="工作区删除等系统操作请求协作停止的时间",
+    )
     submitted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

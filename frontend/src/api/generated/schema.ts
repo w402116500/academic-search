@@ -93,7 +93,7 @@ export interface paths {
     };
     /**
      * 搜索我的研究工作区
-     * @description 供工作区切换器按需加载，默认只显示活动工作区。
+     * @description 供工作区切换器按需加载，默认显示活动与待完成删除工作区。
      */
     get: operations["list_workspaces_api_v1_collections_get"];
     put?: never;
@@ -142,7 +142,11 @@ export interface paths {
     get: operations["get_workspace_api_v1_collections__collection_id__get"];
     put?: never;
     post?: never;
-    delete?: never;
+    /**
+     * 永久删除研究工作区
+     * @description 清理工作区私有数据、向量与全文对象；此操作不可恢复。
+     */
+    delete: operations["delete_workspace_api_v1_collections__collection_id__delete"];
     options?: never;
     head?: never;
     /**
@@ -2727,6 +2731,35 @@ export interface operations {
         content: {
           "application/json": components["schemas"]["WorkspaceResponse"];
         };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_workspace_api_v1_collections__collection_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        collection_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Validation Error */
       422: {

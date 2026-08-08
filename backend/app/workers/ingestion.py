@@ -67,16 +67,25 @@ async def ingest_document(ctx: dict[str, Any], ingestion_run_id: str) -> dict[st
 
     dependencies = cast(WorkerDependencies, ctx["ingestion_dependencies"])
     try:
-        async with async_session_factory() as session:
-            outcome = await DocumentIngestionService(
-                repository=SqlAlchemyIngestionRepository(session),
-                storage=dependencies.storage,
-                parser=dependencies.parser,
-                chunker=dependencies.chunker,
-                embedder=dependencies.embedder,
-                vector_index=dependencies.vector_index,
-                embedding_config=dependencies.settings.embedding_snapshot,
-            ).run(run_id)
+        try:
+            async with async_session_factory() as session:
+                outcome = await DocumentIngestionService(
+                    repository=SqlAlchemyIngestionRepository(session),
+                    storage=dependencies.storage,
+                    parser=dependencies.parser,
+                    chunker=dependencies.chunker,
+                    embedder=dependencies.embedder,
+                    vector_index=dependencies.vector_index,
+                    embedding_config=dependencies.settings.embedding_snapshot,
+                ).run(run_id)
+        except IngestionError as exc:
+            if exc.code is not IngestionErrorCode.CANCELLED:
+                raise
+            return {
+                "ingestion_run_id": str(run_id),
+                "status": "cancelled",
+                "indexed_l3_chunk_count": 0,
+            }
     finally:
         # 入库服务已先提交本次运行的 completed/failed 状态；这里再汇总工作区展示阶段。
         async with async_session_factory() as stage_session:

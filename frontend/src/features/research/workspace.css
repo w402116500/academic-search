@@ -347,3 +347,201 @@
   border-color: var(--blue-soft);
   color: var(--blue);
 }
+
+.side-workspace-entry {
+  position: relative;
+}
+.side-workspace-entry .side-workspace-item {
+  width: 100%;
+  padding-right: 43px;
+}
+.side-workspace-item.is-deleting,
+.side-workspace-item.is-deleting:hover {
+  background: #fff7e7;
+  color: var(--amber);
+}
+.side-workspace-item.is-deleting .side-workspace-icon,
+.side-workspace-item.is-deleting .side-workspace-copy small {
+  color: var(--amber);
+}
+.side-workspace-resume {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--amber);
+  cursor: pointer;
+}
+.side-workspace-resume:hover:not(:disabled) {
+  background: #fff0d9;
+}
+.side-workspace-resume:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.side-workspace-resume:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.side-workspace-recovery-error {
+  margin: 8px;
+  color: var(--red);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.side-workspace-delete {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease,
+    opacity 0.18s ease;
+}
+.side-workspace-entry:hover .side-workspace-delete,
+.side-workspace-entry:focus-within .side-workspace-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+.side-workspace-delete:hover {
+  background: #fff0f2;
+  color: var(--red);
+}
+.side-workspace-delete:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  opacity: 1;
+  pointer-events: auto;
+}
+.rail-collapsed .side-workspace-entry .side-workspace-item {
+  padding: 0;
+}
+.rail-collapsed .side-workspace-delete {
+  display: none;
+}
+.rail-collapsed .side-workspace-resume {
+  display: none;
+}
+.workspace-delete-backdrop {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(23 32 51 / 36%);
+  padding: 20px;
+}
+.workspace-delete-dialog {
+  width: min(430px, 100%);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 24px;
+}
+.workspace-delete-dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.workspace-delete-dialog-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 7px;
+  background: #fff0f2;
+  color: var(--red);
+}
+.workspace-delete-dialog .eyebrow {
+  margin: 1px 0 4px;
+}
+.workspace-delete-dialog h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 1.35;
+}
+.workspace-delete-dialog-copy {
+  margin: 20px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.workspace-delete-error {
+  margin: 16px 0 0;
+  border: 1px solid #ecc4ce;
+  border-radius: 6px;
+  background: #fff0f2;
+  color: var(--red);
+  padding: 9px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.workspace-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 24px;
+}
+.workspace-delete-actions button {
+  min-height: 34px;
+  padding: 0 13px;
+  font-size: 12px;
+}
+.workspace-delete-confirm {
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  background: var(--red);
+  color: #fff;
+  font-weight: 750;
+}
+.workspace-delete-confirm:hover:not(:disabled) {
+  background: #922d3e;
+}
+.workspace-delete-confirm:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+@media (hover: none) {
+  .side-workspace-delete {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+@media (max-width: 520px) {
+  .workspace-delete-backdrop {
+    align-items: end;
+    padding: 12px;
+  }
+  .workspace-delete-dialog {
+    padding: 20px;
+  }
+  .workspace-delete-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .workspace-delete-actions button {
+    width: 100%;
+  }
+}

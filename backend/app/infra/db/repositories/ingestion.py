@@ -55,7 +55,12 @@ class SqlAlchemyIngestionRepository:
 
     @_map_persistence_errors
     async def claim(self, ingestion_run_id: UUID) -> IngestionContext | None:
-        """锁定入库运行后领取任务，防止多个 arq Job 并发处理同一版本。"""
+        """锁定入库运行后领取任务，防止多个 arq Job 并发处理同一版本。
+
+        ``None`` 只表示同一运行已经完成；已取消任务必须向 Worker 传递
+        ``CANCELLED``，避免 arq 结果把它错误记录为成功。
+        """
+        cancellation_error: IngestionError | None = None
         async with self._session.begin():
             row = (
                 await self._session.execute(
@@ -76,46 +81,50 @@ class SqlAlchemyIngestionRepository:
             run, document, collection = row
             if run.status == "completed":
                 return None
-            if run.status == "running":
+            if run.status == "cancelled":
+                cancellation_error = IngestionError(
+                    IngestionErrorCode.CANCELLED,
+                    "该文献入库任务已取消。",
+                )
+            elif run.status == "running":
                 raise IngestionError(
                     IngestionErrorCode.INGESTION_ALREADY_RUNNING,
                     "该文献入库任务已被其他 Worker 领取。",
                     retryable=True,
                 )
-            if collection.status != "active":
-                error = IngestionError(
-                    IngestionErrorCode.COLLECTION_UNAVAILABLE,
-                    "研究工作区已不可用，不能继续处理其文献。",
+            elif collection.status != "active":
+                self._mark_cancelled(run, datetime.now(UTC))
+                cancellation_error = IngestionError(
+                    IngestionErrorCode.CANCELLED,
+                    "研究工作区已停止文献入库。",
                 )
-                run.status = "failed"
-                run.is_current = False
-                run.error_code = error.code.value
-                run.error_message = str(error)
-                run.finished_at = datetime.now(UTC)
-                raise error
-            if run.status not in {"queued", "failed"}:
+            elif run.status not in {"queued", "failed"}:
                 raise IngestionError(
                     IngestionErrorCode.PERSISTENCE_FAILED,
                     "入库运行不处于可领取状态。",
                 )
+            else:
+                retrying = run.status == "failed"
+                run.status = "running"
+                run.stage = "parse"
+                run.error_code = None
+                run.error_message = None
+                run.started_at = datetime.now(UTC)
+                run.finished_at = None
+                run.is_current = False
 
-            retrying = run.status == "failed"
-            run.status = "running"
-            run.stage = "parse"
-            run.error_code = None
-            run.error_message = None
-            run.started_at = datetime.now(UTC)
-            run.finished_at = None
-            run.is_current = False
+                return IngestionContext(
+                    ingestion_run_id=run.id,
+                    owner_user_id=collection.owner_user_id,
+                    collection_id=collection.id,
+                    document_id=document.id,
+                    object_key=document.object_key,
+                    retrying=retrying,
+                )
 
-            return IngestionContext(
-                ingestion_run_id=run.id,
-                owner_user_id=collection.owner_user_id,
-                collection_id=collection.id,
-                document_id=document.id,
-                object_key=document.object_key,
-                retrying=retrying,
-            )
+        if cancellation_error is None:
+            raise AssertionError("入库运行领取未产生预期结果。")
+        raise cancellation_error
 
     @_map_persistence_errors
     async def record_parse(self, ingestion_run_id: UUID, parsed: ParsedDocument) -> None:
@@ -253,6 +262,13 @@ class SqlAlchemyIngestionRepository:
             )
             if run is None:
                 return
+            if run.status == "cancelled":
+                return
+            if run.status != "running":
+                return
+            if run.cancel_requested_at is not None:
+                self._mark_cancelled(run, datetime.now(UTC))
+                return
             run.status = "failed"
             run.is_current = False
             run.error_code = error.code.value
@@ -261,18 +277,38 @@ class SqlAlchemyIngestionRepository:
 
     async def _locked_running_run(self, ingestion_run_id: UUID) -> IngestionRun:
         """获取已领取的运行，阻止阶段跳跃或其他任务覆盖其状态。"""
-        run = await self._session.scalar(
-            select(IngestionRun).where(IngestionRun.id == ingestion_run_id).with_for_update()
-        )
-        if run is None:
+        row = (
+            await self._session.execute(
+                select(IngestionRun, ResearchCollection)
+                .join(Document, Document.id == IngestionRun.document_id)
+                .join(ResearchCollection, ResearchCollection.id == Document.collection_id)
+                .where(IngestionRun.id == ingestion_run_id)
+                .with_for_update(of=IngestionRun)
+            )
+        ).one_or_none()
+        if row is None:
             raise IngestionError(
                 IngestionErrorCode.INGESTION_RUN_NOT_FOUND,
                 "入库运行不存在或其文献已被删除。",
             )
+        run, collection = row._tuple()
         if run.status != "running":
             raise IngestionError(
                 IngestionErrorCode.PERSISTENCE_FAILED,
                 "入库运行状态已变化，不能继续写入当前阶段结果。",
                 retryable=True,
             )
+        if run.cancel_requested_at is not None or collection.status != "active":
+            raise IngestionError(
+                IngestionErrorCode.CANCELLED,
+                "研究工作区正在删除，入库任务已停止。",
+            )
         return run
+
+    @staticmethod
+    def _mark_cancelled(run: IngestionRun, finished_at: datetime) -> None:
+        run.status = "cancelled"
+        run.is_current = False
+        run.error_code = IngestionErrorCode.CANCELLED.value
+        run.error_message = "研究工作区正在删除，入库任务已停止。"
+        run.finished_at = finished_at

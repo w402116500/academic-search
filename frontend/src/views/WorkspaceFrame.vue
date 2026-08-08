@@ -1,14 +1,33 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { RouterLink, RouterView, useRoute } from "vue-router";
-import { ArrowLeft, FileSearch, PanelLeftClose, PanelLeftOpen, Plus } from "@lucide/vue";
+import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
+import {
+  ArrowLeft,
+  FileSearch,
+  LoaderCircle,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  RotateCcw,
+  Trash2,
+} from "@lucide/vue";
 
-import { useWorkspaceListQuery, useWorkspaceQuery } from "@/api/hooks/research";
+import {
+  useWorkspaceDeletionMutation,
+  useWorkspaceListQuery,
+  useWorkspaceQuery,
+} from "@/api/hooks/research";
+import type { Workspace } from "@/api/types";
 import AppHeader from "@/components/AppHeader.vue";
+import {
+  isWorkspaceDeletionPending,
+  workspaceDeletionIncompleteMessage,
+} from "@/features/research/workspace-deletion-presentation";
 import StageRail from "@/components/StageRail.vue";
 import { workspaceRouteForStage } from "@/router/workspace-route";
 
 const route = useRoute();
+const router = useRouter();
 const workspaceId = computed(() => String(route.params.workspaceId));
 const workspaceQuery = useWorkspaceQuery(workspaceId);
 // 左侧栏展示真实工作区列表。即使用户有很多工作区，也可以继续按游标加载，
@@ -18,9 +37,58 @@ const workspaces = computed(
   () => workspaceListQuery.data.value?.pages.flatMap((page) => page.items) ?? [],
 );
 const railCollapsed = ref(false);
+const workspacePendingDeletion = ref<Workspace | null>(null);
+const deletionError = ref<string | null>(null);
+const recoveryDeletionError = ref<string | null>(null);
+const resumingWorkspaceId = ref<string | null>(null);
+const deleteWorkspaceMutation = useWorkspaceDeletionMutation();
 
 function loadMoreWorkspaces(): void {
   void workspaceListQuery.fetchNextPage();
+}
+
+function openWorkspaceDeletion(workspace: Workspace): void {
+  workspacePendingDeletion.value = workspace;
+  deletionError.value = null;
+}
+
+function closeWorkspaceDeletion(): void {
+  if (deleteWorkspaceMutation.isPending.value) return;
+  workspacePendingDeletion.value = null;
+  deletionError.value = null;
+}
+
+function confirmWorkspaceDeletion(): void {
+  const workspace = workspacePendingDeletion.value;
+  if (!workspace) return;
+
+  deletionError.value = null;
+  deleteWorkspaceMutation.mutate(workspace.id, {
+    onSuccess: async () => {
+      const isCurrentWorkspace = workspace.id === workspaceId.value;
+      workspacePendingDeletion.value = null;
+      if (isCurrentWorkspace) await router.replace({ name: "research-entry" });
+    },
+    onError: () => {
+      deletionError.value = workspaceDeletionIncompleteMessage;
+    },
+  });
+}
+
+function resumeWorkspaceDeletion(workspace: Workspace): void {
+  recoveryDeletionError.value = null;
+  resumingWorkspaceId.value = workspace.id;
+  deleteWorkspaceMutation.mutate(workspace.id, {
+    onSuccess: async () => {
+      const isCurrentWorkspace = workspace.id === workspaceId.value;
+      resumingWorkspaceId.value = null;
+      if (isCurrentWorkspace) await router.replace({ name: "research-entry" });
+    },
+    onError: () => {
+      resumingWorkspaceId.value = null;
+      recoveryDeletionError.value = workspaceDeletionIncompleteMessage;
+    },
+  });
 }
 </script>
 
@@ -34,28 +102,65 @@ function loadMoreWorkspaces(): void {
         <span>工作区</span><small>{{ workspaces.length || "-" }}</small>
       </div>
       <nav class="side-workspace-list" aria-label="工作区切换">
-        <RouterLink
-          v-for="workspace in workspaces"
-          :key="workspace.id"
-          class="side-workspace-item"
-          :class="{ current: workspace.id === workspaceId }"
-          :to="{
-            name: workspaceRouteForStage(workspace.workflow_stage),
-            params: { workspaceId: workspace.id },
-          }"
-          :title="workspace.name"
-        >
-          <span class="side-workspace-icon"><FileSearch :size="15" /></span>
-          <span class="side-workspace-copy">
-            <strong>{{ workspace.name }}</strong>
-            <small>{{ workspace.workflow_stage_display.label }}</small>
-          </span>
-          <span v-if="workspace.id === workspaceId" class="side-workspace-current">当前</span>
-        </RouterLink>
+        <div v-for="workspace in workspaces" :key="workspace.id" class="side-workspace-entry">
+          <div
+            v-if="isWorkspaceDeletionPending(workspace)"
+            class="side-workspace-item"
+            :class="{ 'is-deleting': true }"
+            :title="`${workspace.name}：删除未完成`"
+          >
+            <span class="side-workspace-icon"><FileSearch :size="15" /></span>
+            <span class="side-workspace-copy">
+              <strong>{{ workspace.name }}</strong>
+              <small>删除未完成</small>
+            </span>
+            <button
+              class="side-workspace-resume"
+              type="button"
+              :aria-label="`继续删除工作区 ${workspace.name}`"
+              title="继续删除"
+              :disabled="resumingWorkspaceId === workspace.id"
+              @click="resumeWorkspaceDeletion(workspace)"
+            >
+              <LoaderCircle v-if="resumingWorkspaceId === workspace.id" class="spin" :size="15" />
+              <RotateCcw v-else :size="15" />
+            </button>
+          </div>
+          <RouterLink
+            v-else
+            class="side-workspace-item"
+            :class="{ current: workspace.id === workspaceId }"
+            :to="{
+              name: workspaceRouteForStage(workspace.workflow_stage),
+              params: { workspaceId: workspace.id },
+            }"
+            :title="workspace.name"
+          >
+            <span class="side-workspace-icon"><FileSearch :size="15" /></span>
+            <span class="side-workspace-copy">
+              <strong>{{ workspace.name }}</strong>
+              <small>{{ workspace.workflow_stage_display.label }}</small>
+            </span>
+            <span v-if="workspace.id === workspaceId" class="side-workspace-current">当前</span>
+          </RouterLink>
+          <button
+            v-if="!isWorkspaceDeletionPending(workspace)"
+            class="side-workspace-delete"
+            type="button"
+            :aria-label="`删除工作区 ${workspace.name}`"
+            title="删除工作区"
+            @click="openWorkspaceDeletion(workspace)"
+          >
+            <Trash2 :size="15" />
+          </button>
+        </div>
         <p v-if="workspaceListQuery.isPending.value" class="side-workspace-empty">
           正在读取工作区…
         </p>
         <p v-else-if="!workspaces.length" class="side-workspace-empty">还没有已保存的工作区</p>
+        <p v-if="recoveryDeletionError" class="side-workspace-recovery-error" role="alert">
+          {{ recoveryDeletionError }}
+        </p>
       </nav>
       <button
         v-if="workspaceListQuery.hasNextPage.value"
@@ -101,5 +206,49 @@ function loadMoreWorkspaces(): void {
         <RouterView v-else />
       </div>
     </main>
+    <div
+      v-if="workspacePendingDeletion"
+      class="workspace-delete-backdrop"
+      @click.self="closeWorkspaceDeletion"
+    >
+      <section
+        class="workspace-delete-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-delete-title"
+      >
+        <div class="workspace-delete-dialog-heading">
+          <span class="workspace-delete-dialog-icon"><Trash2 :size="18" /></span>
+          <div>
+            <p class="eyebrow">永久删除</p>
+            <h2 id="workspace-delete-title">删除“{{ workspacePendingDeletion.name }}”</h2>
+          </div>
+        </div>
+        <p class="workspace-delete-dialog-copy">
+          此操作会删除该工作区的私有文献、全文、向量与研究记录，删除后无法恢复。
+        </p>
+        <p v-if="deletionError" class="workspace-delete-error" role="alert">
+          {{ deletionError }}
+        </p>
+        <div class="workspace-delete-actions">
+          <button
+            class="ghost-button"
+            type="button"
+            :disabled="deleteWorkspaceMutation.isPending.value"
+            @click="closeWorkspaceDeletion"
+          >
+            取消
+          </button>
+          <button
+            class="workspace-delete-confirm"
+            type="button"
+            :disabled="deleteWorkspaceMutation.isPending.value"
+            @click="confirmWorkspaceDeletion"
+          >
+            {{ deleteWorkspaceMutation.isPending.value ? "正在删除…" : "永久删除" }}
+          </button>
+        </div>
+      </section>
+    </div>
   </div>
 </template>

@@ -17,6 +17,8 @@ class WorkspaceErrorCode(StrEnum):
     NOT_FOUND = "workspace_not_found"
     NOT_ACTIVE = "workspace_not_active"
     INVALID_CURSOR = "workspace_invalid_cursor"
+    DELETION_IN_PROGRESS = "workspace_deletion_in_progress"
+    DELETION_CLEANUP_FAILED = "workspace_deletion_cleanup_failed"
 
 
 class WorkspaceError(RuntimeError):

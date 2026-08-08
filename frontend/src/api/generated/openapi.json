@@ -3830,7 +3830,7 @@
     },
     "/api/v1/collections": {
       "get": {
-        "description": "供工作区切换器按需加载，默认只显示活动工作区。",
+        "description": "供工作区切换器按需加载，默认显示活动与待完成删除工作区。",
         "operationId": "list_workspaces_api_v1_collections_get",
         "parameters": [
           {
@@ -4019,6 +4019,44 @@
       }
     },
     "/api/v1/collections/{collection_id}": {
+      "delete": {
+        "description": "清理工作区私有数据、向量与全文对象；此操作不可恢复。",
+        "operationId": "delete_workspace_api_v1_collections__collection_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "永久删除研究工作区",
+        "tags": ["研究工作区"]
+      },
       "get": {
         "description": "读取当前用户拥有的单个活动或归档工作区。",
         "operationId": "get_workspace_api_v1_collections__collection_id__get",

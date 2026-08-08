@@ -64,8 +64,10 @@ class ResearchWorkspaceService:
         cursor: str | None = None,
         limit: int = 20,
     ) -> WorkspacePage:
-        """按最近更新顺序搜索并分页返回当前用户的非删除工作区。"""
-        statuses = ("active", "archived") if include_archived else ("active",)
+        """按最近更新顺序搜索并分页返回当前用户的可用或待完成删除工作区。"""
+        statuses = (
+            ("active", "archived", "deleting") if include_archived else ("active", "deleting")
+        )
         normalized_query = " ".join(query.split()) if query else None
         cursor_updated_at: datetime | None = None
         cursor_id: UUID | None = None

@@ -3,6 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import {
   buildCollection,
+  deleteWorkspace,
   getCollectionDocuments,
   getWorkspace,
   listWorkspaces,
@@ -47,6 +48,21 @@ export function useWorkspaceSearchQuery(
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.next_cursor,
     enabled: computed(() => toValue(enabled)),
+  });
+}
+
+export function useWorkspaceDeletionMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (workspaceId: string) => deleteWorkspace(workspaceId),
+    onSuccess: async (_result, workspaceId) => {
+      // 所有工作区私有查询键都包含工作区 UUID，删除后不能让已失效页面继续复用缓存。
+      queryClient.removeQueries({
+        predicate: (query) => query.queryKey.includes(workspaceId),
+      });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.workspace.listRoot() });
+    },
   });
 }
 

@@ -19,6 +19,26 @@ _DOCUMENT_ID = UUID("00000000-0000-0000-0000-000000000404")
 _CHUNK_ID = UUID("00000000-0000-0000-0000-000000000405")
 
 
+class LockedRunRow:
+    """兼容两处 SQLAlchemy 行读取方式的最小查询结果替身。"""
+
+    def __init__(
+        self,
+        run: SimpleNamespace,
+        document: SimpleNamespace,
+        collection: SimpleNamespace,
+    ) -> None:
+        self._run = run
+        self._document = document
+        self._collection = collection
+
+    def __iter__(self):
+        return iter((self._run, self._document, self._collection))
+
+    def _tuple(self) -> tuple[SimpleNamespace, SimpleNamespace]:
+        return self._run, self._collection
+
+
 class TransactionAwareSession:
     """模拟 SQLAlchemy 查询隐式开事务的最小会话。"""
 
@@ -28,6 +48,7 @@ class TransactionAwareSession:
         self.begin_calls = 0
         self.run = SimpleNamespace(
             status="running",
+            cancel_requested_at=None,
             embedding_config={},
             statistics={},
             stage="embed",
@@ -35,6 +56,11 @@ class TransactionAwareSession:
             error_code=None,
             error_message=None,
             finished_at=None,
+        )
+        self.collection = SimpleNamespace(status="active")
+        self.document = SimpleNamespace(
+            id=_DOCUMENT_ID,
+            object_key="tests/transaction-boundary.pdf",
         )
         self.chunks = (SimpleNamespace(id=_CHUNK_ID, level=3, content="可被向量化的 L3 原文。"),)
 
@@ -58,6 +84,11 @@ class TransactionAwareSession:
     async def scalar(self, _statement: object) -> SimpleNamespace:
         """为仓储状态更新返回正在处理的运行记录。"""
         return self.run
+
+    async def execute(self, _statement: object) -> SimpleNamespace:
+        """为带工作区围栏的运行锁查询返回当前运行与活动集合。"""
+        row = LockedRunRow(self.run, self.document, self.collection)
+        return SimpleNamespace(one_or_none=lambda: row)
 
     async def rollback(self) -> None:
         """记录仓储是否在只读结果物化后显式结束事务。"""
@@ -101,3 +132,16 @@ async def test_loading_l3_chunks_closes_implicit_read_transaction_before_write_s
     assert session.run.stage == "index"
     assert session.run.status == "failed"
     assert session.run.is_current is False
+
+
+@pytest.mark.asyncio
+async def test_claiming_a_cancelled_run_surfaces_a_cancelled_worker_result() -> None:
+    """删除围栏取消排队任务后，Worker 不能把它作为幂等完成返回。"""
+    session = TransactionAwareSession()
+    session.run.status = "cancelled"
+    repository = SqlAlchemyIngestionRepository(session)  # type: ignore[arg-type]
+
+    with pytest.raises(IngestionError) as raised:
+        await repository.claim(_RUN_ID)
+
+    assert raised.value.code is IngestionErrorCode.CANCELLED
