@@ -126,7 +126,14 @@ export function useSearchReviewMutations(
   });
   const admitSelectionMutation = useMutation({
     mutationFn: () => admitCandidateSelection(toValue(workspaceId), toValue(runId)),
-    onSuccess: refreshCandidates,
+    onSuccess: async () => {
+      await Promise.all([
+        refreshCandidates(),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.workspace.documents(toValue(workspaceId)),
+        }),
+      ]);
+    },
   });
 
   return {

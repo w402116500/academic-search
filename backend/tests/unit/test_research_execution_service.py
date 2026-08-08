@@ -25,6 +25,7 @@ from app.modules.research.contracts import (
     ResearchRunStatus,
 )
 from app.modules.research.settings import ResearchSettings
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000000901")
@@ -32,6 +33,7 @@ _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000902")
 _CONVERSATION_ID = UUID("00000000-0000-0000-0000-000000000903")
 _RUN_ID = UUID("00000000-0000-0000-0000-000000000904")
 _INPUT_MESSAGE_ID = UUID("00000000-0000-0000-0000-000000000905")
+_CHUNK_ID = UUID("00000000-0000-0000-0000-000000000906")
 
 
 class FakeExecutionSession:
@@ -47,6 +49,8 @@ class FakeExecutionSession:
         self._scalars_values = iter(scalars_values or [])
         self.added: list[object] = []
         self.executed: list[object] = []
+        self.scalar_statements: list[object] = []
+        self.scalars_statements: list[object] = []
         self.commit_count = 0
 
     @asynccontextmanager
@@ -54,9 +58,11 @@ class FakeExecutionSession:
         yield self
 
     async def scalar(self, _statement: object) -> object | None:
+        self.scalar_statements.append(_statement)
         return next(self._scalar_values)
 
     async def scalars(self, _statement: object) -> list[object]:
+        self.scalars_statements.append(_statement)
         return next(self._scalars_values)
 
     async def execute(self, statement: object) -> object:
@@ -132,6 +138,28 @@ def _recorded_stage(run: ResearchRun) -> str:
     timing = cast(dict[str, Any], run.retrieval_trace["timing"])
     stages = cast(list[dict[str, Any]], timing["stages"])
     return cast(str, stages[-1]["stage"])
+
+
+def _sql(statement: Any) -> str:
+    return str(statement.compile(dialect=postgresql.dialect()))
+
+
+def _evidence() -> RetrievedEvidence:
+    return RetrievedEvidence(
+        chunk_id=_CHUNK_ID,
+        document_id=UUID("00000000-0000-0000-0000-000000000907"),
+        ingestion_run_id=UUID("00000000-0000-0000-0000-000000000908"),
+        paper_id=UUID("00000000-0000-0000-0000-000000000909"),
+        content="evidence",
+        page_start=None,
+        page_end=None,
+        section_path=(),
+        locator={},
+        title="Evidence",
+        authors=(),
+        publication_year=None,
+        source_url=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -262,3 +290,33 @@ async def test_submission_quota_rejects_user_and_global_limit_exhaustion() -> No
 
     assert user_error.value.code is ResearchErrorCode.USER_QUOTA_EXCEEDED
     assert global_error.value.code is ResearchErrorCode.GLOBAL_BUDGET_EXHAUSTED
+
+
+@pytest.mark.asyncio
+async def test_researchable_document_gate_uses_collection_bibliography_entries() -> None:
+    """研究会话可用性以集合书目条目和当前完成入库为准，不再要求 CollectionPaper。"""
+    session = FakeExecutionSession([1])
+    service = SqlAlchemyResearchConversationAdapter(cast(AsyncSession, session))
+
+    await service._require_researchable_documents(_COLLECTION_ID)
+
+    sql = _sql(session.scalar_statements[0])
+    assert "collection_bibliography_entries" in sql
+    assert "collection_papers" not in sql
+    assert "bibliography_entry_id" in sql
+
+
+@pytest.mark.asyncio
+async def test_evidence_scope_guard_uses_collection_bibliography_entries() -> None:
+    """落盘回答引用前的最终范围校验也必须允许没有全局 Paper 的集合文档。"""
+    run = _run()
+    session = FakeExecutionSession([], scalars_values=[[_CHUNK_ID]])
+
+    await SqlAlchemyResearchExecutionAdapter(cast(AsyncSession, session))._assert_evidence_scope(
+        run, (_evidence(),)
+    )
+
+    sql = _sql(session.scalars_statements[0])
+    assert "collection_bibliography_entries" in sql
+    assert "collection_papers" not in sql
+    assert "bibliography_entry_id" in sql

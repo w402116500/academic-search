@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.collection import CollectionBibliographyEntry, ResearchCollection
 from app.infra.db.models.document import Document, DocumentChunk, IngestionRun
 from app.infra.db.models.paper import Paper
 from app.infra.db.models.research import Conversation, Message, ResearchEvidence, ResearchRun
@@ -430,15 +430,15 @@ class SqlAlchemyResearchConversationAdapter:
             .select_from(Document)
             .join(IngestionRun, IngestionRun.document_id == Document.id)
             .join(
-                CollectionPaper,
+                CollectionBibliographyEntry,
                 and_(
-                    CollectionPaper.collection_id == Document.collection_id,
-                    CollectionPaper.paper_id == Document.paper_id,
+                    CollectionBibliographyEntry.collection_id == Document.collection_id,
+                    CollectionBibliographyEntry.id == Document.bibliography_entry_id,
                 ),
             )
             .where(
                 Document.collection_id == collection_id,
-                CollectionPaper.status == "active",
+                CollectionBibliographyEntry.status == "active",
                 IngestionRun.status == "completed",
                 IngestionRun.is_current.is_(True),
             )
@@ -563,11 +563,18 @@ class SqlAlchemyResearchConversationAdapter:
         """为详情和运行轮询读取最终引用，RRF 中间候选不直接展示为回答证据。"""
         response = self._run_response(run)
         rows = await self._session.execute(
-            select(ResearchEvidence, Document, Paper)
+            select(ResearchEvidence, Document, CollectionBibliographyEntry, Paper)
             .join(DocumentChunk, DocumentChunk.id == ResearchEvidence.chunk_id)
             .join(IngestionRun, IngestionRun.id == DocumentChunk.ingestion_run_id)
             .join(Document, Document.id == IngestionRun.document_id)
-            .join(Paper, Paper.id == Document.paper_id)
+            .join(
+                CollectionBibliographyEntry,
+                and_(
+                    CollectionBibliographyEntry.collection_id == Document.collection_id,
+                    CollectionBibliographyEntry.id == Document.bibliography_entry_id,
+                ),
+            )
+            .outerjoin(Paper, Paper.id == CollectionBibliographyEntry.paper_id)
             .where(
                 ResearchEvidence.research_run_id == run.id,
                 ResearchEvidence.selection_stage == "final_citation",
@@ -594,13 +601,18 @@ class SqlAlchemyResearchConversationAdapter:
                 is_cited=evidence.is_cited,
                 citation_excerpt=evidence.citation_excerpt,
                 locator_snapshot=evidence.locator_snapshot,
-                paper_id=paper.id,
-                title=paper.title,
-                authors=paper.authors,
-                publication_year=paper.publication_year,
-                source_url=document.source_url,
+                paper_id=paper.id if paper is not None else entry.paper_id,
+                title=paper.title if paper is not None else entry.candidate_title,
+                authors=paper.authors if paper is not None else entry.candidate_authors,
+                publication_year=(
+                    paper.publication_year
+                    if paper is not None
+                    else entry.candidate_publication_year
+                ),
+                source_url=document.source_url
+                or (paper.official_url if paper is not None else entry.candidate_source_url),
             )
-            for evidence, document, paper in rows
+            for evidence, document, entry, paper in rows
         ]
         return response.model_copy(update={"evidences": evidences})
 

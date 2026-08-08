@@ -5,14 +5,21 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ingestion_settings import IngestionSettings, get_ingestion_settings
-from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.collection import CollectionBibliographyEntry, ResearchCollection
 from app.infra.db.models.document import Document, IngestionRun
 from app.infra.db.models.paper import Paper
 from app.modules.rag.ingestion.queue import IngestionJobQueue, IngestionQueueError
+from app.modules.research.bibliography import (
+    BibliographyCitationStatus,
+    BibliographyContentStatus,
+    BibliographyPdfStatus,
+    CollectionBibliographyEntryProjection,
+    CollectionBibliographyEntryStatus,
+)
 from app.modules.research.build_contracts import (
     CollectionBuildError,
     CollectionBuildErrorCode,
@@ -56,31 +63,38 @@ class SqlAlchemyCollectionBuildAdapter:
             lock=False,
         )
         rows = await self._session.execute(
-            select(CollectionPaper, Paper, Document, IngestionRun)
-            .join(Paper, Paper.id == CollectionPaper.paper_id)
-            .join(
-                Document,
-                and_(
-                    Document.collection_id == CollectionPaper.collection_id,
-                    Document.paper_id == CollectionPaper.paper_id,
-                ),
-            )
+            select(CollectionBibliographyEntry, Paper, Document, IngestionRun)
+            .outerjoin(Paper, Paper.id == CollectionBibliographyEntry.paper_id)
+            .outerjoin(Document, Document.bibliography_entry_id == CollectionBibliographyEntry.id)
             .outerjoin(IngestionRun, IngestionRun.document_id == Document.id)
             .where(
-                CollectionPaper.collection_id == collection_id,
-                CollectionPaper.status == "active",
+                CollectionBibliographyEntry.collection_id == collection_id,
+                CollectionBibliographyEntry.status == "active",
             )
             # 同一文献可能有历史运行；第一个运行就是供页面展示的最新版本。
-            .order_by(Document.created_at.desc(), IngestionRun.created_at.desc().nulls_last())
+            .order_by(
+                CollectionBibliographyEntry.added_at.desc(),
+                Document.created_at.desc().nulls_last(),
+                IngestionRun.created_at.desc().nulls_last(),
+            )
         )
 
+        bibliography_entries: list[CollectionBibliographyEntryProjection] = []
         documents: list[CollectionDocumentResponse] = []
+        seen_entry_ids: set[UUID] = set()
         seen_document_ids: set[UUID] = set()
         researchable_document_ids: set[UUID] = set()
         status_counts: dict[IngestionRunStatus, int] = {}
 
         for row in rows:
-            collection_paper, paper, document, run = row._tuple()
+            entry, paper, document, run = row._tuple()
+            if entry.id not in seen_entry_ids:
+                seen_entry_ids.add(entry.id)
+                bibliography_entries.append(self._entry_response(entry=entry, document=document))
+
+            if document is None:
+                continue
+
             if run is not None:
                 run_status = IngestionRunStatus(run.status)
                 if run.is_current and run_status is IngestionRunStatus.COMPLETED:
@@ -97,28 +111,35 @@ class SqlAlchemyCollectionBuildAdapter:
             documents.append(
                 CollectionDocumentResponse(
                     document_id=document.id,
-                    paper_id=paper.id,
-                    doi=paper.doi,
-                    title=paper.title,
-                    authors=paper.authors,
-                    publication_year=paper.publication_year,
-                    venue=paper.venue,
-                    citation_text=paper.citation_text,
-                    tags=collection_paper.tags,
-                    note=collection_paper.note,
+                    bibliography_entry_id=entry.id,
+                    paper_id=paper.id if paper is not None else entry.paper_id,
+                    doi=paper.doi if paper is not None else entry.candidate_doi,
+                    title=paper.title if paper is not None else entry.candidate_title,
+                    authors=paper.authors if paper is not None else entry.candidate_authors,
+                    publication_year=(
+                        paper.publication_year
+                        if paper is not None
+                        else entry.candidate_publication_year
+                    ),
+                    venue=paper.venue if paper is not None else entry.candidate_venue,
+                    citation_text=paper.citation_text if paper is not None else entry.citation_text,
+                    tags=entry.tags,
+                    note=entry.note,
                     original_filename=document.original_filename,
                     byte_size=document.byte_size,
                     source_url=document.source_url,
                     access_rights=document.access_rights,
-                    added_at=collection_paper.added_at,
+                    added_at=entry.added_at,
                     latest_ingestion_run=latest_run,
                 )
             )
 
         return CollectionDocumentsResponse(
             collection_id=collection_id,
+            bibliography_entries=bibliography_entries,
             documents=documents,
             summary=CollectionIngestionSummary(
+                bibliography_entry_count=len(bibliography_entries),
                 active_document_count=len(documents),
                 researchable_document_count=len(researchable_document_ids),
                 ingestion_status_counts=status_counts,
@@ -225,20 +246,14 @@ class SqlAlchemyCollectionBuildAdapter:
             lock=True,
         )
         record = await self._session.execute(
-            select(CollectionPaper, Document)
-            .join(
-                Document,
-                and_(
-                    Document.collection_id == CollectionPaper.collection_id,
-                    Document.paper_id == CollectionPaper.paper_id,
-                ),
-            )
+            select(CollectionBibliographyEntry, Document)
+            .join(Document, Document.bibliography_entry_id == CollectionBibliographyEntry.id)
             .where(
-                CollectionPaper.collection_id == collection_id,
-                CollectionPaper.status == "active",
+                CollectionBibliographyEntry.collection_id == collection_id,
+                CollectionBibliographyEntry.status == "active",
                 Document.id == document_id,
             )
-            .with_for_update(of=(CollectionPaper, Document))
+            .with_for_update(of=(CollectionBibliographyEntry, Document))
         )
         row = record.one_or_none()
         if row is None:
@@ -246,7 +261,7 @@ class SqlAlchemyCollectionBuildAdapter:
                 CollectionBuildErrorCode.DOCUMENT_NOT_FOUND,
                 "待确认集合中不存在该文献。",
             )
-        collection_paper, document = row._tuple()
+        entry, document = row._tuple()
         run = await self._session.scalar(
             select(IngestionRun)
             .where(IngestionRun.document_id == document.id)
@@ -260,14 +275,15 @@ class SqlAlchemyCollectionBuildAdapter:
                 "只有尚未确认构建的文献可以从集合中移出。",
             )
 
-        collection_paper.status = "archived"
+        entry.status = "archived"
         run.status = IngestionRunStatus.CANCELLED.value
         run.is_current = False
         run.finished_at = datetime.now(UTC)
         await self._session.commit()
         return CollectionDocumentRemovalResponse(
             document_id=document.id,
-            collection_paper_status=collection_paper.status,
+            bibliography_entry_status=entry.status,
+            collection_paper_status=entry.status,
             ingestion_run_status=IngestionRunStatus(run.status),
         )
 
@@ -387,15 +403,12 @@ class SqlAlchemyCollectionBuildAdapter:
             select(IngestionRun)
             .join(Document, Document.id == IngestionRun.document_id)
             .join(
-                CollectionPaper,
-                and_(
-                    CollectionPaper.collection_id == Document.collection_id,
-                    CollectionPaper.paper_id == Document.paper_id,
-                ),
+                CollectionBibliographyEntry,
+                CollectionBibliographyEntry.id == Document.bibliography_entry_id,
             )
             .where(
                 Document.collection_id == collection_id,
-                CollectionPaper.status == "active",
+                CollectionBibliographyEntry.status == "active",
                 IngestionRun.status == IngestionRunStatus.PENDING.value,
             )
             .order_by(IngestionRun.created_at)
@@ -416,17 +429,14 @@ class SqlAlchemyCollectionBuildAdapter:
             .join(Document, Document.collection_id == ResearchCollection.id)
             .join(IngestionRun, IngestionRun.document_id == Document.id)
             .join(
-                CollectionPaper,
-                and_(
-                    CollectionPaper.collection_id == Document.collection_id,
-                    CollectionPaper.paper_id == Document.paper_id,
-                ),
+                CollectionBibliographyEntry,
+                CollectionBibliographyEntry.id == Document.bibliography_entry_id,
             )
             .where(
                 ResearchCollection.id == collection_id,
                 ResearchCollection.owner_user_id == owner_user_id,
                 ResearchCollection.status == "active",
-                CollectionPaper.status == "active",
+                CollectionBibliographyEntry.status == "active",
                 IngestionRun.id == ingestion_run_id,
             )
             .with_for_update(of=(ResearchCollection, IngestionRun))
@@ -490,15 +500,12 @@ class SqlAlchemyCollectionBuildAdapter:
             select(IngestionRun.status, IngestionRun.is_current)
             .join(Document, Document.id == IngestionRun.document_id)
             .join(
-                CollectionPaper,
-                and_(
-                    CollectionPaper.collection_id == Document.collection_id,
-                    CollectionPaper.paper_id == Document.paper_id,
-                ),
+                CollectionBibliographyEntry,
+                CollectionBibliographyEntry.id == Document.bibliography_entry_id,
             )
             .where(
                 Document.collection_id == collection.id,
-                CollectionPaper.status == "active",
+                CollectionBibliographyEntry.status == "active",
             )
         )
         runs = list(rows)
@@ -527,3 +534,35 @@ class SqlAlchemyCollectionBuildAdapter:
         if queue is None:
             raise RuntimeError("确认构建集合时必须提供入库任务队列")
         return queue
+
+    @staticmethod
+    def _entry_response(
+        *,
+        entry: CollectionBibliographyEntry,
+        document: Document | None,
+    ) -> CollectionBibliographyEntryProjection:
+        return CollectionBibliographyEntryProjection(
+            id=entry.id,
+            collection_id=entry.collection_id,
+            source_search_run_id=entry.source_search_run_id,
+            source_candidate_id=entry.source_candidate_id,
+            paper_id=entry.paper_id,
+            document_id=document.id if document is not None else None,
+            status=CollectionBibliographyEntryStatus(entry.status),
+            title=entry.candidate_title,
+            authors=entry.candidate_authors,
+            abstract=entry.candidate_abstract,
+            publication_year=entry.candidate_publication_year,
+            venue=entry.candidate_venue,
+            doi=entry.candidate_doi,
+            source_url=entry.candidate_source_url,
+            citation_status=BibliographyCitationStatus(entry.citation_status),
+            citation_text=entry.citation_text,
+            pdf_status=BibliographyPdfStatus(entry.pdf_status),
+            pdf_source_url=entry.pdf_source_url,
+            content_status=BibliographyContentStatus(entry.content_status),
+            automatic_download_attempts=entry.automatic_download_attempts,
+            tags=entry.tags,
+            note=entry.note,
+            added_at=entry.added_at,
+        )

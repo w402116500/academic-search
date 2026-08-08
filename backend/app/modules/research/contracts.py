@@ -205,7 +205,7 @@ class ResearchEvidenceResponse(BaseModel):
     is_cited: bool
     citation_excerpt: str | None
     locator_snapshot: dict[str, Any] | None
-    paper_id: UUID
+    paper_id: UUID | None
     title: str
     authors: list[dict[str, Any]]
     publication_year: int | None

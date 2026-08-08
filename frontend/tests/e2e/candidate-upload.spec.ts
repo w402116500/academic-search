@@ -65,6 +65,7 @@ const candidate = {
     evidence: [{ source_field: "title", quote: "Authorized PDF upload acceptance" }],
   },
   relevance_error: null,
+  pdf_availability: { status: "requires_upload" },
   citation: {
     status: "ready",
     doi: "10.5555/upload-ui-acceptance",
@@ -72,46 +73,14 @@ const candidate = {
   },
 };
 
-const requiresUpload = {
-  search_run_id: runId,
-  candidate_id: candidateId,
-  attempt_no: 1,
-  status: "requires_upload",
-  document: null,
-  error: {
-    code: "fulltext_requires_upload",
-    message: "没有可用的开放获取 PDF，请上传有权处理的文件。",
-    retryable: false,
-  },
-  requested_at: "2026-08-03T00:00:00Z",
-  updated_at: "2026-08-03T00:00:00Z",
-};
-
-const availableFulltext = {
-  ...requiresUpload,
-  status: "available",
-  document: {
-    candidate_id: candidateId,
-    doi: candidate.doi,
-    source_url: `user-upload://candidate/${candidateId}`,
-    staging_object_key: `staging/${candidateId}/acceptance.pdf`,
-    original_filename: "authorized.pdf",
-    media_type: "application/pdf",
-    byte_size: 45,
-    sha256: "a".repeat(64),
-    origin_kind: "user_upload",
-    access_rights: "user_upload",
-    acquired_at: "2026-08-03T00:00:03Z",
-  },
-  error: null,
-  updated_at: "2026-08-03T00:00:03Z",
-};
+let admitted = false;
 
 async function fulfillRequest(route: Route): Promise<void> {
   const request = route.request();
   const url = new URL(request.url());
   const path = url.pathname;
-  const fulltextPath = `/collections/${workspaceId}/search-runs/${runId}/candidates/${candidateId}/fulltext`;
+  const method = request.method();
+  const selectionPath = `/search-runs/${runId}/candidate-selection`;
 
   if (path.endsWith("/auth/me")) return route.fulfill({ json: user });
   if (path.endsWith("/collections"))
@@ -124,19 +93,55 @@ async function fulfillRequest(route: Route): Promise<void> {
     });
   }
   if (path.endsWith(`/search-runs/${runId}/candidates/${candidateId}`)) {
-    return route.fulfill({ json: { candidate, is_selected: true, fulltext: requiresUpload } });
+    return route.fulfill({ json: { candidate, is_selected: false, fulltext: null } });
   }
-  if (path.endsWith(`${fulltextPath}/upload`) && request.method() === "POST") {
-    expect(request.headers()["x-upload-authorized"]).toBe("true");
-    expect(request.headers()["content-type"]).toBe("application/pdf");
-    return route.fulfill({ json: availableFulltext });
+  if (path.endsWith(selectionPath) && method === "PATCH") {
+    expect(request.postDataJSON()).toEqual({ candidate_ids: [candidateId], selected: true });
+    return route.fulfill({ json: { run_id: runId, selected_count: 1 } });
+  }
+  if (path.endsWith(`${selectionPath}/admission`) && method === "POST") {
+    admitted = true;
+    return route.fulfill({
+      json: {
+        run_id: runId,
+        selected_count: 0,
+        admitted_count: 1,
+        already_joined_count: 0,
+        blocked_count: 0,
+        items: [],
+      },
+    });
   }
   if (path.endsWith(`/collections/${workspaceId}/documents`)) {
     return route.fulfill({
       json: {
         collection_id: workspaceId,
+        bibliography_entries: admitted
+          ? [
+              {
+                id: `entry-${candidateId}`,
+                collection_id: workspaceId,
+                source_search_run_id: runId,
+                source_candidate_id: candidateId,
+                title: candidate.title,
+                authors: candidate.authors,
+                doi: candidate.doi,
+                venue: candidate.venue,
+                publication_year: candidate.published_year,
+                citation_status: "ready",
+                citation_text: null,
+                pdf_status: "requires_upload",
+                content_status: "requires_upload",
+                paper_id: null,
+                document_id: null,
+                created_at: "2026-08-03T00:02:00Z",
+                updated_at: "2026-08-03T00:02:00Z",
+              },
+            ]
+          : [],
         documents: [],
         summary: {
+          bibliography_entry_count: admitted ? 1 : 0,
           active_document_count: 0,
           researchable_document_count: 0,
           ingestion_status_counts: {},
@@ -151,6 +156,7 @@ async function fulfillRequest(route: Route): Promise<void> {
 }
 
 async function openPaperDetail(page: Page): Promise<void> {
+  admitted = false;
   await page.addInitScript(() =>
     localStorage.setItem("academic-search.access-token", "mock-token"),
   );
@@ -158,24 +164,18 @@ async function openPaperDetail(page: Page): Promise<void> {
   await page.goto(`/workspace/${workspaceId}/paper/${candidateId}?run=${runId}`);
 }
 
-test("有权 PDF 上传需确认授权，并回到核验任务交接", async ({ page }) => {
+test("需上传 PDF 的候选详情可直接加入研究集合并保留书目", async ({ page }) => {
   await openPaperDetail(page);
 
-  await expect(page.getByLabel("上传有权处理的 PDF")).toBeVisible();
-  const submit = page.getByRole("button", { name: "上传并核验" });
-  await expect(submit).toBeDisabled();
+  await expect(page.getByText("需上传 PDF", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("上传有权处理的 PDF")).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "上传并核验" })).not.toBeVisible();
 
-  await page.locator('input[type="file"]').setInputFiles({
-    name: "authorized.pdf",
-    mimeType: "application/pdf",
-    buffer: Buffer.from("%PDF-1.7\nacceptance\n%%EOF"),
-  });
-  await expect(page.getByText("authorized.pdf", { exact: true })).toBeVisible();
-  await expect(submit).toBeDisabled();
+  await page.getByRole("button", { name: "加入研究集合" }).click();
 
-  await page.getByLabel("我确认有权处理并上传这篇文献的 PDF。").check();
-  await expect(submit).toBeEnabled();
-  await submit.click();
-
-  await expect(page.getByRole("button", { name: "前往核验任务加入集合" })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/workspace/${workspaceId}/collection`));
+  await expect(page.locator(".collection-summary > div").nth(0)).toContainText("1");
+  await expect(page.locator(".collection-summary > div").nth(2)).toContainText("1");
+  await expect(page.getByText(candidate.title)).toBeVisible();
+  await expect(page.getByText("需上传 PDF").first()).toBeVisible();
 });

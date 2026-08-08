@@ -39,6 +39,7 @@ export type CandidateCitation = Schemas["CandidateCitationResponse"];
 export type CandidateRelevanceLevel = Schemas["CandidateRelevanceLevel"];
 export type CandidateRelevanceState = Schemas["CandidateRelevanceState"];
 export type CandidateRelevanceAssessment = Schemas["CandidateRelevanceAssessment"];
+export type CandidatePdfAvailability = { status: "available" | "requires_upload" };
 export type Candidate = Omit<
   Schemas["UnifiedCandidate"],
   | "candidate_id"
@@ -48,6 +49,7 @@ export type Candidate = Omit<
   | "relevance_assessment"
   | "relevance_error"
   | "relevance_state"
+  | "pdf_availability"
   | "source_records"
   | "title_key"
 > & {
@@ -55,6 +57,7 @@ export type Candidate = Omit<
   candidate_id: string;
   citation: CitationMetadata | null;
   links: CandidateLinks;
+  pdf_availability?: CandidatePdfAvailability | null;
   relevance_assessment?: CandidateRelevanceAssessment | null;
   relevance_error?: Response<Schemas["CandidateRelevanceError"]> | null;
   relevance_state?: CandidateRelevanceState;
@@ -82,11 +85,17 @@ export type IngestionRun = Response<Schemas["IngestionRunResponse"]>;
 export type CollectionDocument = Omit<
   Response<Schemas["CollectionDocumentResponse"]>,
   "latest_ingestion_run"
-> & { latest_ingestion_run: IngestionRun | null };
+> & {
+  latest_ingestion_run: IngestionRun | null;
+};
+export type CollectionBibliographyEntry = Response<
+  Schemas["CollectionBibliographyEntryProjection"]
+>;
 export type CollectionDocumentsResponse = Omit<
   Response<Schemas["CollectionDocumentsResponse"]>,
-  "documents" | "summary"
+  "bibliography_entries" | "documents" | "summary"
 > & {
+  bibliography_entries: CollectionBibliographyEntry[];
   documents: CollectionDocument[];
   summary: Response<Schemas["CollectionIngestionSummary"]>;
 };

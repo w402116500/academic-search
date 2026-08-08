@@ -7,6 +7,11 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
+from app.modules.documents.contracts import (
+    FulltextCandidate,
+    PdfAvailabilityResult,
+    PdfAvailabilityStatus,
+)
 from app.modules.literature.contracts import (
     CitationAuthor,
     CitationDate,
@@ -16,6 +21,7 @@ from app.modules.literature.contracts import (
 from app.modules.search.citation_enrichment import CitationMetadataEnricher
 from app.modules.search.contracts import (
     CandidateAuthor,
+    CandidatePdfAvailabilityStatus,
     CandidateRelevanceAssessment,
     CandidateRelevanceEvidence,
     CandidateRelevanceLevel,
@@ -553,14 +559,48 @@ async def test_exhausted_retry_assesses_and_excludes_only_snapshot_subset(
 
 
 @pytest.mark.asyncio
-async def test_citation_enrichment_includes_background_candidates() -> None:
-    """通过核验的背景参考与核心候选同样进入题录预取范围。"""
+async def test_citation_enrichment_covers_all_screening_candidates() -> None:
+    """题录自动核验覆盖全部审核池候选，不再受旧预取数量上限截断。"""
     calls: list[UUID] = []
 
     class CapturingCitationEnricher:
         async def enrich(self, candidate: UnifiedCandidate) -> UnifiedCandidate:
             calls.append(candidate.candidate_id)
             return candidate
+
+    core = _with_level(_candidate(), CandidateRelevanceLevel.CORE)
+    related = _with_level(_candidate(), CandidateRelevanceLevel.RELATED)
+    background = _with_level(_candidate(), CandidateRelevanceLevel.BACKGROUND)
+    excluded = _with_level(_candidate(), CandidateRelevanceLevel.NOT_RECOMMENDED).model_copy(
+        update={"relevance_state": CandidateRelevanceState.EXCLUDED}
+    )
+    executor = CandidateRelevanceRunExecutor(
+        runs=cast(SearchRunRepository, object()),
+        search_run_id=_run().id,
+        session_store=cast(SearchSessionStore, object()),
+        citation_enrichment_limit=1,
+        citation_enricher=cast(CitationMetadataEnricher, CapturingCitationEnricher()),
+    )
+
+    await executor._enrich_citations((core, related, background, excluded))
+
+    assert calls == [core.candidate_id, related.candidate_id, background.candidate_id]
+
+
+@pytest.mark.asyncio
+async def test_pdf_availability_probe_covers_only_screening_candidates() -> None:
+    """公开 PDF 探测覆盖审核池候选，已排除候选不消耗探测配额。"""
+    calls: list[UUID] = []
+
+    class CapturingPdfProbe:
+        async def probe(self, candidate: FulltextCandidate) -> PdfAvailabilityResult:
+            calls.append(candidate.candidate_id)
+            return PdfAvailabilityResult(
+                candidate_id=candidate.candidate_id,
+                status=PdfAvailabilityStatus.AVAILABLE
+                if len(calls) == 1
+                else PdfAvailabilityStatus.REQUIRES_UPLOAD,
+            )
 
     core = _with_level(_candidate(), CandidateRelevanceLevel.CORE)
     background = _with_level(_candidate(), CandidateRelevanceLevel.BACKGROUND)
@@ -571,10 +611,16 @@ async def test_citation_enrichment_includes_background_candidates() -> None:
         runs=cast(SearchRunRepository, object()),
         search_run_id=_run().id,
         session_store=cast(SearchSessionStore, object()),
-        citation_enrichment_limit=2,
-        citation_enricher=cast(CitationMetadataEnricher, CapturingCitationEnricher()),
+        citation_enrichment_limit=0,
+        citation_enricher=None,
+        pdf_availability_probe=CapturingPdfProbe(),
     )
 
-    await executor._enrich_citations((core, background, excluded))
+    probed = await executor._probe_pdf_availability((core, background, excluded))
 
     assert calls == [core.candidate_id, background.candidate_id]
+    assert probed[0].pdf_availability is not None
+    assert probed[0].pdf_availability.status is CandidatePdfAvailabilityStatus.AVAILABLE
+    assert probed[1].pdf_availability is not None
+    assert probed[1].pdf_availability.status is CandidatePdfAvailabilityStatus.REQUIRES_UPLOAD
+    assert probed[2].pdf_availability is None

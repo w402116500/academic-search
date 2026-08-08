@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.collection import CollectionBibliographyEntry, ResearchCollection
 from app.infra.db.models.document import Document, DocumentChunk, IngestionRun
 from app.infra.db.models.paper import Paper
 from app.modules.rag.retrieval import (
@@ -27,10 +27,10 @@ class SqlAlchemyResearchRetrievalRepository:
             select(IngestionRun.id)
             .join(Document, Document.id == IngestionRun.document_id)
             .join(
-                CollectionPaper,
+                CollectionBibliographyEntry,
                 and_(
-                    CollectionPaper.collection_id == Document.collection_id,
-                    CollectionPaper.paper_id == Document.paper_id,
+                    CollectionBibliographyEntry.collection_id == Document.collection_id,
+                    CollectionBibliographyEntry.id == Document.bibliography_entry_id,
                 ),
             )
             .join(ResearchCollection, ResearchCollection.id == Document.collection_id)
@@ -38,7 +38,7 @@ class SqlAlchemyResearchRetrievalRepository:
                 ResearchCollection.id == scope.collection_id,
                 ResearchCollection.owner_user_id == scope.owner_user_id,
                 ResearchCollection.status == "active",
-                CollectionPaper.status == "active",
+                CollectionBibliographyEntry.status == "active",
                 IngestionRun.status == "completed",
                 IngestionRun.is_current.is_(True),
             )
@@ -84,17 +84,17 @@ class SqlAlchemyResearchRetrievalRepository:
         if not chunk_ids:
             return {}
         rows = await self._session.execute(
-            select(DocumentChunk, Document, Paper)
+            select(DocumentChunk, Document, CollectionBibliographyEntry, Paper)
             .join(IngestionRun, IngestionRun.id == DocumentChunk.ingestion_run_id)
             .join(Document, Document.id == IngestionRun.document_id)
-            .join(Paper, Paper.id == Document.paper_id)
             .join(
-                CollectionPaper,
+                CollectionBibliographyEntry,
                 and_(
-                    CollectionPaper.collection_id == Document.collection_id,
-                    CollectionPaper.paper_id == Document.paper_id,
+                    CollectionBibliographyEntry.collection_id == Document.collection_id,
+                    CollectionBibliographyEntry.id == Document.bibliography_entry_id,
                 ),
             )
+            .outerjoin(Paper, Paper.id == CollectionBibliographyEntry.paper_id)
             .join(ResearchCollection, ResearchCollection.id == Document.collection_id)
             .where(
                 DocumentChunk.id.in_(chunk_ids),
@@ -102,7 +102,7 @@ class SqlAlchemyResearchRetrievalRepository:
                 ResearchCollection.id == scope.collection_id,
                 ResearchCollection.owner_user_id == scope.owner_user_id,
                 ResearchCollection.status == "active",
-                CollectionPaper.status == "active",
+                CollectionBibliographyEntry.status == "active",
             )
         )
         result = {
@@ -110,18 +110,26 @@ class SqlAlchemyResearchRetrievalRepository:
                 chunk_id=chunk.id,
                 document_id=document.id,
                 ingestion_run_id=chunk.ingestion_run_id,
-                paper_id=paper.id,
+                paper_id=paper.id if paper is not None else entry.paper_id,
                 content=chunk.content,
                 page_start=chunk.page_start,
                 page_end=chunk.page_end,
                 section_path=tuple(chunk.section_path or ()),
                 locator=dict(chunk.locator),
-                title=paper.title,
-                authors=tuple(dict(author) for author in paper.authors),
-                publication_year=paper.publication_year,
-                source_url=document.source_url,
+                title=paper.title if paper is not None else entry.candidate_title,
+                authors=tuple(
+                    dict(author)
+                    for author in (paper.authors if paper is not None else entry.candidate_authors)
+                ),
+                publication_year=(
+                    paper.publication_year
+                    if paper is not None
+                    else entry.candidate_publication_year
+                ),
+                source_url=document.source_url
+                or (paper.official_url if paper is not None else entry.candidate_source_url),
             )
-            for chunk, document, paper in rows
+            for chunk, document, entry, paper in rows
         }
         await self._session.rollback()
         return result

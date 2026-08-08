@@ -206,6 +206,19 @@ class CandidateLinks(BaseModel):
     fulltext_url: str | None = None
 
 
+class CandidatePdfAvailabilityStatus(StrEnum):
+    """候选公开 PDF 可得性的稳定用户状态。"""
+
+    AVAILABLE = "available"
+    REQUIRES_UPLOAD = "requires_upload"
+
+
+class CandidatePdfAvailability(BaseModel):
+    """筛选页只暴露可行动状态，不携带内部探测失败原因。"""
+
+    status: CandidatePdfAvailabilityStatus
+
+
 class UnifiedCandidate(BaseModel):
     """多个来源合并后的临时候选文献。
 
@@ -244,6 +257,7 @@ class UnifiedCandidate(BaseModel):
     relevance_error: CandidateRelevanceError | None = None
     # 题录由用户复制或加入研究集合时按需补全，不能在候选召回阶段伪造为已核验。
     citation: literature_contracts.CitationMetadata | None = None
+    pdf_availability: CandidatePdfAvailability | None = None
 
 
 class CandidateProcessingResult(BaseModel):

@@ -131,6 +131,29 @@
         "title": "AuthenticationResponse",
         "type": "object"
       },
+      "BibliographyCitationStatus": {
+        "enum": ["pending", "ready", "unavailable"],
+        "title": "BibliographyCitationStatus",
+        "type": "string"
+      },
+      "BibliographyContentStatus": {
+        "enum": [
+          "pending_auto_download",
+          "requires_upload",
+          "document_ready",
+          "ingesting",
+          "researchable",
+          "failed",
+          "cancelled"
+        ],
+        "title": "BibliographyContentStatus",
+        "type": "string"
+      },
+      "BibliographyPdfStatus": {
+        "enum": ["unknown", "available", "requires_upload"],
+        "title": "BibliographyPdfStatus",
+        "type": "string"
+      },
       "CandidateAdmissionBatchResponse": {
         "description": "批量准入结果；成功项会从短期准备清单移除，其余项目保留供继续处理。",
         "properties": {
@@ -278,6 +301,14 @@
           },
           "included_candidate_count": {
             "title": "Included Candidate Count",
+            "type": "integer"
+          },
+          "pdf_available_count": {
+            "title": "Pdf Available Count",
+            "type": "integer"
+          },
+          "pdf_requires_upload_count": {
+            "title": "Pdf Requires Upload Count",
             "type": "integer"
           },
           "raw_candidate_count": {
@@ -431,6 +462,23 @@
         },
         "title": "CandidateLinks",
         "type": "object"
+      },
+      "CandidatePdfAvailability": {
+        "description": "筛选页只暴露可行动状态，不携带内部探测失败原因。",
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/CandidatePdfAvailabilityStatus"
+          }
+        },
+        "required": ["status"],
+        "title": "CandidatePdfAvailability",
+        "type": "object"
+      },
+      "CandidatePdfAvailabilityStatus": {
+        "description": "候选公开 PDF 可得性的稳定用户状态。",
+        "enum": ["available", "requires_upload"],
+        "title": "CandidatePdfAvailabilityStatus",
+        "type": "string"
       },
       "CandidatePreparationBatchResponse": {
         "description": "批量投递全文核验后的逐项结果，不把队列成功误表示为全文成功。",
@@ -1061,6 +1109,227 @@
         "title": "CollectionAdmissionStatus",
         "type": "string"
       },
+      "CollectionBibliographyEntryProjection": {
+        "properties": {
+          "abstract": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Abstract"
+          },
+          "added_at": {
+            "format": "date-time",
+            "title": "Added At",
+            "type": "string"
+          },
+          "authors": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Authors",
+            "type": "array"
+          },
+          "automatic_download_attempts": {
+            "title": "Automatic Download Attempts",
+            "type": "integer"
+          },
+          "citation_status": {
+            "$ref": "#/components/schemas/BibliographyCitationStatus"
+          },
+          "citation_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Citation Text"
+          },
+          "collection_id": {
+            "format": "uuid",
+            "title": "Collection Id",
+            "type": "string"
+          },
+          "content_status": {
+            "$ref": "#/components/schemas/BibliographyContentStatus"
+          },
+          "document_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
+          },
+          "doi": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doi"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "paper_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paper Id"
+          },
+          "pdf_source_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pdf Source Url"
+          },
+          "pdf_status": {
+            "$ref": "#/components/schemas/BibliographyPdfStatus"
+          },
+          "publication_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Year"
+          },
+          "source_candidate_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Candidate Id"
+          },
+          "source_search_run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Search Run Id"
+          },
+          "source_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Url"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CollectionBibliographyEntryStatus"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "venue": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Venue"
+          }
+        },
+        "required": [
+          "id",
+          "collection_id",
+          "source_search_run_id",
+          "source_candidate_id",
+          "paper_id",
+          "status",
+          "title",
+          "authors",
+          "abstract",
+          "publication_year",
+          "venue",
+          "doi",
+          "source_url",
+          "citation_status",
+          "citation_text",
+          "pdf_status",
+          "pdf_source_url",
+          "content_status",
+          "automatic_download_attempts",
+          "tags",
+          "note",
+          "added_at"
+        ],
+        "title": "CollectionBibliographyEntryProjection",
+        "type": "object"
+      },
+      "CollectionBibliographyEntryStatus": {
+        "enum": ["active", "archived"],
+        "title": "CollectionBibliographyEntryStatus",
+        "type": "string"
+      },
       "CollectionBuildResponse": {
         "description": "确认构建后的批量投递结果，允许部分文献投递失败。",
         "properties": {
@@ -1137,9 +1406,27 @@
       "CollectionDocumentRemovalResponse": {
         "description": "移出待确认文献后的审计结果；文件不会被立即物理删除。",
         "properties": {
+          "bibliography_entry_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bibliography Entry Status"
+          },
           "collection_paper_status": {
-            "title": "Collection Paper Status",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collection Paper Status"
           },
           "document_id": {
             "format": "uuid",
@@ -1150,7 +1437,7 @@
             "$ref": "#/components/schemas/IngestionRunStatus"
           }
         },
-        "required": ["document_id", "collection_paper_status", "ingestion_run_status"],
+        "required": ["document_id", "ingestion_run_status"],
         "title": "CollectionDocumentRemovalResponse",
         "type": "object"
       },
@@ -1174,13 +1461,25 @@
             "title": "Authors",
             "type": "array"
           },
+          "bibliography_entry_id": {
+            "format": "uuid",
+            "title": "Bibliography Entry Id",
+            "type": "string"
+          },
           "byte_size": {
             "title": "Byte Size",
             "type": "integer"
           },
           "citation_text": {
-            "title": "Citation Text",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Citation Text"
           },
           "document_id": {
             "format": "uuid",
@@ -1188,8 +1487,15 @@
             "type": "string"
           },
           "doi": {
-            "title": "Doi",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doi"
           },
           "latest_ingestion_run": {
             "anyOf": [
@@ -1217,9 +1523,16 @@
             "type": "string"
           },
           "paper_id": {
-            "format": "uuid",
-            "title": "Paper Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paper Id"
           },
           "publication_year": {
             "anyOf": [
@@ -1268,6 +1581,7 @@
         },
         "required": [
           "document_id",
+          "bibliography_entry_id",
           "paper_id",
           "doi",
           "title",
@@ -1290,6 +1604,13 @@
       "CollectionDocumentsResponse": {
         "description": "活动文献列表与用于刷新页面的入库汇总。",
         "properties": {
+          "bibliography_entries": {
+            "items": {
+              "$ref": "#/components/schemas/CollectionBibliographyEntryProjection"
+            },
+            "title": "Bibliography Entries",
+            "type": "array"
+          },
           "collection_id": {
             "format": "uuid",
             "title": "Collection Id",
@@ -1315,6 +1636,11 @@
         "properties": {
           "active_document_count": {
             "title": "Active Document Count",
+            "type": "integer"
+          },
+          "bibliography_entry_count": {
+            "default": 0,
+            "title": "Bibliography Entry Count",
             "type": "integer"
           },
           "ingestion_status_counts": {
@@ -2246,9 +2572,16 @@
             "title": "Locator Snapshot"
           },
           "paper_id": {
-            "format": "uuid",
-            "title": "Paper Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paper Id"
           },
           "publication_year": {
             "anyOf": [
@@ -3374,6 +3707,16 @@
               }
             ],
             "title": "Pages"
+          },
+          "pdf_availability": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CandidatePdfAvailability"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "published_date": {
             "anyOf": [

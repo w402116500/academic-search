@@ -68,6 +68,8 @@ class CandidateCounts(TypedDict, total=False):
     relevance_failed_count: int
     screening_candidate_count: int
     citation_enriched_count: int
+    pdf_available_count: int
+    pdf_requires_upload_count: int
     included: int
     total: int
 

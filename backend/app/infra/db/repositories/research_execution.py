@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.collection import CollectionBibliographyEntry, ResearchCollection
 from app.infra.db.models.document import Document, DocumentChunk, IngestionRun
 from app.infra.db.models.research import Conversation, Message, ResearchEvidence, ResearchRun
 from app.modules.rag.retrieval import RetrievedEvidence
@@ -333,16 +333,16 @@ class SqlAlchemyResearchExecutionAdapter:
                 .join(IngestionRun, IngestionRun.id == DocumentChunk.ingestion_run_id)
                 .join(Document, Document.id == IngestionRun.document_id)
                 .join(
-                    CollectionPaper,
+                    CollectionBibliographyEntry,
                     and_(
-                        CollectionPaper.collection_id == Document.collection_id,
-                        CollectionPaper.paper_id == Document.paper_id,
+                        CollectionBibliographyEntry.collection_id == Document.collection_id,
+                        CollectionBibliographyEntry.id == Document.bibliography_entry_id,
                     ),
                 )
                 .where(
                     DocumentChunk.id.in_([evidence.chunk_id for evidence in evidences]),
                     Document.collection_id == run.collection_id,
-                    CollectionPaper.status == "active",
+                    CollectionBibliographyEntry.status == "active",
                     IngestionRun.status == "completed",
                     IngestionRun.is_current.is_(True),
                 )

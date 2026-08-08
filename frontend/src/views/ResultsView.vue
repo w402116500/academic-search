@@ -1,44 +1,27 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
-import {
-  ArrowRight,
-  Check,
-  FileDown,
-  FileSearch,
-  Layers2,
-  ListChecks,
-  SlidersHorizontal,
-  X,
-} from "@lucide/vue";
+import { Check, FileSearch, Layers2, ListChecks, SlidersHorizontal } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { useCandidateLiteratureMutations } from "@/api/hooks/literature";
-import { useCollectionDocumentsQuery, useCollectionMutations } from "@/api/hooks/research";
+import { useCollectionDocumentsQuery } from "@/api/hooks/research";
 import {
   useCurrentSearchRunQuery,
   useSearchCandidatesQuery,
   useSearchReviewMutations,
 } from "@/api/hooks/search";
 import {
-  canRequestFulltext,
+  candidatePdfAvailabilityLabel,
   citationStatusLabel,
-  fulltextStatusLabel,
-  isFulltextTerminal,
 } from "@/features/search/search-run-state";
 import {
   candidateLanguageLabel,
   normalizeCandidateLanguage,
 } from "@/features/search/candidate-language";
 import { presentCandidateRelevance } from "@/features/search/candidate-relevance";
-import { candidateProcessingSummary } from "@/features/search/candidate-review-presentation";
 import { useReviewPolling } from "@/features/search/use-review-polling";
 import CandidateReviewTable from "@/features/search/CandidateReviewTable.vue";
-import type {
-  CandidateCounts,
-  CandidateReviewFilter,
-  CandidateReviewItem,
-  FulltextResponse,
-} from "@/api/types";
+import type { CandidateCounts, CandidateReviewFilter, CandidateReviewItem } from "@/api/types";
 
 const route = useRoute();
 const router = useRouter();
@@ -50,7 +33,6 @@ const selectedFilter = ref<CandidateReviewFilter>("all");
 const pageSize = ref<20 | 50>(20);
 const cursorHistory = ref<Array<string | null>>([null]);
 const selectedCandidateId = ref<string | null>(null);
-const collectionConfirmOpen = ref(false);
 const toast = ref<string | null>(null);
 let searchDebounceTimer: number | undefined;
 
@@ -74,13 +56,9 @@ const candidatesQuery = useSearchCandidatesQuery(workspaceId, runId, {
   filter: selectedFilter,
 });
 const collectionQuery = useCollectionDocumentsQuery(workspaceId);
-const { selectionMutation, clearSelectionMutation, refreshCandidates } = useSearchReviewMutations(
-  workspaceId,
-  runId,
-);
-const { requestFulltextMutation: fulltextMutation, citationMutation } =
-  useCandidateLiteratureMutations(workspaceId, runId);
-const { buildCollectionMutation: buildMutation } = useCollectionMutations(workspaceId);
+const { selectionMutation, clearSelectionMutation, admitSelectionMutation, refreshCandidates } =
+  useSearchReviewMutations(workspaceId, runId);
+const { citationMutation } = useCandidateLiteratureMutations(workspaceId, runId);
 
 const reviewItems = computed(() => candidatesQuery.data.value?.items ?? []);
 const selection = computed(
@@ -114,14 +92,11 @@ const selectedCandidate = computed(() => selectedReviewItem.value?.candidate ?? 
 const selectedCandidateReason = computed(() =>
   selectedCandidate.value ? presentCandidateRelevance(selectedCandidate.value) : null,
 );
-const isPreparing = computed(() =>
-  reviewItems.value.some((item) => item.fulltext && !isFulltextTerminal(item.fulltext.status)),
-);
 const isSearchRunActive = computed(() =>
   ["queued", "running"].includes(runQuery.data.value?.status ?? ""),
 );
-const shouldPollReview = computed(() => isPreparing.value || isSearchRunActive.value);
-const { restart: restartReviewPolling } = useReviewPolling(shouldPollReview, refreshCandidates);
+const shouldPollReview = computed(() => isSearchRunActive.value);
+useReviewPolling(shouldPollReview, refreshCandidates);
 
 watch(
   reviewItems,
@@ -177,7 +152,7 @@ function updateSelection(candidateIds: string[], selected: boolean): void {
 }
 
 function isCandidateSelectable(item: CandidateReviewItem | null): boolean {
-  return Boolean(item?.candidate.doi && item.candidate.triage?.included);
+  return Boolean(item?.candidate.triage?.included);
 }
 
 function addSelectedCandidate(): void {
@@ -193,18 +168,6 @@ function clearSelection(): void {
     },
     onError: (error) => {
       toast.value = error instanceof Error ? error.message : "准备清单无法清空。";
-    },
-  });
-}
-
-function requestCandidateFulltext(candidateId: string): void {
-  fulltextMutation.mutate(candidateId, {
-    onSuccess: () => {
-      toast.value = "单篇题录与全文核验已安排。";
-      restartReviewPolling();
-    },
-    onError: (error) => {
-      toast.value = error instanceof Error ? error.message : "全文任务无法启动。";
     },
   });
 }
@@ -225,27 +188,19 @@ function copyCandidateCitation(candidateId: string): void {
   });
 }
 
-function startCollectionBuild(): void {
-  buildMutation.mutate(undefined, {
-    onSuccess: async () => {
-      collectionConfirmOpen.value = false;
-      toast.value = "集合构建任务已启动。";
+function admitSelectedCandidates(): void {
+  admitSelectionMutation.mutate(undefined, {
+    onSuccess: async (response) => {
+      const admittedCount = response.admitted_count + response.already_joined_count;
+      toast.value = `已加入研究集合 ${admittedCount} 篇。`;
       await router.push({
         name: "workspace-collection",
         params: { workspaceId: workspaceId.value },
       });
     },
     onError: (error) => {
-      toast.value = error instanceof Error ? error.message : "集合构建无法启动。";
+      toast.value = error instanceof Error ? error.message : "候选文献无法加入研究集合。";
     },
-  });
-}
-
-function openVerificationTask(): void {
-  void router.push({
-    name: "workspace-verification",
-    params: { workspaceId: workspaceId.value },
-    query: { run: runId.value },
   });
 }
 
@@ -269,10 +224,6 @@ function countValue(counts: CandidateCounts | undefined, key: string): unknown {
   return counts ? (counts as Record<string, unknown>)[key] : undefined;
 }
 
-function fulltextOf(item: CandidateReviewItem | null): FulltextResponse | null {
-  return item?.fulltext ?? null;
-}
-
 onUnmounted(() => {
   window.clearTimeout(searchDebounceTimer);
 });
@@ -285,16 +236,15 @@ onUnmounted(() => {
         <div class="eyebrow">候选文献</div>
         <h1>把候选记录收敛成可研究的文献集合。</h1>
         <p>
-          先建立本次准备清单，再批量核验题录和全文。只有通过严格准入的文献，才会进入待确认集合。
+          检索完成后系统会自动核验题录与公开 PDF 可得性。你只需要选择要保留的文献并加入研究集合。
         </p>
       </div>
       <button
         class="collection-entry-button"
         type="button"
-        :disabled="!pendingCount"
-        @click="collectionConfirmOpen = true"
+        @click="router.push({ name: 'workspace-collection', params: { workspaceId } })"
       >
-        <Layers2 :size="17" /><span>待确认集合</span><strong>{{ pendingCount }} 篇</strong>
+        <Layers2 :size="17" /><span>研究集合</span><strong>{{ indexedCount }} 篇可研究</strong>
       </button>
     </div>
 
@@ -313,11 +263,11 @@ onUnmounted(() => {
       </div>
       <div class="process-item current">
         <strong>候选审核</strong
-        ><span>本次准备清单 {{ selection.selected_count }} 篇，等待你决定下一步</span>
+        ><span>已选 {{ selection.selected_count }} 篇，可直接加入研究集合</span>
       </div>
       <div class="process-item">
-        <strong>向量索引</strong
-        ><span>{{ pendingCount }} 篇待构建，{{ indexedCount }} 篇已可研究</span>
+        <strong>RAG 研究范围</strong
+        ><span>{{ pendingCount }} 篇正在入库，{{ indexedCount }} 篇已可研究</span>
       </div>
     </div>
 
@@ -347,12 +297,14 @@ onUnmounted(() => {
         :loading="candidatesQuery.isPending.value || runQuery.isPending.value"
         :error="candidatesQuery.isError.value"
         :search-run-active="isSearchRunActive"
-        :selection-pending="selectionMutation.isPending.value"
+        :selection-pending="
+          selectionMutation.isPending.value || admitSelectionMutation.isPending.value
+        "
         :clear-pending="clearSelectionMutation.isPending.value"
         :citation-pending="citationMutation.isPending.value"
         @toggle-selection="updateSelection"
         @clear-selection="clearSelection"
-        @open-verification="openVerificationTask"
+        @admit-selection="admitSelectedCandidates"
         @reset-page="resetPage"
         @previous-page="goToPreviousPage"
         @next-page="goToNextPage"
@@ -360,10 +312,10 @@ onUnmounted(() => {
         @copy-citation="copyCandidateCitation"
       />
 
-      <aside class="selection-inspector" aria-label="候选文献检查器">
+      <aside class="selection-inspector" aria-label="文献详情">
         <template v-if="selectedCandidate && selectedReviewItem && selectedCandidateReason">
           <div class="inspector-head">
-            <strong>候选文献检查器</strong><SlidersHorizontal :size="16" />
+            <strong>文献详情</strong><SlidersHorizontal :size="16" />
           </div>
           <div class="inspector-body">
             <span class="eyebrow">正在查看</span>
@@ -379,9 +331,47 @@ onUnmounted(() => {
               >
             </p>
 
+            <section class="inspector-section">
+              <div class="inspector-section-heading">
+                <h3>正式引用</h3>
+                <span
+                  class="status-text"
+                  :class="{ ok: selectedCandidate.citation?.status === 'ready' }"
+                  ><Check :size="14" />{{ citationStatusLabel(selectedCandidate.citation) }}</span
+                >
+              </div>
+              <p>
+                {{
+                  selectedCandidate.citation?.status === "ready"
+                    ? "该题录已核验，可复制正式引用。"
+                    : "该题录暂不可用，加入研究集合不受影响。"
+                }}
+              </p>
+            </section>
+
+            <section class="inspector-section">
+              <div class="inspector-section-heading">
+                <h3>PDF 可用性</h3>
+                <span
+                  class="status-text"
+                  :class="{ ok: selectedCandidate.pdf_availability?.status === 'available' }"
+                  ><Layers2 :size="14" />{{
+                    candidatePdfAvailabilityLabel(selectedCandidate)
+                  }}</span
+                >
+              </div>
+              <p>
+                {{
+                  selectedCandidate.pdf_availability?.status === "available"
+                    ? "加入研究集合后，系统会自动获取 PDF 并尝试入库。"
+                    : "加入研究集合后会保留书目，并在集合页显示上传入口。"
+                }}
+              </p>
+            </section>
+
             <section class="inspector-section candidate-reason-section">
               <div class="inspector-section-heading">
-                <h3>为什么保留这篇候选</h3>
+                <h3>相关性依据</h3>
                 <span
                   class="candidate-relevance-tier"
                   :class="`tier-${selectedCandidateReason.tier}`"
@@ -431,32 +421,6 @@ onUnmounted(() => {
               </p>
             </section>
 
-            <details class="inspector-section inspector-processing">
-              <summary><span>处理记录</span><small>查看技术状态</small></summary>
-              <p>
-                {{ candidateProcessingSummary(selectedCandidate, fulltextOf(selectedReviewItem)) }}
-              </p>
-              <div class="provenance-list">
-                <div>
-                  <span>身份确认</span
-                  ><strong>{{ selectedCandidate.doi ? "DOI 已提供" : "缺少 DOI" }}</strong>
-                </div>
-                <div>
-                  <span>题录核验</span
-                  ><strong>{{
-                    selectedCandidate.citation?.status === "ready"
-                      ? "可生成正式引用"
-                      : citationStatusLabel(selectedCandidate.citation)
-                  }}</strong>
-                </div>
-                <div>
-                  <span>全文获取</span
-                  ><strong>{{ fulltextStatusLabel(fulltextOf(selectedReviewItem)) }}</strong>
-                </div>
-                <div><span>向量索引</span><strong>加入待确认集合后开始</strong></div>
-              </div>
-            </details>
-
             <div class="inspector-actions">
               <button
                 v-if="isCandidateSelectable(selectedReviewItem) && !selectedReviewItem.is_selected"
@@ -465,35 +429,7 @@ onUnmounted(() => {
                 :disabled="selectionMutation.isPending.value"
                 @click="addSelectedCandidate"
               >
-                <ListChecks :size="15" />加入本次准备清单
-              </button>
-              <button
-                v-if="canRequestFulltext(selectedCandidate, fulltextOf(selectedReviewItem))"
-                class="secondary-button"
-                type="button"
-                :disabled="fulltextMutation.isPending.value"
-                @click="requestCandidateFulltext(selectedCandidate.candidate_id)"
-              >
-                <FileDown :size="15" />准备单篇核验
-              </button>
-              <button
-                v-else-if="
-                  fulltextOf(selectedReviewItem) &&
-                  !isFulltextTerminal(fulltextOf(selectedReviewItem)?.status)
-                "
-                class="secondary-button"
-                type="button"
-                disabled
-              >
-                <FileDown :size="15" />{{ fulltextStatusLabel(fulltextOf(selectedReviewItem)) }}
-              </button>
-              <button
-                v-else-if="fulltextOf(selectedReviewItem)?.status === 'available'"
-                class="primary-button"
-                type="button"
-                @click="openVerificationTask"
-              >
-                <Layers2 :size="15" />前往核验任务加入集合
+                <ListChecks :size="15" />加入选择
               </button>
               <button
                 class="secondary-button"
@@ -520,60 +456,11 @@ onUnmounted(() => {
 
     <div class="results-note">
       <Check :size="15" /><span
-        >准备清单只保存在当前检索会话中。未通过
-        DOI、题录与正文准入前，候选不会写入长期文献库。</span
+        >候选选择会保存为研究集合书目；只有 PDF 已获取、解析和入库完成的文献会进入 RAG
+        研究范围。</span
       >
     </div>
 
-    <Teleport to="body">
-      <section
-        v-if="collectionConfirmOpen"
-        class="collection-confirm-overlay"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="collection-confirm-title"
-        data-testid="collection-confirm-dialog"
-      >
-        <div class="collection-confirm-surface">
-          <button
-            class="icon-button close-dialog"
-            type="button"
-            title="关闭"
-            @click="collectionConfirmOpen = false"
-          >
-            <X :size="16" />
-          </button>
-          <span class="eyebrow">待确认集合</span>
-          <h2 id="collection-confirm-title">构建这 {{ pendingCount }} 篇文献的可问答集合？</h2>
-          <p>
-            系统将依次解析全文、切分可引用片段并写入当前工作区的向量索引。构建完成前，研究对话不会使用这些文献。
-          </p>
-          <dl class="collection-confirm-summary">
-            <div>
-              <dt>纳入数量</dt>
-              <dd>{{ pendingCount }} 篇全文</dd>
-            </div>
-            <div>
-              <dt>固定条件</dt>
-              <dd>DOI、题录、全文均已核验</dd>
-            </div>
-          </dl>
-          <div class="collection-confirm-actions">
-            <button class="secondary-button" type="button" @click="collectionConfirmOpen = false">
-              返回审核</button
-            ><button
-              class="primary-button"
-              type="button"
-              :disabled="buildMutation.isPending.value"
-              @click="startCollectionBuild"
-            >
-              {{ buildMutation.isPending.value ? "正在启动构建…" : "确认并开始构建"
-              }}<ArrowRight :size="16" />
-            </button>
-          </div>
-        </div>
-      </section>
-    </Teleport>
     <div v-if="toast" class="toast" role="status">{{ toast }}</div>
   </section>
 </template>

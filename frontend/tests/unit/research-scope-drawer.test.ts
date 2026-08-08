@@ -7,6 +7,7 @@ import ResearchScopeDrawer from "@/features/research/ResearchScopeDrawer.vue";
 const documents: CollectionDocument[] = [
   {
     document_id: "00000000-0000-4000-8000-000000000001",
+    bibliography_entry_id: "00000000-0000-4000-8000-000000000201",
     paper_id: "00000000-0000-4000-8000-000000000101",
     doi: "10.1000/first",
     title: "第一篇范围文献",
@@ -25,6 +26,7 @@ const documents: CollectionDocument[] = [
   },
   {
     document_id: "00000000-0000-4000-8000-000000000002",
+    bibliography_entry_id: "00000000-0000-4000-8000-000000000202",
     paper_id: "00000000-0000-4000-8000-000000000102",
     doi: "10.1000/second",
     title: "第二篇范围文献",

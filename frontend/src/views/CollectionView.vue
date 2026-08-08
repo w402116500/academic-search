@@ -7,28 +7,97 @@ import {
   LockKeyhole,
   MessageSquareText,
   RotateCcw,
-  Sparkles,
-  Trash2,
 } from "@lucide/vue";
 import { RouterLink, useRoute } from "vue-router";
 
 import { useCollectionDocumentsQuery, useCollectionMutations } from "@/api/hooks/research";
+import type { CollectionBibliographyEntry, CollectionDocument } from "@/api/types";
 
 const route = useRoute();
 const workspaceId = computed(() => String(route.params.workspaceId));
 const documentsQuery = useCollectionDocumentsQuery(workspaceId, true);
-const {
-  buildCollectionMutation: buildMutation,
-  removePendingDocumentMutation: removeMutation,
-  refreshDocuments,
-} = useCollectionMutations(workspaceId);
+const { refreshDocuments } = useCollectionMutations(workspaceId);
 
-const pendingCount = computed(
-  () => documentsQuery.data.value?.summary.ingestion_status_counts?.pending ?? 0,
+const bibliographyEntries = computed(() => documentsQuery.data.value?.bibliography_entries ?? []);
+const documents = computed(() => documentsQuery.data.value?.documents ?? []);
+const documentByEntryId = computed(
+  () => new Map(documents.value.map((document) => [document.bibliography_entry_id, document])),
+);
+const collectionCount = computed(
+  () =>
+    documentsQuery.data.value?.summary.bibliography_entry_count ?? bibliographyEntries.value.length,
 );
 const readyCount = computed(
   () => documentsQuery.data.value?.summary.researchable_document_count ?? 0,
 );
+const needsUploadCount = computed(
+  () =>
+    bibliographyEntries.value.filter((entry) => entry.content_status === "requires_upload").length,
+);
+const ingestingCount = computed(
+  () =>
+    bibliographyEntries.value.filter((entry) =>
+      ["pending_auto_download", "document_ready", "ingesting"].includes(entry.content_status),
+    ).length,
+);
+const bibliographyRows = computed(() =>
+  bibliographyEntries.value.map((entry) => {
+    const document = documentByEntryId.value.get(entry.id);
+    const status = bibliographyStatus(entry, document);
+    return {
+      entry,
+      document,
+      meta: bibliographyMeta(entry, document),
+      citationLabel: entry.citation_status === "ready" ? "题录已核验" : "该题录暂不可用",
+      pdfLabel: entry.pdf_status === "available" ? "可自动获取 PDF" : "需上传 PDF",
+      ...status,
+    };
+  }),
+);
+
+function bibliographyMeta(
+  entry: CollectionBibliographyEntry,
+  document: CollectionDocument | undefined,
+): string {
+  const parts = [
+    entry.doi ?? "DOI 待补全",
+    entry.publication_year ? String(entry.publication_year) : "年份待补全",
+    document?.original_filename ?? entry.venue ?? "PDF 待上传",
+  ];
+  return parts.join(" · ");
+}
+
+function bibliographyStatus(
+  entry: CollectionBibliographyEntry,
+  document: CollectionDocument | undefined,
+): { statusClass: string; statusLabel: string; statusHint: string } {
+  if (
+    entry.content_status === "researchable" ||
+    document?.latest_ingestion_run?.status === "completed"
+  ) {
+    return {
+      statusClass: "entry-status-rag",
+      statusLabel: "已进入 RAG",
+      statusHint: "当前全文已完成入库",
+    };
+  }
+  if (
+    entry.content_status === "requires_upload" ||
+    entry.content_status === "failed" ||
+    entry.content_status === "cancelled"
+  ) {
+    return {
+      statusClass: "entry-status-upload",
+      statusLabel: "需上传 PDF",
+      statusHint: "等待补充可读取全文",
+    };
+  }
+  return {
+    statusClass: "entry-status-progress",
+    statusLabel: "正在入库",
+    statusHint: "系统正在获取或处理全文",
+  };
+}
 </script>
 
 <template>
@@ -54,71 +123,37 @@ const readyCount = computed(
     <template v-else-if="documentsQuery.data.value">
       <div class="collection-summary">
         <div>
-          <span>活动文献</span
-          ><strong>{{ documentsQuery.data.value.summary.active_document_count }}</strong>
+          <span>研究集合</span><strong>{{ collectionCount }}</strong>
         </div>
         <div>
-          <span>待确认构建</span><strong>{{ pendingCount }}</strong>
+          <span>RAG 研究范围</span><strong>{{ readyCount }}</strong>
         </div>
         <div class="highlight">
-          <span>可进入研究</span><strong>{{ readyCount }}</strong>
+          <span>需上传 PDF</span><strong>{{ needsUploadCount }}</strong>
         </div>
       </div>
       <div class="collection-actions">
-        <button
-          class="primary-button"
-          type="button"
-          :disabled="!pendingCount || buildMutation.isPending.value"
-          @click="buildMutation.mutate()"
-        >
-          <Sparkles :size="16" />{{
-            buildMutation.isPending.value ? "正在投递…" : "确认并构建集合"
-          }}</button
-        ><span v-if="pendingCount">确认后会开始解析、切块、嵌入和 Milvus 建索引。</span>
+        <span>{{ ingestingCount }} 篇正在入库；RAG 问答只使用已完成入库的全文证据。</span>
       </div>
       <div class="document-list">
-        <article
-          v-for="document in documentsQuery.data.value.documents"
-          :key="document.document_id"
-          class="document-row"
-        >
+        <article v-for="row in bibliographyRows" :key="row.entry.id" class="document-row">
           <span class="document-icon"><FileText :size="17" /></span>
           <div class="document-copy">
-            <strong>{{ document.title }}</strong
-            ><small
-              >{{ document.doi }} · {{ document.publication_year ?? "年份待补全" }} ·
-              {{ document.original_filename }}</small
-            >
+            <strong>{{ row.entry.title }}</strong>
+            <small>{{ row.meta }}</small>
+            <div class="document-badges">
+              <span>{{ row.citationLabel }}</span>
+              <span>{{ row.pdfLabel }}</span>
+            </div>
           </div>
           <div class="document-status">
-            <span :class="`ingestion-${document.latest_ingestion_run?.status ?? 'pending'}`">{{
-              document.latest_ingestion_run?.status === "completed"
-                ? "可研究"
-                : document.latest_ingestion_run?.status === "running"
-                  ? "处理中"
-                  : document.latest_ingestion_run?.status === "queued"
-                    ? "排队中"
-                    : document.latest_ingestion_run?.status === "failed"
-                      ? "失败"
-                      : "待构建"
-            }}</span
-            ><small v-if="document.latest_ingestion_run?.error_message">{{
-              document.latest_ingestion_run.error_message
-            }}</small>
+            <span :class="row.statusClass">{{ row.statusLabel }}</span>
+            <small>{{ row.statusHint }}</small>
           </div>
-          <button
-            v-if="document.latest_ingestion_run?.status === 'pending'"
-            class="icon-button"
-            type="button"
-            title="移出待确认集合"
-            @click="removeMutation.mutate(document.document_id)"
-          >
-            <Trash2 :size="15" />
-          </button>
         </article>
-        <div v-if="!documentsQuery.data.value.documents.length" class="empty-state">
+        <div v-if="!bibliographyRows.length" class="empty-state">
           <LockKeyhole :size="22" /><strong>集合还是空的</strong>
-          <p>回到文献结果页，先加入通过全文核验的文献。</p>
+          <p>从候选审核页加入想保留的文献。</p>
         </div>
       </div>
       <div class="research-lock" :class="{ 'research-unlocked': readyCount > 0 }">
@@ -129,8 +164,8 @@ const readyCount = computed(
           <p>
             {{
               readyCount
-                ? "对话只会检索当前集合中已完成解析、切块和索引的全文。"
-                : "至少完成一篇文献的解析和索引后，才会出现研究入口。"
+                ? "对话只会检索当前 RAG 研究范围内的全文。"
+                : "至少一篇文献进入 RAG 研究范围后，才会出现研究入口。"
             }}
           </p>
         </div>
@@ -141,7 +176,7 @@ const readyCount = computed(
         >
           <MessageSquareText :size="15" />进入文献研究
         </RouterLink>
-        <span v-else><Check :size="14" />证据边界由当前集合决定</span>
+        <span v-else><Check :size="14" />{{ ingestingCount }} 篇正在入库</span>
       </div>
     </template>
   </section>

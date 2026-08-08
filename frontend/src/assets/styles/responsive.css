@@ -490,14 +490,10 @@
     flex-direction: column;
   }
   .document-row {
-    grid-template-columns: 31px minmax(0, 1fr) 32px;
+    grid-template-columns: 31px minmax(0, 1fr);
   }
   .document-status {
     grid-column: 2 / 3;
-  }
-  .document-row > .icon-button {
-    grid-column: 3;
-    grid-row: 1 / span 2;
   }
   .research-lock {
     align-items: flex-start;

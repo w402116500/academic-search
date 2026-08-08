@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from app.modules.documents.contracts import (
@@ -14,10 +14,31 @@ from app.modules.documents.contracts import (
 )
 from app.modules.documents.keys import build_candidate_fulltext_key
 from app.modules.documents.service import CandidateFulltextService
+from app.modules.literature.contracts import (
+    CitationAuthor as LiteratureCitationAuthor,
+)
+from app.modules.literature.contracts import (
+    CitationDate,
+    CitationMetadata,
+    CitationMetadataStatus,
+)
+from app.modules.research.bibliography import (
+    BibliographyCitationStatus,
+    BibliographyContentStatus,
+    BibliographyPdfStatus,
+    CollectionBibliographyEntryDraft,
+    CollectionBibliographyEntryResult,
+    CollectionBibliographyError,
+    CollectionBibliographyErrorCode,
+    CollectionBibliographyRepository,
+    CollectionBibliographyUpsertStatus,
+)
 from app.modules.search.api_contracts import CandidateReviewFilter
 from app.modules.search.contracts import (
     CandidateAuthor,
     CandidateLinks,
+    CandidatePdfAvailability,
+    CandidatePdfAvailabilityStatus,
     CandidateRelevanceAssessment,
     CandidateRelevanceError,
     CandidateRelevanceEvidence,
@@ -32,6 +53,7 @@ from app.modules.search.fulltext_candidate import (
     SearchCandidateFulltextLookup,
     to_fulltext_candidate,
 )
+from app.modules.search.review_admission import CandidateAdmissionService
 from app.modules.search.review_preparation import CandidatePreparationService
 from app.modules.search.review_query import CandidateReviewQueryService
 from app.modules.search.review_selection import CandidateSelectionService
@@ -124,6 +146,44 @@ class FakeQueue:
     ) -> str:
         self.calls.append((search_run_id, candidate_id, attempt_no))
         return f"fulltext-{search_run_id}-{candidate_id}-{attempt_no}"
+
+
+class FakeBibliographyRepository:
+    """记录集合书目 upsert 请求，不创建 Paper 或 Document。"""
+
+    def __init__(self, *, fail_candidate_ids: set[UUID] | None = None) -> None:
+        self.drafts: list[CollectionBibliographyEntryDraft] = []
+        self._seen_candidate_ids: set[UUID] = set()
+        self._fail_candidate_ids = fail_candidate_ids or set()
+
+    async def upsert_from_candidate(
+        self,
+        *,
+        owner_user_id: UUID,
+        collection_id: UUID,
+        draft: CollectionBibliographyEntryDraft,
+    ) -> CollectionBibliographyEntryResult:
+        assert owner_user_id == _OWNER_ID
+        assert collection_id == _COLLECTION_ID
+        if draft.source_candidate_id in self._fail_candidate_ids:
+            raise CollectionBibliographyError(
+                CollectionBibliographyErrorCode.COLLECTION_NOT_FOUND,
+                "研究集合不存在、已归档或不属于当前用户。",
+            )
+        self.drafts.append(draft)
+        status = (
+            CollectionBibliographyUpsertStatus.ALREADY_PRESENT
+            if draft.source_candidate_id in self._seen_candidate_ids
+            else CollectionBibliographyUpsertStatus.ADDED
+        )
+        if draft.source_candidate_id is not None:
+            self._seen_candidate_ids.add(draft.source_candidate_id)
+        return CollectionBibliographyEntryResult(
+            status=status,
+            entry_id=uuid4(),
+            collection_id=collection_id,
+            content_status=draft.content_status,
+        )
 
 
 def _run() -> SearchRunRecord:
@@ -400,26 +460,149 @@ async def test_completed_review_only_returns_verified_positive_relevance_levels(
 
 
 @pytest.mark.asyncio
-async def test_selection_refuses_candidate_without_doi() -> None:
-    """缺 DOI 候选可以继续展示，但不能成为后续 RAG 准备清单的一部分。"""
+async def test_selection_allows_screening_candidate_without_doi() -> None:
+    """缺 DOI 候选仍可被用户保存到后续研究集合。"""
     missing_doi = _candidate(
         _FIRST_ID,
         title="Candidate without DOI",
         year=2025,
         doi=None,
     )
-    service = CandidateSelectionService(_review_session(_store(missing_doi)))
+    store = _store(missing_doi)
+    session = _review_session(store)
+    selection = CandidateSelectionService(session)
+    query = CandidateReviewQueryService(session)
 
-    with pytest.raises(CandidateReviewError) as raised:
-        await service.update_selection(
-            owner_user_id=_OWNER_ID,
-            collection_id=_COLLECTION_ID,
-            search_run_id=_RUN_ID,
-            candidate_ids=[_FIRST_ID],
-            selected=True,
-        )
+    response = await selection.update_selection(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+        candidate_ids=[_FIRST_ID],
+        selected=True,
+    )
+    page = await query.page(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+        limit=20,
+        cursor=None,
+        query="",
+        review_filter=CandidateReviewFilter.ALL,
+    )
 
-    assert raised.value.code is CandidateReviewErrorCode.CANDIDATE_NOT_SELECTABLE
+    assert response.selected_count == 1
+    assert page.selection.selected_count == 1
+    assert page.selection.needs_fulltext_count == 1
+    assert page.selection.blocked_count == 0
+
+
+@pytest.mark.asyncio
+async def test_admit_selected_persists_candidate_without_citation_or_pdf_gate() -> None:
+    """加入研究集合不再要求候选已有 DOI、正式题录或可自动获取 PDF。"""
+    candidate = _candidate(
+        _FIRST_ID,
+        title="Candidate without citation or automatic PDF",
+        year=2025,
+        doi=None,
+    )
+    store = _store(candidate)
+    session = _review_session(store)
+    selection = CandidateSelectionService(session)
+    bibliography = FakeBibliographyRepository()
+    service = CandidateAdmissionService(
+        session,
+        cast(CollectionBibliographyRepository, bibliography),
+        selection,
+    )
+    await selection.update_selection(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+        candidate_ids=[_FIRST_ID],
+        selected=True,
+    )
+
+    response = await service.admit_selected(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+    )
+
+    draft = bibliography.drafts[0]
+    assert response.selected_count == 1
+    assert response.admitted_count == 1
+    assert response.blocked_count == 0
+    assert await session.selected_ids(_run()) == set()
+    assert draft.source_search_run_id == _RUN_ID
+    assert draft.source_candidate_id == _FIRST_ID
+    assert draft.title == "Candidate without citation or automatic PDF"
+    assert draft.doi is None
+    assert draft.citation_status is BibliographyCitationStatus.UNAVAILABLE
+    assert draft.citation_text is None
+    assert draft.pdf_status is BibliographyPdfStatus.REQUIRES_UPLOAD
+    assert draft.content_status is BibliographyContentStatus.REQUIRES_UPLOAD
+    assert draft.paper_id is None
+
+
+@pytest.mark.asyncio
+async def test_admit_selected_preserves_ready_citation_and_available_pdf_state() -> None:
+    """ready 题录才写入正式引用；公开 PDF 可得时条目进入待自动获取状态。"""
+    candidate = _candidate(
+        _FIRST_ID,
+        title="Candidate with verified citation and PDF",
+        year=2025,
+        doi="10.1000/review.ready",
+    ).model_copy(
+        update={
+            "links": CandidateLinks(
+                landing_url="https://doi.org/10.1000/review.ready",
+                fulltext_url="https://example.test/review-ready.pdf",
+            ),
+            "citation": CitationMetadata(
+                status=CitationMetadataStatus.READY,
+                authors=(LiteratureCitationAuthor(literal="A. Lovelace"),),
+                title="Candidate with verified citation and PDF",
+                document_type="journal_article",
+                issued_date=CitationDate(year=2025),
+                doi="10.1000/review.ready",
+                url="https://doi.org/10.1000/review.ready",
+            ),
+            "pdf_availability": CandidatePdfAvailability(
+                status=CandidatePdfAvailabilityStatus.AVAILABLE
+            ),
+        }
+    )
+    store = _store(candidate)
+    session = _review_session(store)
+    selection = CandidateSelectionService(session)
+    bibliography = FakeBibliographyRepository()
+    service = CandidateAdmissionService(
+        session,
+        cast(CollectionBibliographyRepository, bibliography),
+        selection,
+    )
+    await selection.update_selection(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+        candidate_ids=[_FIRST_ID],
+        selected=True,
+    )
+
+    response = await service.admit_selected(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        search_run_id=_RUN_ID,
+    )
+
+    draft = bibliography.drafts[0]
+    assert response.admitted_count == 1
+    assert draft.citation_status is BibliographyCitationStatus.READY
+    assert draft.citation_text
+    assert draft.citation_snapshot["status"] == CitationMetadataStatus.READY.value
+    assert draft.pdf_status is BibliographyPdfStatus.AVAILABLE
+    assert draft.pdf_source_url == "https://example.test/review-ready.pdf"
+    assert draft.content_status is BibliographyContentStatus.PENDING_AUTO_DOWNLOAD
 
 
 @pytest.mark.asyncio

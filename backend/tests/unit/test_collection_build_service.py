@@ -9,7 +9,7 @@ from uuid import UUID
 
 import pytest
 from app.core.ingestion_settings import IngestionSettings
-from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.collection import CollectionBibliographyEntry, ResearchCollection
 from app.infra.db.models.document import Document, IngestionRun
 from app.infra.db.models.paper import Paper
 from app.infra.db.repositories.collection_builds import SqlAlchemyCollectionBuildAdapter
@@ -27,6 +27,7 @@ _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000702")
 _PAPER_ID = UUID("00000000-0000-0000-0000-000000000703")
 _DOCUMENT_ID = UUID("00000000-0000-0000-0000-000000000704")
 _RUN_ID = UUID("00000000-0000-0000-0000-000000000705")
+_ENTRY_ID = UUID("00000000-0000-0000-0000-000000000707")
 _LATEST_ADDED_RUN = object()
 
 
@@ -122,6 +123,7 @@ def _document() -> Document:
     return Document(
         id=_DOCUMENT_ID,
         collection_id=_COLLECTION_ID,
+        bibliography_entry_id=_ENTRY_ID,
         paper_id=_PAPER_ID,
         origin_kind="open_access",
         original_filename="article.pdf",
@@ -132,6 +134,32 @@ def _document() -> Document:
         source_url="https://example.test/article.pdf",
         access_rights="open_access",
     )
+
+
+def _bibliography_entry() -> CollectionBibliographyEntry:
+    """创建集合自己的书目条目，作为集合计数和文档所有权来源。"""
+    entry = CollectionBibliographyEntry(
+        id=_ENTRY_ID,
+        collection_id=_COLLECTION_ID,
+        paper_id=_PAPER_ID,
+        status="active",
+        candidate_title="A build service paper",
+        candidate_authors=[{"literal": "Ada Lovelace"}],
+        candidate_publication_year=2024,
+        candidate_venue="Build Tests",
+        candidate_doi="10.1000/build.example",
+        citation_status="ready",
+        citation_text="[1] A build service paper.",
+        pdf_status="available",
+        content_status="document_ready",
+        tags=[],
+        source_record={},
+        citation_snapshot={},
+        pdf_snapshot={},
+    )
+    entry.added_at = datetime.now(UTC)
+    entry.automatic_download_attempts = 0
+    return entry
 
 
 def _run(*, status: str = "pending", attempt_no: int = 1) -> IngestionRun:
@@ -297,14 +325,12 @@ async def test_retry_rejects_the_global_daily_submission_limit_before_creating_a
 async def test_remove_pending_document_archives_metadata_without_deleting_file() -> None:
     """移出待确认文献只改变 PostgreSQL 审计状态，不触碰 MinIO 正式对象。"""
     collection = _collection()
-    collection_paper = CollectionPaper(collection_id=_COLLECTION_ID, paper_id=_PAPER_ID)
-    collection_paper.tags = []
-    collection_paper.added_at = datetime.now(UTC)
+    entry = _bibliography_entry()
     document = _document()
     run = _run()
     session = FakeSession(
         scalar_values=[collection, run],
-        execute_values=[[FakeRow((collection_paper, document))]],
+        execute_values=[[FakeRow((entry, document))]],
     )
 
     result = await SqlAlchemyCollectionBuildAdapter(
@@ -315,9 +341,9 @@ async def test_remove_pending_document_archives_metadata_without_deleting_file()
         document_id=_DOCUMENT_ID,
     )
 
-    assert collection_paper.status == "archived"
+    assert entry.status == "archived"
     assert run.status == IngestionRunStatus.CANCELLED.value
-    assert result.collection_paper_status == "archived"
+    assert result.bibliography_entry_status == "archived"
     assert result.ingestion_run_status is IngestionRunStatus.CANCELLED
 
 
@@ -325,9 +351,7 @@ async def test_remove_pending_document_archives_metadata_without_deleting_file()
 async def test_list_documents_counts_only_current_completed_runs_as_researchable() -> None:
     """页面可问答数量只统计已完成且 current 的版本，pending 不能提前计入。"""
     collection = _collection()
-    collection_paper = CollectionPaper(collection_id=_COLLECTION_ID, paper_id=_PAPER_ID)
-    collection_paper.tags = []
-    collection_paper.added_at = datetime.now(UTC)
+    entry = _bibliography_entry()
     document = _document()
     paper = Paper(
         id=_PAPER_ID,
@@ -341,7 +365,7 @@ async def test_list_documents_counts_only_current_completed_runs_as_researchable
     run.is_current = True
     session = FakeSession(
         scalar_values=[collection],
-        execute_values=[[FakeRow((collection_paper, paper, document, run))]],
+        execute_values=[[FakeRow((entry, paper, document, run))]],
     )
 
     response = await SqlAlchemyCollectionBuildAdapter(cast(AsyncSession, session)).list_documents(
@@ -349,7 +373,11 @@ async def test_list_documents_counts_only_current_completed_runs_as_researchable
         collection_id=_COLLECTION_ID,
     )
 
+    assert response.summary.bibliography_entry_count == 1
     assert response.summary.active_document_count == 1
     assert response.summary.researchable_document_count == 1
     assert response.summary.ingestion_status_counts == {IngestionRunStatus.COMPLETED: 1}
+    assert response.bibliography_entries[0].id == _ENTRY_ID
+    assert response.bibliography_entries[0].document_id == _DOCUMENT_ID
+    assert response.documents[0].bibliography_entry_id == _ENTRY_ID
     assert response.documents[0].latest_ingestion_run is not None

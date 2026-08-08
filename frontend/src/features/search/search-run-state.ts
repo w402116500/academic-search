@@ -108,43 +108,35 @@ export function canRequestFulltext(
 /** 为题录非 ready 的不同原因提供准确的正式引用提示。 */
 export function citationReadinessMessage(citation: CitationMetadata | null | undefined): string {
   switch (citation?.status) {
-    case "conflict":
-      return "题录元数据存在冲突，暂不能生成正式引用。全文核验会再次尝试补齐题录。";
-    case "partial":
-      return "题录信息不完整，暂不能生成正式引用。全文核验会再次尝试补齐题录。";
-    case "unresolved":
-      return "题录核验尚未完成，暂不能生成正式引用。";
     case "ready":
       return "题录已通过 DOI 核验，可以生成正式引用。";
     default:
-      return "题录尚未核验完成，暂不能生成正式引用。";
+      return "该题录暂不可用，仍可加入研究集合。";
   }
 }
 
 /** 让候选列表直接呈现真实题录状态，避免把不同问题笼统显示为“未核验”。 */
 export function citationStatusLabel(citation: CitationMetadata | null | undefined): string {
   switch (citation?.status) {
-    case "conflict":
-      return "题录存在冲突";
-    case "partial":
-      return "题录信息不完整";
-    case "unresolved":
-      return "题录核验失败";
     case "ready":
       return "题录已核验";
     default:
-      return "题录待核验";
+      return "该题录暂不可用";
   }
 }
 
-/** 将全文任务状态翻译为结果页与检查器共用的中文标签。 */
+export function candidatePdfAvailabilityLabel(candidate: Candidate): string {
+  return candidate.pdf_availability?.status === "available" ? "可自动获取 PDF" : "需上传 PDF";
+}
+
+/** 将历史全文任务状态翻译为候选详情可复用的 PDF 状态标签。 */
 export function fulltextStatusLabel(fulltext: FulltextResponse | null | undefined): string {
-  if (!fulltext) return "获取全文";
-  if (fulltext.status === "available") return "全文已核验";
-  if (fulltext.status === "rejected") return "未通过全文准入";
-  if (fulltext.status === "failed") return "全文不可用";
+  if (!fulltext) return "需上传 PDF";
+  if (fulltext.status === "available") return "可自动获取 PDF";
+  if (fulltext.status === "rejected") return "PDF 不可用";
+  if (fulltext.status === "failed") return "需上传 PDF";
   if (fulltext.status === "requires_upload") return "需要上传已授权 PDF";
-  return "全文处理中";
+  return "PDF 处理中";
 }
 
 export type FulltextVerificationPresentation = {
@@ -154,26 +146,23 @@ export type FulltextVerificationPresentation = {
   retryable: boolean;
 };
 
-/**
- * 核验任务页直接呈现 Worker 公开的真实状态。题录补齐属于 Worker 内的严格前置条件，
- * 但它没有独立的公开阶段，因此不能在前端伪造一条不存在的“题录处理中”状态。
- */
+/** 将历史全文任务状态收敛为稳定、非技术性的 PDF 处理文案。 */
 export function presentFulltextVerification(
   fulltext: FulltextResponse | null | undefined,
 ): FulltextVerificationPresentation {
   if (!fulltext) {
     return {
       tone: "waiting",
-      label: "尚未开始核验",
-      detail: "该候选仍在本次准备清单中，尚未投递题录与全文核验任务。",
+      label: "尚未加入研究集合",
+      detail: "该候选还没有被持久保存为研究集合书目。",
       retryable: false,
     };
   }
   if (fulltext.status === "queued") {
     return {
       tone: "waiting",
-      label: "等待核验任务",
-      detail: "题录与全文核验已安排，正在等待 Worker 接手。",
+      label: "等待处理",
+      detail: "PDF 获取或入库处理正在等待 Worker 接手。",
       retryable: false,
     };
   }
@@ -206,15 +195,15 @@ export function presentFulltextVerification(
   if (fulltext.status === "available") {
     return {
       tone: "ready",
-      label: "已通过核验",
-      detail: "题录与可处理全文均已就绪，可以加入待确认集合。",
+      label: "可自动获取 PDF",
+      detail: "可处理全文已就绪，可以加入研究集合。",
       retryable: false,
     };
   }
   return {
     tone: "blocked",
-    label: fulltext.status === "rejected" ? "未通过全文准入" : "全文暂不可用",
-    detail: fulltext.error?.message || "当前文献暂时不能作为研究集合的正文来源。",
+    label: fulltext.status === "rejected" ? "PDF 不可用" : "需上传 PDF",
+    detail: fulltext.error?.message || "当前文献需要上传 PDF 后才能进入 RAG 研究范围。",
     retryable: fulltext.error?.retryable ?? false,
   };
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Candidate, FulltextResponse } from "@/api/types";
 import {
   canRequestFulltext,
+  candidatePdfAvailabilityLabel,
   citationReadinessMessage,
   citationStatusLabel,
   isSearchRunProgressStalled,
@@ -87,9 +88,9 @@ describe("检索与全文状态", () => {
     expect(isFulltextTerminal("validating")).toBe(false);
   });
 
-  it("为带 DOI 且尚未创建任务的候选开放全文核验", () => {
+  it("保留历史单篇全文任务的 DOI 触发条件", () => {
     expect(canRequestFulltext(createCandidate("ready"), null)).toBe(true);
-    // 全文 Worker 会先重新补齐题录，题录冲突不能让浏览器提前阻断核验尝试。
+    // 历史全文 Worker 会先重新补齐题录，题录冲突不能让浏览器提前阻断处理尝试。
     expect(canRequestFulltext(createCandidate("conflict"), null)).toBe(true);
     expect(canRequestFulltext({ ...createCandidate("ready"), doi: null }, null)).toBe(false);
     expect(
@@ -99,29 +100,37 @@ describe("检索与全文状态", () => {
     ).toBe(false);
   });
 
-  it("为题录冲突显示真实原因而不是加载提示", () => {
-    expect(citationReadinessMessage(createCandidate("conflict").citation)).toContain("存在冲突");
-    expect(citationStatusLabel(createCandidate("conflict").citation)).toBe("题录存在冲突");
-    expect(citationStatusLabel(createCandidate("partial").citation)).toBe("题录信息不完整");
-    expect(citationStatusLabel(null)).toBe("题录待核验");
+  it("为候选题录和 PDF 可得性显示稳定用户状态", () => {
+    expect(citationReadinessMessage(createCandidate("conflict").citation)).toContain("暂不可用");
+    expect(citationStatusLabel(createCandidate("ready").citation)).toBe("题录已核验");
+    expect(citationStatusLabel(createCandidate("conflict").citation)).toBe("该题录暂不可用");
+    expect(citationStatusLabel(createCandidate("partial").citation)).toBe("该题录暂不可用");
+    expect(citationStatusLabel(null)).toBe("该题录暂不可用");
+    expect(
+      candidatePdfAvailabilityLabel({
+        ...createCandidate("ready"),
+        pdf_availability: { status: "available" },
+      }),
+    ).toBe("可自动获取 PDF");
+    expect(candidatePdfAvailabilityLabel(createCandidate("ready"))).toBe("需上传 PDF");
   });
 
-  it("将全文任务的真实状态转换为核验页可理解的说明", () => {
+  it("将历史全文任务状态转换为稳定 PDF 处理说明", () => {
     expect(presentFulltextVerification(null)).toMatchObject({
       tone: "waiting",
-      label: "尚未开始核验",
+      label: "尚未加入研究集合",
       retryable: false,
     });
     expect(presentFulltextVerification({ status: "queued" } as FulltextResponse)).toMatchObject({
       tone: "waiting",
-      label: "等待核验任务",
+      label: "等待处理",
     });
     expect(presentFulltextVerification({ status: "validating" } as FulltextResponse)).toMatchObject(
       { tone: "processing", label: "正在校验 PDF" },
     );
     expect(presentFulltextVerification({ status: "available" } as FulltextResponse)).toMatchObject({
       tone: "ready",
-      label: "已通过核验",
+      label: "可自动获取 PDF",
     });
     expect(
       presentFulltextVerification({
@@ -134,6 +143,6 @@ describe("检索与全文状态", () => {
         status: "failed",
         error: { message: "下载超时", retryable: true },
       } as FulltextResponse),
-    ).toMatchObject({ tone: "blocked", label: "全文暂不可用", retryable: true });
+    ).toMatchObject({ tone: "blocked", label: "需上传 PDF", retryable: true });
   });
 });

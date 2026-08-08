@@ -411,6 +411,11 @@
   background: #f8fafc;
   color: var(--muted) !important;
 }
+.compact-button.primary-compact {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #fff !important;
+}
 .candidate-title small,
 .candidate-table td > span,
 .candidate-table td small {
@@ -423,6 +428,11 @@
   display: inline-flex !important;
   align-items: center;
   gap: 5px;
+}
+.candidate-status-stack {
+  display: grid;
+  gap: 6px;
+  min-width: 138px;
 }
 .status-text.ok {
   color: #287a60 !important;

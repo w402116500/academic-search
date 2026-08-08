@@ -1,27 +1,19 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import { ArrowLeft, Clipboard, FileDown, LoaderCircle, ShieldCheck, Upload } from "@lucide/vue";
+import { computed, ref } from "vue";
+import { ArrowLeft, Clipboard, LoaderCircle, ShieldCheck } from "@lucide/vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
-import {
-  readCandidateFulltext,
-  useCandidateCitationQuery,
-  useCandidateLiteratureMutations,
-} from "@/api/hooks/literature";
+import { useCandidateCitationQuery } from "@/api/hooks/literature";
 import { useSearchCandidateQuery, useSearchReviewMutations } from "@/api/hooks/search";
 import {
-  canRequestFulltext,
+  candidatePdfAvailabilityLabel,
   citationReadinessMessage,
-  fulltextStatusLabel,
-  isFulltextTerminal,
-  presentFulltextVerification,
 } from "@/features/search/search-run-state";
 import {
   candidateLanguageLabel,
   normalizeCandidateLanguage,
 } from "@/features/search/candidate-language";
-import { useReviewPolling } from "@/features/search/use-review-polling";
-import type { CitationFormat, FulltextResponse } from "@/api/types";
+import type { CitationFormat } from "@/api/types";
 
 const route = useRoute();
 const router = useRouter();
@@ -30,37 +22,15 @@ const runId = computed(() => String(route.query.run ?? ""));
 const candidateId = computed(() => String(route.params.candidateId));
 const candidateQuery = useSearchCandidateQuery(workspaceId, runId, candidateId);
 const candidate = computed(() => candidateQuery.data.value?.candidate);
-const fulltext = ref<FulltextResponse | null>(null);
 const toast = ref<string | null>(null);
-const uploadInput = ref<HTMLInputElement | null>(null);
-const uploadFile = ref<File | null>(null);
-const uploadAuthorized = ref(false);
 const citationFormat = ref<CitationFormat>("gb_t_7714_2015_numeric");
 const citationReady = computed(() => candidate.value?.citation?.status === "ready");
-const canStartFulltext = computed(
-  () => Boolean(candidate.value) && canRequestFulltext(candidate.value!, fulltext.value),
+const { selectionMutation, admitSelectionMutation } = useSearchReviewMutations(workspaceId, runId);
+const admitIsPending = computed(
+  () => selectionMutation.isPending.value || admitSelectionMutation.isPending.value,
 );
-const fulltextIsProcessing = computed(
-  () => Boolean(fulltext.value) && !isFulltextTerminal(fulltext.value?.status),
-);
-const canUploadAuthorizedPdf = computed(() => {
-  const state = fulltext.value;
-  return Boolean(
-    state &&
-    (state.status === "requires_upload" ||
-      state.status === "rejected" ||
-      (state.status === "failed" && state.error?.retryable === false)),
-  );
-});
-const fulltextPresentation = computed(() => presentFulltextVerification(fulltext.value));
-
-/** 刷新详情页后恢复已有全文任务状态，而不是只等待本页新发起的操作。 */
-watch(
-  () => candidateQuery.data.value?.fulltext,
-  (state) => {
-    fulltext.value = state ?? null;
-  },
-  { immediate: true },
+const pdfAvailability = computed(() =>
+  candidate.value ? candidatePdfAvailabilityLabel(candidate.value) : "",
 );
 
 const citationQuery = useCandidateCitationQuery(
@@ -70,65 +40,21 @@ const citationQuery = useCandidateCitationQuery(
   citationFormat,
   citationReady,
 );
-const { requestFulltextMutation: fulltextMutation, uploadFulltextMutation: uploadMutation } =
-  useCandidateLiteratureMutations(workspaceId, runId);
-const { selectionMutation } = useSearchReviewMutations(workspaceId, runId);
-useReviewPolling(fulltextIsProcessing, refreshCandidateFulltext);
 
-function openVerificationTask(): void {
-  void router.push({
-    name: "workspace-verification",
-    params: { workspaceId: workspaceId.value },
-    query: { run: runId.value },
-  });
-}
-
-function chooseUpload(): void {
-  uploadInput.value?.click();
-}
-
-function selectUpload(event: Event): void {
-  const target = event.target as HTMLInputElement;
-  uploadFile.value = target.files?.[0] ?? null;
-}
-
-async function startCandidateFulltext(): Promise<void> {
+async function addCandidateToCollection(): Promise<void> {
   try {
-    // 单篇核验也进入本次准备清单，确保完成后能从批量交接页继续处理。
     await selectionMutation.mutateAsync({
       candidateIds: [candidateId.value],
       selected: true,
     });
-    fulltext.value = await fulltextMutation.mutateAsync(candidateId.value);
-  } catch (error) {
-    toast.value = error instanceof Error ? error.message : "全文任务无法启动。";
-  }
-}
-
-async function uploadAuthorizedPdf(): Promise<void> {
-  if (!uploadFile.value) {
-    toast.value = "请先选择要上传的 PDF。";
-    return;
-  }
-  try {
-    fulltext.value = await uploadMutation.mutateAsync({
-      candidateId: candidateId.value,
-      file: uploadFile.value,
+    await admitSelectionMutation.mutateAsync();
+    toast.value = "已加入研究集合。";
+    await router.push({
+      name: "workspace-collection",
+      params: { workspaceId: workspaceId.value },
     });
-    uploadFile.value = null;
-    uploadAuthorized.value = false;
-    if (uploadInput.value) uploadInput.value.value = "";
   } catch (error) {
-    toast.value = error instanceof Error ? error.message : "PDF 上传或校验无法完成。";
-  }
-}
-
-async function refreshCandidateFulltext(): Promise<boolean> {
-  try {
-    fulltext.value = await readCandidateFulltext(workspaceId.value, runId.value, candidateId.value);
-    return !isFulltextTerminal(fulltext.value.status);
-  } catch {
-    return false;
+    toast.value = error instanceof Error ? error.message : "候选文献无法加入研究集合。";
   }
 }
 
@@ -200,68 +126,15 @@ async function copyCitation(): Promise<void> {
           rel="noreferrer"
           >打开来源</a
         ><button
-          v-if="canStartFulltext"
           class="primary-button"
           type="button"
-          :disabled="fulltextMutation.isPending.value"
-          @click="startCandidateFulltext"
+          :disabled="admitIsPending"
+          @click="addCandidateToCollection"
         >
-          <FileDown :size="15" />准备全文核验</button
-        ><button v-else-if="fulltextIsProcessing" class="primary-button" type="button" disabled>
-          <FileDown :size="15" />{{ fulltextStatusLabel(fulltext) }}</button
-        ><button
-          v-else-if="fulltext?.status === 'available'"
-          class="primary-button"
-          type="button"
-          @click="openVerificationTask"
-        >
-          <ShieldCheck :size="15" />前往核验任务加入集合
-        </button>
-        <button
-          v-else-if="canUploadAuthorizedPdf"
-          class="primary-button"
-          type="button"
-          @click="chooseUpload"
-        >
-          <Upload :size="15" />选择有权处理的 PDF
+          <LoaderCircle v-if="admitIsPending" class="spin" :size="15" />
+          <ShieldCheck v-else :size="15" />加入研究集合
         </button>
       </div>
-      <section
-        v-if="canUploadAuthorizedPdf"
-        class="upload-authorization-panel"
-        aria-label="上传有权处理的 PDF"
-      >
-        <input
-          ref="uploadInput"
-          class="visually-hidden"
-          type="file"
-          accept="application/pdf,.pdf"
-          @change="selectUpload"
-        />
-        <div>
-          <strong>上传有权处理的 PDF</strong>
-          <p>文件会先校验类型、PDF 签名、大小和哈希，再进入本次核验任务。</p>
-        </div>
-        <p v-if="uploadFile" class="upload-selected-file">{{ uploadFile.name }}</p>
-        <label class="upload-authorization-check">
-          <input v-model="uploadAuthorized" type="checkbox" />
-          <span>我确认有权处理并上传这篇文献的 PDF。</span>
-        </label>
-        <div class="upload-authorization-actions">
-          <button class="secondary-button" type="button" @click="chooseUpload">
-            <Upload :size="15" />{{ uploadFile ? "更换 PDF" : "选择 PDF" }}
-          </button>
-          <button
-            class="primary-button"
-            type="button"
-            :disabled="!uploadFile || !uploadAuthorized || uploadMutation.isPending.value"
-            @click="uploadAuthorizedPdf"
-          >
-            <LoaderCircle v-if="uploadMutation.isPending.value" class="spin" :size="15" />
-            <Upload v-else :size="15" />上传并核验
-          </button>
-        </div>
-      </section>
       <div class="paper-grid">
         <div class="paper-main">
           <section>
@@ -292,20 +165,12 @@ async function copyCitation(): Promise<void> {
           <div class="evidence-status">
             <ShieldCheck :size="17" />
             <div>
-              <strong>{{
-                fulltext
-                  ? fulltextPresentation.label
-                  : !candidate.doi
-                    ? "缺少 DOI"
-                    : "待准备全文核验"
-              }}</strong>
+              <strong>{{ pdfAvailability }}</strong>
               <p>
                 {{
-                  fulltext
-                    ? fulltextPresentation.detail
-                    : !candidate.doi
-                      ? "缺少 DOI，不能进入后续研究集合。"
-                      : `${citationReadinessMessage(candidate.citation)} 可以开始全文核验，系统会先按 DOI 尝试补齐题录。`
+                  candidate.pdf_availability?.status === "available"
+                    ? "加入研究集合后会自动尝试获取 PDF。"
+                    : "加入研究集合后会保留书目，并在集合页标记需上传 PDF。"
                 }}
               </p>
             </div>

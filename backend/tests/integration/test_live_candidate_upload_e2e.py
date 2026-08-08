@@ -15,13 +15,11 @@ from uuid import UUID, uuid4
 
 import pytest
 from app.core.fulltext_settings import get_fulltext_acquisition_settings
-from app.infra.db.models.collection import ResearchCollection
-from app.infra.db.models.document import Document, IngestionRun
-from app.infra.db.models.paper import Paper
+from app.infra.db.models.collection import CollectionBibliographyEntry, ResearchCollection
 from app.infra.db.models.user import User
 from app.infra.db.models.workflow import ResearchPlan, SearchRun
-from app.infra.db.repositories.literature_admission import (
-    SqlAlchemyLiteratureAdmissionAdapter,
+from app.infra.db.repositories.collection_bibliography import (
+    SqlAlchemyCollectionBibliographyRepository,
 )
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
 from app.infra.db.session import async_session_factory
@@ -123,9 +121,7 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
     redis = redis_client_from_environment()
     acquisition_settings = get_fulltext_acquisition_settings()
     storage = Boto3StagingObjectStorage(acquisition_settings)
-    document_object_key: str | None = None
     staging_object_key: str | None = None
-    paper_id: UUID | None = None
 
     try:
         async with async_session_factory() as session:
@@ -227,12 +223,7 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
             )
             admitted = await CandidateAdmissionService(
                 review_session,
-                CandidateFulltextService(
-                    runs,
-                    store,
-                    candidate_lookup=SearchCandidateFulltextLookup(runs, store),
-                ),
-                SqlAlchemyLiteratureAdmissionAdapter(session, storage),
+                SqlAlchemyCollectionBibliographyRepository(session),
                 selection,
             ).admit_selected(
                 owner_user_id=owner_user_id,
@@ -241,26 +232,20 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
             )
             assert admitted.admitted_count == 1
             assert admitted.blocked_count == 0
-            document = await session.scalar(
-                select(Document).where(Document.collection_id == collection_id)
+            entry = await session.scalar(
+                select(CollectionBibliographyEntry).where(
+                    CollectionBibliographyEntry.collection_id == collection_id,
+                    CollectionBibliographyEntry.source_candidate_id == candidate_id,
+                )
             )
-            assert document is not None
-            assert document.origin_kind == "user_upload"
-            assert document.access_rights == "user_upload"
-            assert document.sha256 == hashlib.sha256(_PDF_BYTES).hexdigest()
-            ingestion_run = await session.scalar(
-                select(IngestionRun).where(IngestionRun.document_id == document.id)
-            )
-            assert ingestion_run is not None
-            assert ingestion_run.status == "pending"
-            document_object_key = document.object_key
-            paper_id = document.paper_id
+            assert entry is not None
+            assert entry.citation_status == "ready"
+            assert entry.pdf_status == "requires_upload"
+            assert entry.content_status == "requires_upload"
 
         assert await store.read_snapshot(selection_key) == {"candidate_ids": []}
         print("live authorized candidate upload acceptance passed")
     finally:
-        if document_object_key is not None:
-            await storage.delete_object(object_key=document_object_key)
         if staging_object_key is not None:
             await storage.delete_object(object_key=staging_object_key)
         await redis.delete(session_key, fulltext_key, selection_key)
@@ -269,9 +254,5 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
             if user is not None:
                 await cleanup_session.delete(user)
                 await cleanup_session.flush()
-            if paper_id is not None:
-                paper = await cleanup_session.get(Paper, paper_id)
-                if paper is not None:
-                    await cleanup_session.delete(paper)
             await cleanup_session.commit()
         await redis.aclose()

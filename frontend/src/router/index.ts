@@ -64,10 +64,12 @@ const router = createRouter({
           component: () => import("@/views/ResultsView.vue"),
         },
         {
-          // 批量核验是独立的长任务画布，避免把逐篇任务状态挤在候选审核表中。
           path: "verification",
-          name: "workspace-verification",
-          component: () => import("@/views/VerificationTaskView.vue"),
+          redirect: (to) => ({
+            name: "workspace-results",
+            params: { workspaceId: to.params.workspaceId },
+            query: to.query,
+          }),
         },
         {
           path: "paper/:candidateId",

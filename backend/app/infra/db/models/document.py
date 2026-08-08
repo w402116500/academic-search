@@ -28,23 +28,24 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.infra.db.base import Base, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
-    from app.infra.db.models.collection import CollectionPaper
+    from app.infra.db.models.collection import CollectionBibliographyEntry
+    from app.infra.db.models.paper import Paper
     from app.infra.db.models.research import ResearchEvidence
 
 
 class Document(UUIDPrimaryKeyMixin, Base):
-    """某篇已验证论文在一个研究工作区中可用于 RAG 的文件。
+    """研究集合书目条目取得的、可进入 RAG 入库链路的文件。
 
-    ``collection_id`` 与 ``paper_id`` 共同外键指向 ``collection_papers``，
-    从数据库层禁止将不属于当前工作区的论文文件写入 RAG 范围。
+    ``collection_id`` 与 ``bibliography_entry_id`` 共同外键指向集合书目条目，
+    从数据库层禁止将不属于当前工作区的候选文件写入 RAG 范围。
     """
 
     __tablename__ = "documents"
     __table_args__ = (
-        # 文档必须归属“已加入当前工作区”的论文，防止跨工作区文件混入 RAG 索引。
+        # 文档必须归属“已加入当前工作区”的书目条目，防止跨工作区文件混入 RAG 索引。
         ForeignKeyConstraint(
-            ["collection_id", "paper_id"],
-            ["collection_papers.collection_id", "collection_papers.paper_id"],
+            ["collection_id", "bibliography_entry_id"],
+            ["collection_bibliography_entries.collection_id", "collection_bibliography_entries.id"],
             ondelete="CASCADE",
         ),
         UniqueConstraint("collection_id", "sha256", name="collection_sha256"),
@@ -62,8 +63,15 @@ class Document(UUIDPrimaryKeyMixin, Base):
     collection_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=False, index=True, comment="所属研究工作区标识"
     )
-    paper_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), nullable=False, index=True, comment="对应已验证论文标识"
+    bibliography_entry_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False, index=True, comment="所属集合书目条目标识"
+    )
+    paper_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("papers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="对应已验证论文标识；题录不可用时为空",
     )
     origin_kind: Mapped[str] = mapped_column(
         String(32),
@@ -96,7 +104,10 @@ class Document(UUIDPrimaryKeyMixin, Base):
         comment="文件记录创建时间",
     )
 
-    collection_paper: Mapped[CollectionPaper] = relationship(back_populates="documents")
+    bibliography_entry: Mapped[CollectionBibliographyEntry] = relationship(
+        back_populates="documents"
+    )
+    paper: Mapped[Paper | None] = relationship()
     ingestion_runs: Mapped[list[IngestionRun]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",

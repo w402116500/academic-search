@@ -898,6 +898,28 @@ export interface components {
       user: components["schemas"]["CurrentUserResponse"];
     };
     /**
+     * BibliographyCitationStatus
+     * @enum {string}
+     */
+    BibliographyCitationStatus: "pending" | "ready" | "unavailable";
+    /**
+     * BibliographyContentStatus
+     * @enum {string}
+     */
+    BibliographyContentStatus:
+      | "pending_auto_download"
+      | "requires_upload"
+      | "document_ready"
+      | "ingesting"
+      | "researchable"
+      | "failed"
+      | "cancelled";
+    /**
+     * BibliographyPdfStatus
+     * @enum {string}
+     */
+    BibliographyPdfStatus: "unknown" | "available" | "requires_upload";
+    /**
      * CandidateAdmissionBatchResponse
      * @description 批量准入结果；成功项会从短期准备清单移除，其余项目保留供继续处理。
      */
@@ -982,6 +1004,10 @@ export interface components {
       included?: number;
       /** Included Candidate Count */
       included_candidate_count?: number;
+      /** Pdf Available Count */
+      pdf_available_count?: number;
+      /** Pdf Requires Upload Count */
+      pdf_requires_upload_count?: number;
       /** Raw Candidate Count */
       raw_candidate_count?: number;
       /** Relevance Analyzed Count */
@@ -1055,6 +1081,19 @@ export interface components {
       /** Open Access Url */
       open_access_url?: string | null;
     };
+    /**
+     * CandidatePdfAvailability
+     * @description 筛选页只暴露可行动状态，不携带内部探测失败原因。
+     */
+    CandidatePdfAvailability: {
+      status: components["schemas"]["CandidatePdfAvailabilityStatus"];
+    };
+    /**
+     * CandidatePdfAvailabilityStatus
+     * @description 候选公开 PDF 可得性的稳定用户状态。
+     * @enum {string}
+     */
+    CandidatePdfAvailabilityStatus: "available" | "requires_upload";
     /**
      * CandidatePreparationBatchResponse
      * @description 批量投递全文核验后的逐项结果，不把队列成功误表示为全文成功。
@@ -1331,6 +1370,67 @@ export interface components {
      * @enum {string}
      */
     CollectionAdmissionStatus: "added" | "already_joined";
+    /** CollectionBibliographyEntryProjection */
+    CollectionBibliographyEntryProjection: {
+      /** Abstract */
+      abstract: string | null;
+      /**
+       * Added At
+       * Format: date-time
+       */
+      added_at: string;
+      /** Authors */
+      authors: {
+        [key: string]: unknown;
+      }[];
+      /** Automatic Download Attempts */
+      automatic_download_attempts: number;
+      citation_status: components["schemas"]["BibliographyCitationStatus"];
+      /** Citation Text */
+      citation_text: string | null;
+      /**
+       * Collection Id
+       * Format: uuid
+       */
+      collection_id: string;
+      content_status: components["schemas"]["BibliographyContentStatus"];
+      /** Document Id */
+      document_id?: string | null;
+      /** Doi */
+      doi: string | null;
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string;
+      /** Note */
+      note: string | null;
+      /** Paper Id */
+      paper_id: string | null;
+      /** Pdf Source Url */
+      pdf_source_url: string | null;
+      pdf_status: components["schemas"]["BibliographyPdfStatus"];
+      /** Publication Year */
+      publication_year: number | null;
+      /** Source Candidate Id */
+      source_candidate_id: string | null;
+      /** Source Search Run Id */
+      source_search_run_id: string | null;
+      /** Source Url */
+      source_url: string | null;
+      status: components["schemas"]["CollectionBibliographyEntryStatus"];
+      /** Tags */
+      tags: string[];
+      /** Title */
+      title: string;
+      /** Venue */
+      venue: string | null;
+    };
+    /**
+     * CollectionBibliographyEntryStatus
+     * @enum {string}
+     */
+    CollectionBibliographyEntryStatus: "active" | "archived";
     /**
      * CollectionBuildResponse
      * @description 确认构建后的批量投递结果，允许部分文献投递失败。
@@ -1369,8 +1469,10 @@ export interface components {
      * @description 移出待确认文献后的审计结果；文件不会被立即物理删除。
      */
     CollectionDocumentRemovalResponse: {
+      /** Bibliography Entry Status */
+      bibliography_entry_status?: string | null;
       /** Collection Paper Status */
-      collection_paper_status: string;
+      collection_paper_status?: string | null;
       /**
        * Document Id
        * Format: uuid
@@ -1394,27 +1496,29 @@ export interface components {
       authors: {
         [key: string]: unknown;
       }[];
+      /**
+       * Bibliography Entry Id
+       * Format: uuid
+       */
+      bibliography_entry_id: string;
       /** Byte Size */
       byte_size: number;
       /** Citation Text */
-      citation_text: string;
+      citation_text: string | null;
       /**
        * Document Id
        * Format: uuid
        */
       document_id: string;
       /** Doi */
-      doi: string;
+      doi: string | null;
       latest_ingestion_run: components["schemas"]["IngestionRunResponse"] | null;
       /** Note */
       note: string | null;
       /** Original Filename */
       original_filename: string;
-      /**
-       * Paper Id
-       * Format: uuid
-       */
-      paper_id: string;
+      /** Paper Id */
+      paper_id: string | null;
       /** Publication Year */
       publication_year: number | null;
       /** Source Url */
@@ -1431,6 +1535,8 @@ export interface components {
      * @description 活动文献列表与用于刷新页面的入库汇总。
      */
     CollectionDocumentsResponse: {
+      /** Bibliography Entries */
+      bibliography_entries?: components["schemas"]["CollectionBibliographyEntryProjection"][];
       /**
        * Collection Id
        * Format: uuid
@@ -1447,6 +1553,11 @@ export interface components {
     CollectionIngestionSummary: {
       /** Active Document Count */
       active_document_count: number;
+      /**
+       * Bibliography Entry Count
+       * @default 0
+       */
+      bibliography_entry_count: number;
       /** Ingestion Status Counts */
       ingestion_status_counts?: {
         [key: string]: number;
@@ -1857,11 +1968,8 @@ export interface components {
       locator_snapshot: {
         [key: string]: unknown;
       } | null;
-      /**
-       * Paper Id
-       * Format: uuid
-       */
-      paper_id: string;
+      /** Paper Id */
+      paper_id: string | null;
       /** Publication Year */
       publication_year: number | null;
       /** Rank */
@@ -2382,6 +2490,7 @@ export interface components {
       links?: components["schemas"]["CandidateLinks"];
       /** Pages */
       pages?: string | null;
+      pdf_availability?: components["schemas"]["CandidatePdfAvailability"] | null;
       published_date?: components["schemas"]["CitationDate"] | null;
       /** Published Year */
       published_year?: number | null;

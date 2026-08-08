@@ -44,7 +44,12 @@ const run = {
   updated_at: "2026-08-03T00:01:00Z",
 };
 
-function candidate(candidateId: string, title: string, language: "zh" | "en") {
+function candidate(
+  candidateId: string,
+  title: string,
+  language: "zh" | "en",
+  pdfStatus: "available" | "requires_upload" = "available",
+) {
   return {
     candidate_id: candidateId,
     doi: `10.1000/${candidateId}`,
@@ -71,36 +76,50 @@ function candidate(candidateId: string, title: string, language: "zh" | "en") {
     },
     relevance_error: null,
     citation: { status: "ready", doi: `10.1000/${candidateId}`, url: null },
+    pdf_availability: { status: pdfStatus },
   };
 }
 
 const allCandidates = [
   candidate("candidate-1", "Neighborhood walkability and physical activity among adults", "en"),
   candidate("candidate-2", "社区步行性与成年人身体活动的关联", "zh"),
-  candidate("candidate-3", "Built environment correlates of daily walking in adults", "en"),
+  candidate(
+    "candidate-3",
+    "Built environment correlates of daily walking in adults",
+    "en",
+    "requires_upload",
+  ),
 ];
-
-function fulltextState(candidateId: string, status: "available" | "validating") {
-  return {
-    search_run_id: runId,
-    candidate_id: candidateId,
-    attempt_no: 1,
-    status,
-    document: {
-      staging_object_key: `staging/${candidateId}.pdf`,
-      sha256: "a".repeat(64),
-      byte_size: 1024,
-    },
-    error: null,
-    requested_at: "2026-08-03T00:00:00Z",
-    updated_at: "2026-08-03T00:00:02Z",
-  };
-}
 
 async function openReviewPage(page: Page): Promise<void> {
   const selectedIds = new Set<string>();
-  const verificationStates = new Map<string, "available" | "validating">();
-  let pendingDocumentCount = 0;
+  const bibliographyEntries: Array<Record<string, unknown>> = [];
+
+  function upsertBibliographyEntry(candidateId: string): void {
+    if (bibliographyEntries.some((entry) => entry.source_candidate_id === candidateId)) return;
+    const currentCandidate = allCandidates.find((item) => item.candidate_id === candidateId);
+    if (!currentCandidate) return;
+    const pdfStatus = currentCandidate.pdf_availability.status;
+    bibliographyEntries.push({
+      id: `entry-${candidateId}`,
+      collection_id: workspaceId,
+      source_search_run_id: runId,
+      source_candidate_id: candidateId,
+      title: currentCandidate.title,
+      authors: currentCandidate.authors,
+      doi: currentCandidate.doi,
+      venue: currentCandidate.venue,
+      publication_year: currentCandidate.published_year,
+      citation_status: currentCandidate.citation.status,
+      citation_text: null,
+      pdf_status: pdfStatus,
+      content_status: pdfStatus === "available" ? "pending_auto_download" : "requires_upload",
+      paper_id: null,
+      document_id: null,
+      created_at: "2026-08-03T00:02:00Z",
+      updated_at: "2026-08-03T00:02:00Z",
+    });
+  }
 
   await page.addInitScript(() =>
     localStorage.setItem("academic-search.access-token", "candidate-review-token"),
@@ -118,14 +137,19 @@ async function openReviewPage(page: Page): Promise<void> {
     if (pathname.endsWith(`/collections/${workspaceId}`)) return route.fulfill({ json: workspace });
     if (pathname.endsWith("/search-runs/current")) return route.fulfill({ json: run });
     if (pathname.endsWith("/documents")) {
+      const pendingCount = bibliographyEntries.filter(
+        (entry) => entry.content_status === "pending_auto_download",
+      ).length;
       return route.fulfill({
         json: {
           collection_id: workspaceId,
+          bibliography_entries: bibliographyEntries,
           documents: [],
           summary: {
-            active_document_count: pendingDocumentCount,
+            bibliography_entry_count: bibliographyEntries.length,
+            active_document_count: pendingCount,
             researchable_document_count: 0,
-            ingestion_status_counts: { pending: pendingDocumentCount },
+            ingestion_status_counts: pendingCount ? { pending: pendingCount } : {},
           },
         },
       });
@@ -143,47 +167,17 @@ async function openReviewPage(page: Page): Promise<void> {
     }
     if (pathname.endsWith(selectionPath) && method === "DELETE") {
       selectedIds.clear();
-      verificationStates.clear();
       return route.fulfill({ json: { run_id: runId, selected_count: 0 } });
     }
-    if (pathname.endsWith(`${selectionPath}/prepare`) && method === "POST") {
-      for (const candidateId of selectedIds) {
-        // 模拟同一批次内的真实部分完成：一篇已通过，另一篇仍在校验。
-        verificationStates.set(
-          candidateId,
-          candidateId === "candidate-1" ? "available" : "validating",
-        );
-      }
-      return route.fulfill({
-        status: 202,
-        json: {
-          run_id: runId,
-          selected_count: selectedIds.size,
-          queued_count: selectedIds.size,
-          items: [...selectedIds].map((candidateId) => ({
-            candidate_id: candidateId,
-            status: "queued",
-            message: "题录与全文核验已安排。",
-            retryable: false,
-          })),
-        },
-      });
-    }
     if (pathname.endsWith(`${selectionPath}/admission`) && method === "POST") {
-      const admittedCandidateIds = [...selectedIds].filter(
-        (candidateId) => verificationStates.get(candidateId) === "available",
-      );
-      const admittedCount = admittedCandidateIds.length;
-      pendingDocumentCount += admittedCount;
-      for (const candidateId of admittedCandidateIds) {
-        selectedIds.delete(candidateId);
-        verificationStates.delete(candidateId);
-      }
+      const admittedCandidateIds = [...selectedIds];
+      for (const candidateId of admittedCandidateIds) upsertBibliographyEntry(candidateId);
+      selectedIds.clear();
       return route.fulfill({
         json: {
           run_id: runId,
-          selected_count: admittedCount,
-          admitted_count: admittedCount,
+          selected_count: 0,
+          admitted_count: admittedCandidateIds.length,
           already_joined_count: 0,
           blocked_count: 0,
           items: [],
@@ -211,15 +205,6 @@ async function openReviewPage(page: Page): Promise<void> {
             ? visibleCandidates.slice(0, 2)
             : visibleCandidates.slice(2)
           : visibleCandidates;
-      const needsFulltextCount = [...selectedIds].filter(
-        (candidateId) => !verificationStates.has(candidateId),
-      ).length;
-      const fulltextInProgressCount = [...selectedIds].filter((candidateId) =>
-        ["queued", "downloading", "validating"].includes(verificationStates.get(candidateId) ?? ""),
-      ).length;
-      const readyForAdmissionCount = [...selectedIds].filter(
-        (candidateId) => verificationStates.get(candidateId) === "available",
-      ).length;
       return route.fulfill({
         json: {
           run_id: runId,
@@ -228,12 +213,7 @@ async function openReviewPage(page: Page): Promise<void> {
           items: pageCandidates.map((candidate) => ({
             candidate,
             is_selected: selectedIds.has(candidate.candidate_id),
-            fulltext: verificationStates.has(candidate.candidate_id)
-              ? fulltextState(
-                  candidate.candidate_id,
-                  verificationStates.get(candidate.candidate_id)!,
-                )
-              : null,
+            fulltext: null,
           })),
           page: {
             limit: 20,
@@ -242,9 +222,9 @@ async function openReviewPage(page: Page): Promise<void> {
           },
           selection: {
             selected_count: selectedIds.size,
-            needs_fulltext_count: needsFulltextCount,
-            fulltext_in_progress_count: fulltextInProgressCount,
-            ready_for_admission_count: readyForAdmissionCount,
+            needs_fulltext_count: 0,
+            fulltext_in_progress_count: 0,
+            ready_for_admission_count: selectedIds.size,
             blocked_count: 0,
           },
         },
@@ -259,7 +239,7 @@ async function openReviewPage(page: Page): Promise<void> {
   await page.goto(`/workspace/${workspaceId}/results?run=${runId}`);
 }
 
-test("候选审核在跨页、筛选和刷新后保持准备清单，并在核验页部分加入集合", async ({ page }) => {
+test("候选审核在跨页、筛选和刷新后保持选择，并直接加入研究集合", async ({ page }) => {
   await openReviewPage(page);
 
   const firstTitle = allCandidates[0].title;
@@ -290,25 +270,13 @@ test("候选审核在跨页、筛选和刷新后保持准备清单，并在核�
   await expect(candidateTable.getByText(firstTitle)).toBeVisible();
   await expect(candidateTable.getByText(thirdTitle)).toBeVisible();
 
-  await page.getByRole("button", { name: "核验任务" }).click();
-  await expect(page).toHaveURL(new RegExp(`/workspace/${workspaceId}/verification\\?run=${runId}`));
-  await expect(page.getByText("准备清单").first()).toBeVisible();
-  await expect(page.getByText("题录与全文核验", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "开始核验" })).toBeEnabled();
-
-  await page.getByRole("button", { name: "开始核验" }).click();
-  await expect(page.getByText("正在校验 PDF")).toBeVisible();
-  await expect(page.getByText("已通过核验", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: /加入待确认集合/ })).toBeEnabled();
-
-  await page.getByRole("button", { name: /加入待确认集合/ }).click();
-  await expect(page.getByTestId("verification-admission-dialog")).toContainText(
-    "将 1 篇已核验文献加入待确认集合",
-  );
-  await page
-    .getByTestId("verification-admission-dialog")
-    .getByRole("button", { name: "确认加入" })
-    .click();
-  await expect(page.getByText("本次已加入 1 篇文献")).toBeVisible();
-  await expect(page.getByRole("button", { name: "待确认集合 1 篇" })).toBeEnabled();
+  await page.getByRole("button", { name: "加入研究集合（2）" }).click();
+  await expect(page).toHaveURL(new RegExp(`/workspace/${workspaceId}/collection`));
+  await expect(page.locator(".collection-summary > div").nth(0)).toContainText("2");
+  await expect(page.locator(".collection-summary > div").nth(1)).toContainText("0");
+  await expect(page.locator(".collection-summary > div").nth(2)).toContainText("1");
+  await expect(page.getByText(firstTitle)).toBeVisible();
+  await expect(page.getByText(thirdTitle)).toBeVisible();
+  await expect(page.getByText("正在入库", { exact: true })).toBeVisible();
+  await expect(page.getByText("需上传 PDF").first()).toBeVisible();
 });

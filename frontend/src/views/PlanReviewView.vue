@@ -237,7 +237,9 @@ function toggleLanguage(language: "zh" | "en"): void {
                 <div>
                   <span class="section-kicker">检索边界</span>
                   <h2 id="scope-heading">限定本次文献范围</h2>
-                  <p>你只需要确认时间和语言，DOI、正式题录与可处理全文仍由系统固定核验。</p>
+                  <p>
+                    你只需要确认时间和语言；题录与 PDF 可得性会自动探测，不阻塞后续加入研究集合。
+                  </p>
                 </div>
               </div>
               <div class="scope-panel">
@@ -333,8 +335,8 @@ function toggleLanguage(language: "zh" | "en"): void {
             <div class="research-brief-rule">
               <ShieldCheck :size="16" />
               <p>
-                <strong>固定准入规则</strong
-                ><span>仅保留 DOI、正式题录与可处理全文均通过核验的文献。</span>
+                <strong>集合与研究范围</strong
+                ><span>研究集合保留你选择的书目；RAG 只使用已完成全文入库的文献。</span>
               </p>
             </div>
           </aside>

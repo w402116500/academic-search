@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.modules.research.bibliography import CollectionBibliographyEntryProjection
+
 
 class IngestionRunStatus(StrEnum):
     """入库运行写入数据库的稳定状态值。"""
@@ -72,13 +74,14 @@ class CollectionDocumentResponse(BaseModel):
     """工作区中一篇活动文献及其最新入库运行。"""
 
     document_id: UUID
-    paper_id: UUID
-    doi: str
+    bibliography_entry_id: UUID
+    paper_id: UUID | None
+    doi: str | None
     title: str
     authors: list[dict[str, Any]]
     publication_year: int | None
     venue: str | None
-    citation_text: str
+    citation_text: str | None
     tags: list[str]
     note: str | None
     original_filename: str
@@ -92,6 +95,7 @@ class CollectionDocumentResponse(BaseModel):
 class CollectionIngestionSummary(BaseModel):
     """集合页面展示的任务数量与可问答文献数量。"""
 
+    bibliography_entry_count: int = 0
     active_document_count: int
     researchable_document_count: int
     ingestion_status_counts: dict[IngestionRunStatus, int] = Field(default_factory=dict)
@@ -101,6 +105,7 @@ class CollectionDocumentsResponse(BaseModel):
     """活动文献列表与用于刷新页面的入库汇总。"""
 
     collection_id: UUID
+    bibliography_entries: list[CollectionBibliographyEntryProjection] = Field(default_factory=list)
     documents: list[CollectionDocumentResponse]
     summary: CollectionIngestionSummary
 
@@ -127,5 +132,6 @@ class CollectionDocumentRemovalResponse(BaseModel):
     """移出待确认文献后的审计结果；文件不会被立即物理删除。"""
 
     document_id: UUID
-    collection_paper_status: str
+    bibliography_entry_status: str | None = None
+    collection_paper_status: str | None = None
     ingestion_run_status: IngestionRunStatus

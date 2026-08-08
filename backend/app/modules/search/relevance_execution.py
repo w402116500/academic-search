@@ -6,16 +6,24 @@ import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from app.modules.documents.contracts import (
+    FulltextCandidate,
+    PdfAvailabilityResult,
+    PdfAvailabilityStatus,
+)
 from app.modules.research.query_plan import read_confirmed_query_plan
 from app.modules.search.api_contracts import SearchProgressEvent
 from app.modules.search.citation_enrichment import CitationMetadataEnricher
 from app.modules.search.contracts import (
+    CandidatePdfAvailability,
+    CandidatePdfAvailabilityStatus,
     CandidateRelevanceState,
     UnifiedCandidate,
 )
+from app.modules.search.fulltext_candidate import to_fulltext_candidate
 from app.modules.search.queue import CandidateRelevanceJobQueue, CandidateRelevanceQueueError
 from app.modules.search.relevance import (
     CandidateRelevanceCandidateFailure,
@@ -44,6 +52,13 @@ _LEASE_HEARTBEAT_SECONDS = 30
 _RETRY_CANDIDATE_IDS_KEY = "relevance_retry_candidate_ids"
 
 
+class CandidatePdfAvailabilityProbe(Protocol):
+    """候选就绪阶段需要的只读 PDF 可得性探测端口。"""
+
+    async def probe(self, candidate: FulltextCandidate) -> PdfAvailabilityResult:
+        raise NotImplementedError
+
+
 class CandidateRelevanceRunExecutor:
     """首次以完整集合调用模型，并通过 Redis 合并保护其他候选更新。"""
 
@@ -55,6 +70,7 @@ class CandidateRelevanceRunExecutor:
         session_store: SearchSessionStore,
         citation_enrichment_limit: int,
         citation_enricher: CitationMetadataEnricher | None,
+        pdf_availability_probe: CandidatePdfAvailabilityProbe | None = None,
         attempt_no: int = 1,
         relevance_queue: CandidateRelevanceJobQueue | None = None,
         evaluator: CandidateRelevanceEvaluator | None = None,
@@ -66,6 +82,7 @@ class CandidateRelevanceRunExecutor:
         self._session_store = session_store
         self._citation_enrichment_limit = citation_enrichment_limit
         self._citation_enricher = citation_enricher
+        self._pdf_availability_probe = pdf_availability_probe
         self._attempt_no = attempt_no
         self._relevance_queue = relevance_queue
         self._evaluator = evaluator
@@ -218,18 +235,29 @@ class CandidateRelevanceRunExecutor:
             run=run,
             snapshot=merged,
             stage=SearchRunStage.CITATION_ENRICHMENT,
-            message="相关性理由已完成核验，正在补全优先候选的正式题录。",
+            message="相关性理由已完成核验，正在自动核验题录与公开 PDF 可得性。",
         )
 
         enriched = await self._enrich_citations(merged_candidates)
+        ready_candidates = await self._probe_pdf_availability(enriched)
         final_snapshot = await self._session_store.merge_snapshot(
             session_key,
-            lambda current: self._merge_citations(current, enriched),
+            lambda current: self._merge_candidate_readiness(current, ready_candidates),
         )
         final_candidates = self._deserialize_candidates(final_snapshot)
         final_counts = self._candidate_counts(final_snapshot, final_candidates)
         final_counts["citation_enriched_count"] = sum(
             candidate.citation is not None for candidate in final_candidates
+        )
+        final_counts["pdf_available_count"] = sum(
+            candidate.pdf_availability is not None
+            and candidate.pdf_availability.status is CandidatePdfAvailabilityStatus.AVAILABLE
+            for candidate in final_candidates
+        )
+        final_counts["pdf_requires_upload_count"] = sum(
+            candidate.pdf_availability is not None
+            and candidate.pdf_availability.status is CandidatePdfAvailabilityStatus.REQUIRES_UPLOAD
+            for candidate in final_candidates
         )
         final_status, error_code, error_message = self._final_status(
             final_snapshot.get("provider_summary", run.provider_summary),
@@ -548,16 +576,21 @@ class CandidateRelevanceRunExecutor:
         return merged
 
     @staticmethod
-    def _merge_citations(
+    def _merge_candidate_readiness(
         snapshot: dict[str, Any],
-        enriched: tuple[UnifiedCandidate, ...],
+        ready_candidates: tuple[UnifiedCandidate, ...],
     ) -> dict[str, Any]:
-        """题录预取完成后同样只叠加 citation 字段。"""
+        """候选就绪阶段只叠加题录与 PDF 可得性字段。"""
         candidates = CandidateRelevanceRunExecutor._deserialize_candidates(snapshot)
-        enriched_by_id = {candidate.candidate_id: candidate for candidate in enriched}
+        ready_by_id = {candidate.candidate_id: candidate for candidate in ready_candidates}
         merged_candidates = tuple(
-            candidate.model_copy(update={"citation": replacement.citation})
-            if (replacement := enriched_by_id.get(candidate.candidate_id)) is not None
+            candidate.model_copy(
+                update={
+                    "citation": replacement.citation,
+                    "pdf_availability": replacement.pdf_availability,
+                }
+            )
+            if (replacement := ready_by_id.get(candidate.candidate_id)) is not None
             else candidate
             for candidate in candidates
         )
@@ -600,23 +633,78 @@ class CandidateRelevanceRunExecutor:
         enricher = self._citation_enricher
         if enricher is None:
             raise RuntimeError("候选题录补全器尚未装配。")
-        included_ids = [
+        screening_ids = {
             candidate.candidate_id
             for candidate in candidates
             if candidate.triage is not None
             and candidate.triage.included
             and is_screening_candidate(candidate)
-        ]
-        selected_ids = set(included_ids[:limit])
+        }
         semaphore = asyncio.Semaphore(8)
 
         async def enrich(candidate: UnifiedCandidate) -> UnifiedCandidate:
-            if candidate.candidate_id not in selected_ids:
+            if candidate.candidate_id not in screening_ids:
                 return candidate
             async with semaphore:
                 return await enricher.enrich(candidate)
 
         return tuple(await asyncio.gather(*(enrich(candidate) for candidate in candidates)))
+
+    async def _probe_pdf_availability(
+        self,
+        candidates: tuple[UnifiedCandidate, ...],
+    ) -> tuple[UnifiedCandidate, ...]:
+        probe = self._pdf_availability_probe
+        if probe is None:
+            return candidates
+        screening_ids = {
+            candidate.candidate_id
+            for candidate in candidates
+            if candidate.triage is not None
+            and candidate.triage.included
+            and is_screening_candidate(candidate)
+        }
+        semaphore = asyncio.Semaphore(8)
+
+        async def probe_one(candidate: UnifiedCandidate) -> UnifiedCandidate:
+            if candidate.candidate_id not in screening_ids:
+                return candidate
+            async with semaphore:
+                try:
+                    result = await probe.probe(to_fulltext_candidate(candidate))
+                except Exception:
+                    logger.exception(
+                        "Candidate PDF availability probe failed unexpectedly: "
+                        "run_id=%s candidate_id=%s",
+                        self._search_run_id,
+                        candidate.candidate_id,
+                    )
+                    return candidate.model_copy(
+                        update={
+                            "pdf_availability": CandidatePdfAvailability(
+                                status=CandidatePdfAvailabilityStatus.REQUIRES_UPLOAD
+                            )
+                        }
+                    )
+            if result.status is PdfAvailabilityStatus.AVAILABLE:
+                pdf_status = CandidatePdfAvailabilityStatus.AVAILABLE
+            else:
+                pdf_status = CandidatePdfAvailabilityStatus.REQUIRES_UPLOAD
+                if result.error_code is not None:
+                    logger.info(
+                        "Candidate PDF availability probe requires upload: "
+                        "run_id=%s candidate_id=%s code=%s",
+                        self._search_run_id,
+                        candidate.candidate_id,
+                        result.error_code.value,
+                    )
+            return candidate.model_copy(
+                update={
+                    "pdf_availability": CandidatePdfAvailability(status=pdf_status),
+                }
+            )
+
+        return tuple(await asyncio.gather(*(probe_one(candidate) for candidate in candidates)))
 
     @staticmethod
     def _final_status(

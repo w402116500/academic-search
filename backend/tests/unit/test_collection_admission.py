@@ -9,7 +9,11 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.collection import (
+    CollectionBibliographyEntry,
+    CollectionPaper,
+    ResearchCollection,
+)
 from app.infra.db.models.document import Document, IngestionRun
 from app.infra.db.models.paper import Paper
 from app.infra.db.repositories.literature_admission import (
@@ -41,6 +45,7 @@ _CANDIDATE_ID = UUID("00000000-0000-0000-0000-000000000003")
 _PAPER_ID = UUID("00000000-0000-0000-0000-000000000004")
 _DOCUMENT_ID = UUID("00000000-0000-0000-0000-000000000005")
 _INGESTION_RUN_ID = UUID("00000000-0000-0000-0000-000000000006")
+_ENTRY_ID = UUID("00000000-0000-0000-0000-000000000007")
 _DOI = "10.1000/admission.example"
 _SHA256 = "a" * 64
 _STAGING_KEY = f"staging/fulltext/{_CANDIDATE_ID}/{_SHA256}.pdf"
@@ -187,6 +192,9 @@ async def test_admit_creates_paper_collection_document_and_pending_ingestion_run
 
     paper = next(item for item in session.added if isinstance(item, Paper))
     collection_paper = next(item for item in session.added if isinstance(item, CollectionPaper))
+    bibliography_entry = next(
+        item for item in session.added if isinstance(item, CollectionBibliographyEntry)
+    )
     document = next(item for item in session.added if isinstance(item, Document))
     ingestion_run = next(item for item in session.added if isinstance(item, IngestionRun))
 
@@ -198,6 +206,13 @@ async def test_admit_creates_paper_collection_document_and_pending_ingestion_run
     assert paper.authors == [{"family": "Lovelace", "given": "Ada"}]
     assert collection_paper.collection_id == _COLLECTION_ID
     assert collection_paper.paper_id == paper.id
+    assert bibliography_entry.collection_id == _COLLECTION_ID
+    assert bibliography_entry.paper_id == paper.id
+    assert bibliography_entry.source_candidate_id == _CANDIDATE_ID
+    assert bibliography_entry.citation_status == "ready"
+    assert bibliography_entry.citation_text == paper.citation_text
+    assert bibliography_entry.content_status == "document_ready"
+    assert document.bibliography_entry_id == bibliography_entry.id
     assert document.object_key.startswith(f"documents/{_COLLECTION_ID}/{document.id}/")
     assert document.object_key.endswith(f"{_SHA256}.pdf")
     assert ingestion_run.document_id == document.id
@@ -222,6 +237,7 @@ async def test_admit_is_idempotent_and_discards_the_new_staging_object() -> None
     document = Document(
         id=_DOCUMENT_ID,
         collection_id=_COLLECTION_ID,
+        bibliography_entry_id=_ENTRY_ID,
         paper_id=_PAPER_ID,
         origin_kind="open_access",
         original_filename="existing.pdf",

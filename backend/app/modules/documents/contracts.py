@@ -72,6 +72,21 @@ class FulltextAcquisitionError(BaseModel):
     http_status_code: int | None = Field(default=None, ge=100, le=599)
 
 
+class PdfAvailabilityStatus(StrEnum):
+    """筛选阶段公开 PDF 可得性的稳定结果。"""
+
+    AVAILABLE = "available"
+    REQUIRES_UPLOAD = "requires_upload"
+
+
+class PdfAvailabilityResult(BaseModel):
+    """只读探测结果；不代表 PDF 已下载、校验或入库。"""
+
+    candidate_id: UUID
+    status: PdfAvailabilityStatus
+    error_code: FulltextAcquisitionErrorCode | None = None
+
+
 class AcquiredFulltext(BaseModel):
     """已下载、校验并写入私有暂存区的 PDF 信息。"""
 

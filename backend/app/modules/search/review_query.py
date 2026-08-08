@@ -75,7 +75,6 @@ class CandidateReviewQueryService:
         selected_ids = await self._session.synchronize_visible_selection(
             run, selected_ids, candidates
         )
-        candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
         states = await self._session.fulltext_states(run, candidates)
 
         normalized_query = " ".join(query.split()).casefold()
@@ -135,7 +134,6 @@ class CandidateReviewQueryService:
             ),
             selection=self._selection_summary(
                 selected_ids=selected_ids,
-                candidates=candidate_by_id,
                 states=states,
             ),
         )
@@ -248,7 +246,10 @@ class CandidateReviewQueryService:
         if review_filter is CandidateReviewFilter.BACKGROUND:
             return level is CandidateRelevanceLevel.BACKGROUND
         if review_filter is CandidateReviewFilter.AVAILABLE:
-            return state is not None and state.result.status is FulltextAcquisitionStatus.AVAILABLE
+            return (
+                candidate.pdf_availability is not None
+                and candidate.pdf_availability.status.value == "available"
+            )
         if review_filter is CandidateReviewFilter.OPEN_ACCESS:
             return candidate.is_open_access is True
         if review_filter is CandidateReviewFilter.HAS_DOI:
@@ -291,7 +292,6 @@ class CandidateReviewQueryService:
     def _selection_summary(
         *,
         selected_ids: set[UUID],
-        candidates: dict[UUID, UnifiedCandidate],
         states: dict[UUID, CandidateFulltextState],
     ) -> CandidateSelectionSummary:
         """将准备清单按下一步操作分流，前端无需自行推断批量按钮。"""
@@ -300,11 +300,8 @@ class CandidateReviewQueryService:
         ready_for_admission_count = 0
         blocked_count = 0
         for candidate_id in selected_ids:
-            candidate = candidates[candidate_id]
             state = states.get(candidate_id)
-            if candidate.doi is None:
-                blocked_count += 1
-            elif state is None:
+            if state is None:
                 needs_fulltext_count += 1
             elif state.result.status in {
                 FulltextAcquisitionStatus.QUEUED,

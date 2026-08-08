@@ -123,7 +123,7 @@ const candidate = {
     reason: "研究对象、绿地暴露和心理健康结果与当前方向直接对应。",
     helpful_aspect: "可用于审核绿地可达性与老年心理健康之间的关联证据。",
     limitations: ["当前判断只依据标题和摘要。"],
-    recommendation: "建议优先核验题录并获取全文。",
+    recommendation: "建议加入研究集合后跟进入库状态。",
     evidence: [
       {
         source_field: "abstract",
@@ -133,6 +133,7 @@ const candidate = {
   },
   relevance_error: null,
   citation: { status: "ready", doi: "10.1000/example.1", url: "https://doi.org/10.1000/example.1" },
+  pdf_availability: { status: "available" },
 };
 const chineseCandidate = {
   ...candidate,
@@ -140,6 +141,7 @@ const chineseCandidate = {
   doi: "10.1000/example.2",
   title: "城市绿地可达性与老年人心理健康",
   language: "zh",
+  pdf_availability: { status: "requires_upload" },
   relevance_assessment: {
     ...candidate.relevance_assessment,
     level: "background",
@@ -149,13 +151,67 @@ const chineseCandidate = {
   },
 };
 
+interface WorkflowMockState {
+  selectedIds: Set<string>;
+  bibliographyEntries: Array<Record<string, unknown>>;
+}
+
+interface WorkflowMockCandidate {
+  candidate_id: string;
+  title: string;
+  authors: Array<{ name: string }>;
+  doi: string | null;
+  venue: string | null;
+  published_year: number | null;
+  citation: { status: string };
+  pdf_availability?: { status: string } | null;
+}
+
+function createWorkflowMockState(): WorkflowMockState {
+  return { selectedIds: new Set<string>(), bibliographyEntries: [] };
+}
+
+function findWorkflowCandidate(candidateId: string): WorkflowMockCandidate | undefined {
+  return [candidate, chineseCandidate].find((item) => item.candidate_id === candidateId);
+}
+
+function upsertBibliographyEntry(state: WorkflowMockState, candidateId: string): void {
+  if (state.bibliographyEntries.some((entry) => entry.source_candidate_id === candidateId)) return;
+  const currentCandidate = findWorkflowCandidate(candidateId);
+  if (!currentCandidate) return;
+  const pdfStatus = currentCandidate.pdf_availability?.status ?? "requires_upload";
+  state.bibliographyEntries.push({
+    id: `entry-${candidateId}`,
+    collection_id: workspaceId,
+    source_search_run_id: runId,
+    source_candidate_id: candidateId,
+    title: currentCandidate.title,
+    authors: currentCandidate.authors,
+    doi: currentCandidate.doi,
+    venue: currentCandidate.venue,
+    publication_year: currentCandidate.published_year,
+    citation_status: currentCandidate.citation.status,
+    citation_text: null,
+    pdf_status: pdfStatus,
+    content_status: pdfStatus === "available" ? "pending_auto_download" : "requires_upload",
+    paper_id: null,
+    document_id: null,
+    created_at: "2026-08-01T00:02:00Z",
+    updated_at: "2026-08-01T00:02:00Z",
+  });
+}
+
 async function fulfillWorkflowRequest(
   route: Route,
   activeRun: SearchRun = run,
   activeWorkspace = workspace,
   activePlan = plan,
+  state: WorkflowMockState = createWorkflowMockState(),
 ): Promise<void> {
-  const path = new URL(route.request().url()).pathname;
+  const request = route.request();
+  const url = new URL(request.url());
+  const path = url.pathname;
+  const method = request.method();
   if (path.endsWith("/auth/me")) return route.fulfill({ json: user });
   if (path.endsWith("/collections")) {
     return route.fulfill({ json: { items: [activeWorkspace], next_cursor: null } });
@@ -163,8 +219,36 @@ async function fulfillWorkflowRequest(
   if (path.endsWith(`/collections/${workspaceId}`)) return route.fulfill({ json: activeWorkspace });
   if (path.endsWith(`/collections/${workspaceId}/plan`)) return route.fulfill({ json: activePlan });
   if (path.endsWith("/search-runs/current")) return route.fulfill({ json: activeRun });
+  const selectionPath = `/search-runs/${runId}/candidate-selection`;
+  if (path.endsWith(selectionPath) && method === "PATCH") {
+    const payload = request.postDataJSON() as { candidate_ids: string[]; selected: boolean };
+    for (const candidateId of payload.candidate_ids) {
+      if (payload.selected) state.selectedIds.add(candidateId);
+      else state.selectedIds.delete(candidateId);
+    }
+    return route.fulfill({ json: { run_id: runId, selected_count: state.selectedIds.size } });
+  }
+  if (path.endsWith(selectionPath) && method === "DELETE") {
+    state.selectedIds.clear();
+    return route.fulfill({ json: { run_id: runId, selected_count: 0 } });
+  }
+  if (path.endsWith(`${selectionPath}/admission`) && method === "POST") {
+    const admittedCandidateIds = [...state.selectedIds];
+    for (const candidateId of admittedCandidateIds) upsertBibliographyEntry(state, candidateId);
+    state.selectedIds.clear();
+    return route.fulfill({
+      json: {
+        run_id: runId,
+        selected_count: 0,
+        admitted_count: admittedCandidateIds.length,
+        already_joined_count: 0,
+        blocked_count: 0,
+        items: [],
+      },
+    });
+  }
   if (path.endsWith(`/search-runs/${runId}/candidates`)) {
-    const filter = new URL(route.request().url()).searchParams.get("filter") ?? "all";
+    const filter = url.searchParams.get("filter") ?? "all";
     const visibleItems =
       filter === "priority"
         ? [candidate]
@@ -172,7 +256,11 @@ async function fulfillWorkflowRequest(
           ? [chineseCandidate]
           : filter === "en"
             ? [candidate]
-            : [candidate, chineseCandidate];
+            : filter === "selected"
+              ? [candidate, chineseCandidate].filter((item) =>
+                  state.selectedIds.has(item.candidate_id),
+                )
+              : [candidate, chineseCandidate];
     return route.fulfill({
       json: {
         run_id: runId,
@@ -180,29 +268,37 @@ async function fulfillWorkflowRequest(
         candidate_counts: activeRun.candidate_counts,
         items: visibleItems.map((currentCandidate) => ({
           candidate: currentCandidate,
-          is_selected: false,
+          is_selected: state.selectedIds.has(currentCandidate.candidate_id),
           fulltext: null,
         })),
         page: { limit: 20, total: visibleItems.length, next_cursor: null },
         selection: {
-          selected_count: 0,
+          selected_count: state.selectedIds.size,
           needs_fulltext_count: 0,
           fulltext_in_progress_count: 0,
-          ready_for_admission_count: 0,
+          ready_for_admission_count: state.selectedIds.size,
           blocked_count: 0,
         },
       },
     });
   }
   if (path.endsWith("/documents")) {
+    const pendingCount = state.bibliographyEntries.filter(
+      (entry) => entry.content_status === "pending_auto_download",
+    ).length;
+    const readyCount = state.bibliographyEntries.filter(
+      (entry) => entry.content_status === "researchable",
+    ).length;
     return route.fulfill({
       json: {
         collection_id: workspaceId,
+        bibliography_entries: state.bibliographyEntries,
         documents: [],
         summary: {
-          active_document_count: 1,
-          researchable_document_count: 0,
-          ingestion_status_counts: { pending: 1 },
+          bibliography_entry_count: state.bibliographyEntries.length,
+          active_document_count: pendingCount + readyCount,
+          researchable_document_count: readyCount,
+          ingestion_status_counts: pendingCount ? { pending: pendingCount } : {},
         },
       },
     });
@@ -210,11 +306,16 @@ async function fulfillWorkflowRequest(
   return route.fulfill({ status: 404, json: { detail: { message: `未处理的模拟请求：${path}` } } });
 }
 
-async function openCompletedRun(page: Page): Promise<void> {
+async function openCompletedRun(
+  page: Page,
+  state: WorkflowMockState = createWorkflowMockState(),
+): Promise<void> {
   await page.addInitScript(() =>
     localStorage.setItem("academic-search.access-token", "mock-token"),
   );
-  await page.route("http://127.0.0.1:8000/api/v1/**", (route) => fulfillWorkflowRequest(route));
+  await page.route("http://127.0.0.1:8000/api/v1/**", (route) =>
+    fulfillWorkflowRequest(route, run, workspace, plan, state),
+  );
   await page.goto(`/workspace/${workspaceId}/run?run=${runId}`);
 }
 
@@ -252,8 +353,9 @@ test("检索运行中展示真实的相关性计数和来源失败说明", async
   ).toBeVisible();
 });
 
-test("检索完成后在连续画布中进入候选筛选与集合确认", async ({ page }) => {
-  await openCompletedRun(page);
+test("检索完成后在连续画布中进入候选筛选并加入研究集合", async ({ page }) => {
+  const state = createWorkflowMockState();
+  await openCompletedRun(page, state);
 
   await expect(page.getByRole("heading", { name: "6 篇候选文献，已经准备好。" })).toBeVisible();
   await page.getByRole("button", { name: "开始筛选" }).click();
@@ -262,10 +364,10 @@ test("检索完成后在连续画布中进入候选筛选与集合确认", async
   await expect(
     page.getByRole("heading", { name: "把候选记录收敛成可研究的文献集合。" }),
   ).toBeVisible();
-  await expect(page.getByLabel("候选文献检查器")).toBeVisible();
+  await expect(page.getByLabel("文献详情")).toBeVisible();
   await expect(page.getByText("英文文献").first()).toBeVisible();
   await expect(page.getByText("核心相关").first()).toBeVisible();
-  await expect(page.getByLabel("候选文献检查器")).toContainText("为什么保留这篇候选");
+  await expect(page.getByLabel("文献详情")).toContainText("相关性依据");
   await page.getByRole("button", { name: "优先审核" }).click();
   await expect(page.locator(".candidate-table tbody tr")).toHaveCount(1);
   await page.getByText("查看标题和摘要依据").click();
@@ -274,21 +376,29 @@ test("检索完成后在连续画布中进入候选筛选与集合确认", async
   await page.getByRole("button", { name: "中文文献" }).click();
   await expect(page.getByRole("table").getByText("城市绿地可达性与老年人心理健康")).toBeVisible();
   await expect(page.locator(".candidate-table tbody tr")).toHaveCount(1);
-  await expect(page.getByLabel("候选文献检查器")).toContainText("城市绿地可达性与老年人心理健康");
-  await expect(page.getByRole("button", { name: "待确认集合 1 篇" })).toBeEnabled();
+  await expect(page.getByLabel("文献详情")).toContainText("城市绿地可达性与老年人心理健康");
+  await page.getByLabel("选择 城市绿地可达性与老年人心理健康").check();
+  await expect(page.getByRole("button", { name: "加入研究集合（1）" })).toBeEnabled();
 
-  await page.getByRole("button", { name: "待确认集合 1 篇" }).click();
-  await expect(page.getByTestId("collection-confirm-dialog")).toBeVisible();
+  await page.getByRole("button", { name: "加入研究集合（1）" }).click();
+  await expect(page).toHaveURL(new RegExp(`/workspace/${workspaceId}/collection`));
+  await expect(page.locator(".collection-summary > div").nth(0)).toContainText("1");
+  await expect(page.locator(".collection-summary > div").nth(1)).toContainText("0");
+  await expect(page.locator(".collection-summary > div").nth(2)).toContainText("1");
+  await expect(page.getByText("城市绿地可达性与老年人心理健康")).toBeVisible();
+  await expect(page.getByText("需上传 PDF").first()).toBeVisible();
 });
 
-test("窄屏仍可查看候选检查器与集合确认", async ({ page }) => {
+test("窄屏仍可查看文献详情与研究集合入口", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openCompletedRun(page);
 
   await page.getByRole("button", { name: "开始筛选" }).click();
-  await expect(page.getByLabel("候选文献检查器")).toBeVisible();
-  await page.getByRole("button", { name: "待确认集合 1 篇" }).click();
-  await expect(page.getByTestId("collection-confirm-dialog")).toBeVisible();
+  await expect(page.getByLabel("文献详情")).toBeVisible();
+  await page
+    .getByLabel("选择 Urban green space exposure and mental well-being in later life")
+    .check();
+  await expect(page.getByRole("button", { name: "加入研究集合（1）" })).toBeVisible();
 });
 
 test("候选相关性分析中不暴露取消或重试控制", async ({ page }) => {
@@ -299,7 +409,12 @@ test("候选相关性分析中不暴露取消或重试控制", async ({ page }) 
   await expect(page.getByRole("button", { name: "重新分析全部候选理由" })).not.toBeVisible();
 });
 
-test("详情页为不可重试的全文失败提供授权上传恢复路径", async ({ page }) => {
+test("详情页不暴露旧全文失败原因，并可将需上传 PDF 的候选加入集合", async ({ page }) => {
+  const state = createWorkflowMockState();
+  const failedCandidate = {
+    ...candidate,
+    pdf_availability: { status: "requires_upload" },
+  };
   const failedFulltext = {
     search_run_id: runId,
     candidate_id: candidate.candidate_id,
@@ -319,7 +434,10 @@ test("详情页为不可重试的全文失败提供授权上传恢复路径", as
     localStorage.setItem("academic-search.access-token", "mock-token"),
   );
   await page.route("http://127.0.0.1:8000/api/v1/**", async (route) => {
+    const request = route.request();
     const path = new URL(route.request().url()).pathname;
+    const method = request.method();
+    const selectionPath = `/search-runs/${runId}/candidate-selection`;
     if (path.endsWith(`/search-runs/${runId}/candidates/${candidate.candidate_id}/citation`)) {
       return route.fulfill({
         json: {
@@ -331,19 +449,59 @@ test("详情页为不可重试的全文失败提供授权上传恢复路径", as
     }
     if (path.endsWith(`/search-runs/${runId}/candidates/${candidate.candidate_id}`)) {
       return route.fulfill({
-        json: { candidate, is_selected: true, fulltext: failedFulltext },
+        json: { candidate: failedCandidate, is_selected: false, fulltext: failedFulltext },
       });
     }
-    return fulfillWorkflowRequest(route);
+    if (path.endsWith(selectionPath) && method === "PATCH") {
+      state.selectedIds.add(candidate.candidate_id);
+      return route.fulfill({ json: { run_id: runId, selected_count: 1 } });
+    }
+    if (path.endsWith(`${selectionPath}/admission`) && method === "POST") {
+      state.bibliographyEntries.push({
+        id: `entry-${candidate.candidate_id}`,
+        collection_id: workspaceId,
+        source_search_run_id: runId,
+        source_candidate_id: candidate.candidate_id,
+        title: failedCandidate.title,
+        authors: failedCandidate.authors,
+        doi: failedCandidate.doi,
+        venue: failedCandidate.venue,
+        publication_year: failedCandidate.published_year,
+        citation_status: "ready",
+        citation_text: null,
+        pdf_status: "requires_upload",
+        content_status: "requires_upload",
+        paper_id: null,
+        document_id: null,
+        created_at: "2026-08-04T00:02:00Z",
+        updated_at: "2026-08-04T00:02:00Z",
+      });
+      state.selectedIds.clear();
+      return route.fulfill({
+        json: {
+          run_id: runId,
+          selected_count: 0,
+          admitted_count: 1,
+          already_joined_count: 0,
+          blocked_count: 0,
+          items: [],
+        },
+      });
+    }
+    return fulfillWorkflowRequest(route, run, workspace, plan, state);
   });
 
   await page.goto(`/workspace/${workspaceId}/paper/${candidate.candidate_id}?run=${runId}`);
 
-  await expect(page.getByText("全文暂不可用", { exact: true })).toBeVisible();
-  await expect(page.getByText("全文来源返回 HTTP 403。", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "选择有权处理的 PDF" })).toBeVisible();
-  await expect(page.getByLabel("上传有权处理的 PDF")).toBeVisible();
+  await expect(page.getByText("需上传 PDF", { exact: true })).toBeVisible();
+  await expect(page.getByText("全文来源返回 HTTP 403。", { exact: true })).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "选择有权处理的 PDF" })).not.toBeVisible();
+  await expect(page.getByLabel("上传有权处理的 PDF")).not.toBeVisible();
   await expect(page.locator(".citation-preview pre")).toContainText("Urban green space exposure");
+  await page.getByRole("button", { name: "加入研究集合" }).click();
+  await expect(page).toHaveURL(new RegExp(`/workspace/${workspaceId}/collection`));
+  await expect(page.locator(".collection-summary > div").nth(0)).toContainText("1");
+  await expect(page.locator(".collection-summary > div").nth(2)).toContainText("1");
 });
 
 test("失败的意图分析会重新生成计划而非重复读取历史失败", async ({ page }) => {

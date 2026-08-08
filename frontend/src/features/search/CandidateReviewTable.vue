@@ -7,7 +7,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Clipboard,
-  FileDown,
   ListChecks,
   LoaderCircle,
   Search,
@@ -17,13 +16,11 @@ import {
 
 import { candidateLanguageLabel, normalizeCandidateLanguage } from "./candidate-language";
 import { presentCandidateRelevance } from "./candidate-relevance";
-import { isFulltextTerminal } from "./search-run-state";
+import { candidatePdfAvailabilityLabel, citationStatusLabel } from "./search-run-state";
 import type {
-  Candidate,
   CandidateReviewFilter,
   CandidateReviewItem,
   CandidateSelectionSummary,
-  FulltextResponse,
   SearchCandidatePageResponse,
 } from "@/api/types";
 
@@ -46,7 +43,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   toggleSelection: [candidateIds: string[], selected: boolean];
   clearSelection: [];
-  openVerification: [];
+  admitSelection: [];
   resetPage: [];
   previousPage: [];
   nextPage: [];
@@ -67,26 +64,12 @@ const allCurrentPageSelected = computed(
 );
 
 function isCandidateSelectable(item: CandidateReviewItem): boolean {
-  return Boolean(item.candidate.doi && item.candidate.triage?.included);
+  return Boolean(item.candidate.triage?.included);
 }
 
 function candidateSelectionHint(item: CandidateReviewItem): string {
-  if (!item.candidate.doi) return "缺少 DOI，只能查看和人工核对，不能进入研究集合。";
   if (!item.candidate.triage?.included) return "未通过基础筛选，不能进入研究集合。";
-  return "加入本次准备清单。";
-}
-
-function candidateState(
-  candidate: Candidate,
-  fulltext: FulltextResponse | null | undefined,
-): string {
-  if (!candidate.doi) return "缺少 DOI";
-  if (fulltext?.status === "available") return "可加入集合";
-  if (fulltext?.status === "rejected") return "未通过全文准入";
-  if (fulltext?.status === "failed") return "全文不可用";
-  if (fulltext?.status === "requires_upload") return "需要上传已授权 PDF";
-  if (fulltext && !isFulltextTerminal(fulltext.status)) return "全文处理中";
-  return "待准备核验";
+  return "加入研究集合选择。";
 }
 
 function toggleCurrentPageSelection(): void {
@@ -114,7 +97,7 @@ function toggleCurrentPageSelection(): void {
           { key: 'en', label: '英文文献' },
           { key: 'priority', label: '优先审核' },
           { key: 'background', label: '背景参考' },
-          { key: 'available', label: '全文已核验' },
+          { key: 'available', label: '可自动获取 PDF' },
           { key: 'open_access', label: '开放获取' },
           { key: 'doi', label: '有 DOI' },
         ]"
@@ -133,12 +116,8 @@ function toggleCurrentPageSelection(): void {
       aria-label="本次准备清单操作"
     >
       <div class="selection-action-summary">
-        <span>本次准备清单</span><strong>已选 {{ selection.selected_count }} 篇</strong>
-        <small
-          >待核验 {{ selection.needs_fulltext_count }}，核验中
-          {{ selection.fulltext_in_progress_count }}，可入集合
-          {{ selection.ready_for_admission_count }}，暂不可用 {{ selection.blocked_count }}</small
-        >
+        <span>准备加入研究集合</span><strong>已选 {{ selection.selected_count }} 篇</strong>
+        <small>加入后，已探测到公开 PDF 的文献会自动入库，其余保留为需上传 PDF。</small>
       </div>
       <div class="selection-action-buttons">
         <button
@@ -152,8 +131,13 @@ function toggleCurrentPageSelection(): void {
         <button class="compact-button" type="button" @click="selectedFilter = 'selected'">
           <ListChecks :size="14" />只看已选
         </button>
-        <button class="compact-button" type="button" @click="emit('openVerification')">
-          <FileDown :size="14" />核验任务
+        <button
+          class="compact-button primary-compact"
+          type="button"
+          :disabled="selectionPending"
+          @click="emit('admitSelection')"
+        >
+          <ListChecks :size="14" />加入研究集合（{{ selection.selected_count }}）
         </button>
         <button
           class="compact-button danger"
@@ -182,7 +166,7 @@ function toggleCurrentPageSelection(): void {
           <tr>
             <th class="selection-column">
               <input
-                aria-label="选择当前页可处理候选"
+                aria-label="选择当前页候选"
                 type="checkbox"
                 :checked="allCurrentPageSelected"
                 :disabled="!selectablePageItems.length || selectionPending"
@@ -191,7 +175,7 @@ function toggleCurrentPageSelection(): void {
             </th>
             <th>文献</th>
             <th>来源与年份</th>
-            <th>准入状态</th>
+            <th>题录与 PDF</th>
             <th aria-label="操作" />
           </tr>
         </thead>
@@ -258,9 +242,22 @@ function toggleCurrentPageSelection(): void {
               >
             </td>
             <td>
-              <span class="status-text" :class="{ ok: item.fulltext?.status === 'available' }"
-                ><ShieldCheck :size="14" />{{ candidateState(item.candidate, item.fulltext) }}</span
-              >
+              <div class="candidate-status-stack">
+                <span
+                  class="status-text"
+                  :class="{ ok: item.candidate.citation?.status === 'ready' }"
+                  ><ShieldCheck :size="14" />{{
+                    citationStatusLabel(item.candidate.citation)
+                  }}</span
+                >
+                <span
+                  class="status-text"
+                  :class="{ ok: item.candidate.pdf_availability?.status === 'available' }"
+                  ><ShieldCheck :size="14" />{{
+                    candidatePdfAvailabilityLabel(item.candidate)
+                  }}</span
+                >
+              </div>
             </td>
             <td>
               <div class="table-actions">

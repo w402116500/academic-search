@@ -14,12 +14,17 @@ import pytest
 from app.core.fulltext_settings import FulltextAcquisitionSettings
 from app.core.settings import NetworkMode
 from app.infra.storage.documents import Boto3StagingObjectStorage
-from app.modules.documents.acquisition import AuthorizedPdfUploader, OpenAccessPdfAcquirer
+from app.modules.documents.acquisition import (
+    AuthorizedPdfUploader,
+    OpenAccessPdfAcquirer,
+    OpenAccessPdfAvailabilityProbe,
+)
 from app.modules.documents.contracts import (
     FulltextAcquisitionErrorCode,
     FulltextAcquisitionStatus,
     FulltextCandidate,
     FulltextCandidateLinks,
+    PdfAvailabilityStatus,
 )
 from app.modules.documents.storage import FulltextStorageError
 from app.modules.literature.contracts import (
@@ -171,6 +176,65 @@ async def test_acquirer_requires_upload_when_candidate_is_not_open_access() -> N
     assert result.error is not None
     assert result.error.code is FulltextAcquisitionErrorCode.NOT_OPEN_ACCESS
     assert not storage.uploads
+
+
+@pytest.mark.asyncio
+async def test_availability_probe_reports_available_without_storing_pdf() -> None:
+    """筛选阶段只读取响应头确认 PDF 可得性，不下载或暂存文件。"""
+    seen_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_methods.append(request.method)
+        assert request.url == "https://downloads.example.test/paper.pdf"
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/pdf", "Content-Length": str(len(_PDF_BYTES))},
+        )
+
+    probe = OpenAccessPdfAvailabilityProbe(
+        _settings(),
+        transport=httpx.MockTransport(handler),
+        host_resolver=_public_resolver,
+    )
+    result = await probe.probe(_candidate())
+
+    assert result.status is PdfAvailabilityStatus.AVAILABLE
+    assert result.error_code is None
+    assert seen_methods == ["HEAD"]
+
+
+@pytest.mark.asyncio
+async def test_availability_probe_requires_upload_when_pdf_url_is_missing() -> None:
+    """没有直接 PDF 地址时，候选仍可保存为需上传 PDF。"""
+    probe = OpenAccessPdfAvailabilityProbe(_settings(), host_resolver=_public_resolver)
+    result = await probe.probe(_candidate(fulltext_url=None))
+
+    assert result.status is PdfAvailabilityStatus.REQUIRES_UPLOAD
+    assert result.error_code is FulltextAcquisitionErrorCode.MISSING_FULLTEXT_URL
+
+
+@pytest.mark.asyncio
+async def test_availability_probe_rechecks_redirect_target_before_reporting_available() -> None:
+    """探测也必须重新校验重定向目标，不能让私网目标伪装为可自动获取。"""
+
+    async def resolver(host: str) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+        if host == "downloads.example.test":
+            return (_PUBLIC_ADDRESS,)
+        return (_PRIVATE_ADDRESS,)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == "https://downloads.example.test/paper.pdf"
+        return httpx.Response(302, headers={"Location": "https://127.0.0.1/internal.pdf"})
+
+    probe = OpenAccessPdfAvailabilityProbe(
+        _settings(),
+        transport=httpx.MockTransport(handler),
+        host_resolver=resolver,
+    )
+    result = await probe.probe(_candidate())
+
+    assert result.status is PdfAvailabilityStatus.REQUIRES_UPLOAD
+    assert result.error_code is FulltextAcquisitionErrorCode.UNSAFE_URL
 
 
 @pytest.mark.asyncio

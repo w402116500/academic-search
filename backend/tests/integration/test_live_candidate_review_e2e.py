@@ -13,13 +13,11 @@ from uuid import UUID, uuid4
 
 import pytest
 from app.core.fulltext_settings import get_fulltext_acquisition_settings
-from app.infra.db.models.collection import ResearchCollection
-from app.infra.db.models.document import Document, IngestionRun
-from app.infra.db.models.paper import Paper
+from app.infra.db.models.collection import CollectionBibliographyEntry, ResearchCollection
 from app.infra.db.models.user import User
 from app.infra.db.models.workflow import ResearchPlan, SearchRun
-from app.infra.db.repositories.literature_admission import (
-    SqlAlchemyLiteratureAdmissionAdapter,
+from app.infra.db.repositories.collection_bibliography import (
+    SqlAlchemyCollectionBibliographyRepository,
 )
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
 from app.infra.db.session import async_session_factory
@@ -39,6 +37,8 @@ from app.modules.research.state import ResearchPlanStatus
 from app.modules.search.contracts import (
     CandidateAuthor,
     CandidateLinks,
+    CandidatePdfAvailability,
+    CandidatePdfAvailabilityStatus,
     RawCandidate,
     SourceName,
     TriageDecision,
@@ -116,6 +116,7 @@ def _candidate(candidate_id: UUID) -> UnifiedCandidate:
             doi=_ARXIV_DOI,
             url=f"https://doi.org/{_ARXIV_DOI}",
         ),
+        pdf_availability=CandidatePdfAvailability(status=CandidatePdfAvailabilityStatus.AVAILABLE),
         triage=TriageDecision(included=True),
     )
 
@@ -137,15 +138,10 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
     selection_key = build_candidate_selection_key(session_key)
     redis = redis_client_from_environment()
     storage = Boto3StagingObjectStorage(get_fulltext_acquisition_settings())
-    document_object_key: str | None = None
-    paper_id: UUID | None = None
-    paper_preexisted = False
+    staging_object_key: str | None = None
 
     try:
         async with async_session_factory() as session:
-            paper_preexisted = (
-                await session.scalar(select(Paper.id).where(Paper.doi == _ARXIV_DOI))
-            ) is not None
             session.add_all(
                 (
                     User(
@@ -243,6 +239,7 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
         fulltext_state = await store.read_snapshot(fulltext_key)
         assert fulltext_state is not None
         assert fulltext_state["result"]["status"] == FulltextAcquisitionStatus.AVAILABLE.value
+        staging_object_key = fulltext_state["result"]["document"]["staging_object_key"]
 
         async with async_session_factory() as session:
             runs = SqlAlchemySearchRunRepository(session)
@@ -250,12 +247,7 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
             selection = CandidateSelectionService(review_session)
             admission = CandidateAdmissionService(
                 review_session,
-                CandidateFulltextService(
-                    runs,
-                    store,
-                    candidate_lookup=SearchCandidateFulltextLookup(runs, store),
-                ),
-                SqlAlchemyLiteratureAdmissionAdapter(session, storage),
+                SqlAlchemyCollectionBibliographyRepository(session),
                 selection,
             )
             admitted = await admission.admit_selected(
@@ -266,32 +258,26 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
 
             assert admitted.admitted_count == 1
             assert admitted.blocked_count == 0
-            document = await session.scalar(
-                select(Document).where(Document.collection_id == collection_id)
+            entry = await session.scalar(
+                select(CollectionBibliographyEntry).where(
+                    CollectionBibliographyEntry.collection_id == collection_id,
+                    CollectionBibliographyEntry.source_candidate_id == candidate_id,
+                )
             )
-            assert document is not None
-            # 文档与入库运行是一对多关系；准入完成后应创建一条待投递的运行记录。
-            ingestion_run = await session.scalar(
-                select(IngestionRun).where(IngestionRun.document_id == document.id)
-            )
-            assert ingestion_run is not None
-            assert ingestion_run.status == "pending"
-            document_object_key = document.object_key
-            paper_id = document.paper_id
+            assert entry is not None
+            assert entry.citation_status == "ready"
+            assert entry.pdf_status == "available"
+            assert entry.content_status == "pending_auto_download"
 
         assert await store.read_snapshot(selection_key) == {"candidate_ids": []}
     finally:
-        if document_object_key is not None:
-            await storage.delete_object(object_key=document_object_key)
+        if staging_object_key is not None:
+            await storage.delete_object(object_key=staging_object_key)
         await redis.delete(session_key, fulltext_key, selection_key)
         async with async_session_factory() as cleanup_session:
             user = await cleanup_session.get(User, owner_user_id)
             if user is not None:
                 await cleanup_session.delete(user)
                 await cleanup_session.flush()
-            if paper_id is not None and not paper_preexisted:
-                paper = await cleanup_session.get(Paper, paper_id)
-                if paper is not None:
-                    await cleanup_session.delete(paper)
             await cleanup_session.commit()
         await redis.aclose()

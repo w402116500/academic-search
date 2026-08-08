@@ -22,6 +22,8 @@ from app.modules.documents.contracts import (
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
     FulltextCandidate,
+    PdfAvailabilityResult,
+    PdfAvailabilityStatus,
 )
 from app.modules.documents.storage import FulltextStorageError, StagingObjectStorage
 from app.modules.literature.contracts import CitationMetadataStatus
@@ -57,6 +59,145 @@ class _AcquisitionFailure(Exception):
             retryable=retryable,
             http_status_code=http_status_code,
         )
+
+
+class _SafePdfSourcePolicy:
+    """统一封装 PDF URL、公网地址、重定向和响应头安全校验。"""
+
+    def __init__(
+        self,
+        settings: FulltextAcquisitionSettings,
+        host_resolver: HostResolver,
+    ) -> None:
+        self._settings = settings
+        self._host_resolver = host_resolver
+
+    async def validate_download_url(self, url: str | None) -> str:
+        """限制 URL 协议、端口和公网解析结果，阻止下载器成为 SSRF 通道。"""
+        if url is None:
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.REQUIRES_UPLOAD,
+                code=FulltextAcquisitionErrorCode.MISSING_FULLTEXT_URL,
+                message="该开放获取候选未提供直接 PDF 地址，请上传有权处理的 PDF。",
+                retryable=False,
+            )
+
+        parsed = urlsplit(url)
+
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.hostname is None
+        ):
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.FAILED,
+                code=FulltextAcquisitionErrorCode.INVALID_URL,
+                message="全文地址不是可安全访问的 HTTPS 直链。",
+                retryable=False,
+            )
+
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.FAILED,
+                code=FulltextAcquisitionErrorCode.INVALID_URL,
+                message="全文地址包含无效端口。",
+                retryable=False,
+            ) from exc
+
+        if port not in {None, 443}:
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.FAILED,
+                code=FulltextAcquisitionErrorCode.UNSAFE_URL,
+                message="全文地址使用了不允许的 HTTPS 端口。",
+                retryable=False,
+            )
+
+        await self.require_public_host(parsed.hostname)
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+
+    async def require_public_host(self, host: str) -> None:
+        """解析主机并拒绝任意私有、回环、保留或无法解析的地址。"""
+        try:
+            addresses = await self._host_resolver(host)
+        except OSError as exc:
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.FAILED,
+                code=FulltextAcquisitionErrorCode.NETWORK_ERROR,
+                message="无法解析全文来源地址。",
+                retryable=True,
+            ) from exc
+
+        if not addresses or any(not address.is_global for address in addresses):
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.FAILED,
+                code=FulltextAcquisitionErrorCode.UNSAFE_URL,
+                message="全文地址解析到了不允许访问的网络位置。",
+                retryable=False,
+            )
+
+    async def next_redirect_url(
+        self,
+        current_url: str,
+        location: str | None,
+        *,
+        redirects: int,
+    ) -> str:
+        """每个跳转都重新校验，不能让首个安全 URL 带入内网地址。"""
+        if redirects >= self._settings.fulltext_max_redirects:
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.FAILED,
+                code=FulltextAcquisitionErrorCode.REDIRECT_LIMIT_EXCEEDED,
+                message="全文下载的重定向次数超过限制。",
+                retryable=False,
+            )
+
+        if not location:
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.FAILED,
+                code=FulltextAcquisitionErrorCode.INVALID_URL,
+                message="全文来源返回了缺少目标地址的重定向。",
+                retryable=False,
+            )
+
+        return await self.validate_download_url(urljoin(current_url, location))
+
+    def validate_response_headers(self, response: httpx.Response) -> None:
+        """在读取正文前用声明大小和 MIME 类型快速拒绝明显不合规响应。"""
+        content_type = (
+            response.headers.get("Content-Type", "").split(";", maxsplit=1)[0].strip().lower()
+        )
+
+        if content_type != _PDF_MEDIA_TYPE:
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.FAILED,
+                code=FulltextAcquisitionErrorCode.INVALID_CONTENT_TYPE,
+                message="全文来源未返回 application/pdf 文件。",
+                retryable=False,
+                http_status_code=response.status_code,
+            )
+
+        content_length = response.headers.get("Content-Length")
+
+        if content_length is None:
+            return
+
+        try:
+            declared_size = int(content_length)
+        except ValueError:
+            return
+
+        if declared_size > self._settings.fulltext_max_file_size_bytes:
+            raise _AcquisitionFailure(
+                status=FulltextAcquisitionStatus.FAILED,
+                code=FulltextAcquisitionErrorCode.FILE_TOO_LARGE,
+                message="全文文件超过允许的最大大小。",
+                retryable=False,
+                http_status_code=response.status_code,
+            )
 
 
 def validate_candidate_identity(candidate: FulltextCandidate) -> str:
@@ -108,7 +249,7 @@ class OpenAccessPdfAcquirer:
         self._settings = settings
         self._storage = storage
         self._transport = transport
-        self._host_resolver = host_resolver or resolve_public_host
+        self._source_policy = _SafePdfSourcePolicy(settings, host_resolver or resolve_public_host)
 
     async def acquire(self, candidate: FulltextCandidate) -> FulltextAcquisitionResult:
         """在总时限内下载并暂存候选 PDF，绝不接收调用方提供的任意 URL。"""
@@ -188,65 +329,11 @@ class OpenAccessPdfAcquirer:
 
     async def _validate_download_url(self, url: str | None) -> str:
         """限制 URL 协议、端口和公网解析结果，阻止下载器成为 SSRF 通道。"""
-        if url is None:
-            raise AssertionError("候选准入检查后全文 URL 不应为空")
-
-        parsed = urlsplit(url)
-
-        if (
-            parsed.scheme != "https"
-            or not parsed.netloc
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.hostname is None
-        ):
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.FAILED,
-                code=FulltextAcquisitionErrorCode.INVALID_URL,
-                message="全文地址不是可安全访问的 HTTPS 直链。",
-                retryable=False,
-            )
-
-        try:
-            port = parsed.port
-        except ValueError as exc:
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.FAILED,
-                code=FulltextAcquisitionErrorCode.INVALID_URL,
-                message="全文地址包含无效端口。",
-                retryable=False,
-            ) from exc
-
-        if port not in {None, 443}:
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.FAILED,
-                code=FulltextAcquisitionErrorCode.UNSAFE_URL,
-                message="全文地址使用了不允许的 HTTPS 端口。",
-                retryable=False,
-            )
-
-        await self._require_public_host(parsed.hostname)
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+        return await self._source_policy.validate_download_url(url)
 
     async def _require_public_host(self, host: str) -> None:
         """解析主机并拒绝任意私有、回环、保留或无法解析的地址。"""
-        try:
-            addresses = await self._host_resolver(host)
-        except OSError as exc:
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.FAILED,
-                code=FulltextAcquisitionErrorCode.NETWORK_ERROR,
-                message="无法解析全文来源地址。",
-                retryable=True,
-            ) from exc
-
-        if not addresses or any(not address.is_global for address in addresses):
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.FAILED,
-                code=FulltextAcquisitionErrorCode.UNSAFE_URL,
-                message="全文地址解析到了不允许访问的网络位置。",
-                retryable=False,
-            )
+        await self._source_policy.require_public_host(host)
 
     async def _download_and_store(
         self,
@@ -319,41 +406,15 @@ class OpenAccessPdfAcquirer:
                 retryable=False,
             )
 
-        return await self._validate_download_url(urljoin(current_url, location))
+        return await self._source_policy.next_redirect_url(
+            current_url,
+            location,
+            redirects=redirects,
+        )
 
     def _validate_response_headers(self, response: httpx.Response) -> None:
         """在读取正文前用声明大小和 MIME 类型快速拒绝明显不合规响应。"""
-        content_type = (
-            response.headers.get("Content-Type", "").split(";", maxsplit=1)[0].strip().lower()
-        )
-
-        if content_type != _PDF_MEDIA_TYPE:
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.FAILED,
-                code=FulltextAcquisitionErrorCode.INVALID_CONTENT_TYPE,
-                message="全文来源未返回 application/pdf 文件。",
-                retryable=False,
-                http_status_code=response.status_code,
-            )
-
-        content_length = response.headers.get("Content-Length")
-
-        if content_length is None:
-            return
-
-        try:
-            declared_size = int(content_length)
-        except ValueError:
-            return
-
-        if declared_size > self._settings.fulltext_max_file_size_bytes:
-            raise _AcquisitionFailure(
-                status=FulltextAcquisitionStatus.FAILED,
-                code=FulltextAcquisitionErrorCode.FILE_TOO_LARGE,
-                message="全文文件超过允许的最大大小。",
-                retryable=False,
-                http_status_code=response.status_code,
-            )
+        self._source_policy.validate_response_headers(response)
 
     async def _stream_validate_and_store(
         self,
@@ -433,6 +494,104 @@ class OpenAccessPdfAcquirer:
             candidate_id=candidate.candidate_id,
             status=FulltextAcquisitionStatus.FAILED,
             error=FulltextAcquisitionError(code=code, message=message, retryable=retryable),
+        )
+
+
+class OpenAccessPdfAvailabilityProbe:
+    """筛选阶段只探测公开 PDF 是否可自动获取，不下载或暂存文件。"""
+
+    def __init__(
+        self,
+        settings: FulltextAcquisitionSettings,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        host_resolver: HostResolver | None = None,
+    ) -> None:
+        self._settings = settings
+        self._transport = transport
+        self._source_policy = _SafePdfSourcePolicy(settings, host_resolver or resolve_public_host)
+
+    async def probe(self, candidate: FulltextCandidate) -> PdfAvailabilityResult:
+        """返回稳定可行动状态，内部失败原因只留给调用方结构化日志。"""
+        try:
+            return await asyncio.wait_for(
+                self._probe(candidate),
+                timeout=self._settings.fulltext_total_timeout_seconds,
+            )
+        except TimeoutError:
+            return self._requires_upload(candidate, FulltextAcquisitionErrorCode.TIMEOUT)
+
+    async def _probe(self, candidate: FulltextCandidate) -> PdfAvailabilityResult:
+        if candidate.is_open_access is not True:
+            return self._requires_upload(candidate, FulltextAcquisitionErrorCode.NOT_OPEN_ACCESS)
+        if not candidate.links.fulltext_url:
+            return self._requires_upload(
+                candidate,
+                FulltextAcquisitionErrorCode.MISSING_FULLTEXT_URL,
+            )
+
+        try:
+            source_url = await self._source_policy.validate_download_url(
+                candidate.links.fulltext_url
+            )
+            await self._probe_pdf_headers(source_url)
+        except _AcquisitionFailure as exc:
+            return self._requires_upload(candidate, exc.error.code)
+        except httpx.TimeoutException:
+            return self._requires_upload(candidate, FulltextAcquisitionErrorCode.TIMEOUT)
+        except httpx.TransportError:
+            return self._requires_upload(candidate, FulltextAcquisitionErrorCode.NETWORK_ERROR)
+
+        return PdfAvailabilityResult(
+            candidate_id=candidate.candidate_id,
+            status=PdfAvailabilityStatus.AVAILABLE,
+        )
+
+    async def _probe_pdf_headers(self, source_url: str) -> None:
+        """用响应头验证可获取性；不读取响应正文。"""
+        current_url = source_url
+        redirects = 0
+
+        async with httpx.AsyncClient(
+            headers={"Accept": _PDF_MEDIA_TYPE, "User-Agent": "academic-search/0.1.0"},
+            timeout=httpx.Timeout(self._settings.fulltext_download_timeout_seconds),
+            follow_redirects=False,
+            transport=self._transport,
+            proxy=self._settings.download_proxy_url,
+            trust_env=False,
+        ) as client:
+            while True:
+                response = await client.head(current_url)
+                if response.is_redirect:
+                    current_url = await self._source_policy.next_redirect_url(
+                        current_url,
+                        response.headers.get("Location"),
+                        redirects=redirects,
+                    )
+                    redirects += 1
+                    continue
+
+                if response.status_code != 200:
+                    raise _AcquisitionFailure(
+                        status=FulltextAcquisitionStatus.FAILED,
+                        code=FulltextAcquisitionErrorCode.REMOTE_ERROR,
+                        message=f"全文来源返回 HTTP {response.status_code}。",
+                        retryable=response.status_code in _RETRYABLE_HTTP_STATUS_CODES,
+                        http_status_code=response.status_code,
+                    )
+
+                self._source_policy.validate_response_headers(response)
+                return
+
+    @staticmethod
+    def _requires_upload(
+        candidate: FulltextCandidate,
+        error_code: FulltextAcquisitionErrorCode,
+    ) -> PdfAvailabilityResult:
+        return PdfAvailabilityResult(
+            candidate_id=candidate.candidate_id,
+            status=PdfAvailabilityStatus.REQUIRES_UPLOAD,
+            error_code=error_code,
         )
 
 

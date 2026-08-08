@@ -9,7 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infra.db.models.collection import CollectionPaper, ResearchCollection
+from app.infra.db.models.collection import (
+    CollectionBibliographyEntry,
+    CollectionPaper,
+    ResearchCollection,
+)
 from app.infra.db.models.document import Document, IngestionRun
 from app.infra.db.models.paper import Paper
 from app.modules.documents.storage import FulltextStorageError, ResearchDocumentObjectStorage
@@ -189,10 +193,21 @@ class SqlAlchemyLiteratureAdmissionAdapter:
                     "该 PDF 已作为另一篇文献加入当前研究集合，不能重复使用。",
                 )
 
+            citation_text = format_citation(citation, CitationFormat.GB_T_7714_2015_NUMERIC)
+            bibliography_entry = self._build_bibliography_entry(
+                collection_id=collection_id,
+                candidate=candidate,
+                citation=citation,
+                acquired=acquired,
+                doi=doi,
+                paper_id=paper.id,
+                citation_text=citation_text,
+            )
             collection_paper = CollectionPaper(collection_id=collection_id, paper_id=paper.id)
             document = Document(
                 id=document_id,
                 collection_id=collection_id,
+                bibliography_entry_id=bibliography_entry.id,
                 paper_id=paper.id,
                 origin_kind=acquired.origin_kind,
                 original_filename=acquired.original_filename,
@@ -215,7 +230,7 @@ class SqlAlchemyLiteratureAdmissionAdapter:
                 attempt_no=1,
                 is_current=False,
             )
-            self._session.add_all((collection_paper, document, ingestion_run))
+            self._session.add_all((collection_paper, bibliography_entry, document, ingestion_run))
             await self._session.flush()
 
             return CollectionAdmissionResult(
@@ -399,6 +414,46 @@ class SqlAlchemyLiteratureAdmissionAdapter:
             citation_text=format_citation(citation, CitationFormat.GB_T_7714_2015_NUMERIC),
             citation_provider=citation_provider[:64] or "doi_content_negotiation",
             citation_source_url=citation.url,
+        )
+
+    @staticmethod
+    def _build_bibliography_entry(
+        *,
+        collection_id: UUID,
+        candidate: LiteratureAdmissionCandidate,
+        citation: CitationMetadata,
+        acquired: LiteratureAdmissionFulltextDocument,
+        doi: str,
+        paper_id: UUID,
+        citation_text: str,
+    ) -> CollectionBibliographyEntry:
+        """Project verified admission metadata into the collection-owned bibliography entry."""
+        issued_date = citation.issued_date
+        return CollectionBibliographyEntry(
+            id=uuid4(),
+            collection_id=collection_id,
+            source_candidate_id=candidate.candidate_id,
+            paper_id=paper_id,
+            candidate_title=citation.title,
+            candidate_authors=[author.to_csl_json() for author in citation.authors],
+            candidate_abstract=candidate.abstract,
+            candidate_publication_year=issued_date.year if issued_date is not None else None,
+            candidate_venue=citation.venue,
+            candidate_doi=doi,
+            candidate_source_url=candidate.official_url or citation.url,
+            source_record={},
+            citation_status="ready",
+            citation_text=citation_text,
+            citation_snapshot=citation.model_dump(mode="json"),
+            pdf_status="available",
+            pdf_source_url=acquired.source_url,
+            pdf_snapshot={
+                "source_url": acquired.source_url,
+                "sha256": acquired.sha256,
+                "origin_kind": acquired.origin_kind,
+                "access_rights": acquired.access_rights,
+            },
+            content_status="document_ready",
         )
 
     async def _discard_staging_object(self, staging_object_key: str) -> None:

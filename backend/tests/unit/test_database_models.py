@@ -11,6 +11,7 @@ EXPECTED_TABLES = {
     "search_runs",
     "papers",
     "collection_papers",
+    "collection_bibliography_entries",
     "documents",
     "ingestion_runs",
     "document_chunks",
@@ -69,6 +70,7 @@ def test_papers_express_the_doi_and_citation_metadata_admission_rules() -> None:
 
 def test_document_and_ingestion_models_keep_rag_source_and_version_boundaries() -> None:
     """正文来源与当前入库版本必须在模型层受到数据库约束。"""
+    bibliography_entries = Base.metadata.tables["collection_bibliography_entries"]
     documents = Base.metadata.tables["documents"]
     ingestion_runs = Base.metadata.tables["ingestion_runs"]
     current_index = next(
@@ -89,6 +91,15 @@ def test_document_and_ingestion_models_keep_rag_source_and_version_boundaries() 
     )
 
     assert isinstance(origin_kind_constraint, CheckConstraint)
+    assert "bibliography_entry_id" in documents.c
+    assert documents.c.paper_id.nullable
+    assert "candidate_title" in bibliography_entries.c
+    assert bibliography_entries.c.paper_id.nullable
+    assert "citation_text" in bibliography_entries.c
+    assert {
+        "ck_collection_bibliography_entries_citation_text_requires_ready",
+        "ck_collection_bibliography_entries_content_status",
+    } <= {constraint.name for constraint in bibliography_entries.constraints}
     assert "official_download" in str(origin_kind_constraint.sqltext)
     assert "is_current" in ingestion_runs.c
     assert current_index.unique

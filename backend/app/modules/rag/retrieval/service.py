@@ -106,7 +106,7 @@ class RetrievedEvidence:
     chunk_id: UUID
     document_id: UUID
     ingestion_run_id: UUID
-    paper_id: UUID
+    paper_id: UUID | None
     content: str
     page_start: int | None
     page_end: int | None

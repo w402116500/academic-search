@@ -205,11 +205,6 @@ class CandidateReviewSession:
                 )
             if not selected:
                 continue
-            if candidate.doi is None:
-                raise CandidateReviewError(
-                    CandidateReviewErrorCode.CANDIDATE_NOT_SELECTABLE,
-                    "该候选缺少 DOI，可人工查看但不能进入研究集合准备清单。",
-                )
             if candidate.triage is None or not candidate.triage.included:
                 raise CandidateReviewError(
                     CandidateReviewErrorCode.CANDIDATE_NOT_SELECTABLE,
@@ -232,6 +227,6 @@ class CandidateReviewSession:
         if not selected_ids:
             raise CandidateReviewError(
                 CandidateReviewErrorCode.SELECTION_EMPTY,
-                "请先勾选至少一篇带 DOI 的候选文献。",
+                "请先勾选至少一篇候选文献。",
             )
         return selected_ids

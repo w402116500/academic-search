@@ -12,6 +12,9 @@ from app.core.fulltext_settings import get_fulltext_acquisition_settings
 from app.core.ingestion_settings import get_ingestion_settings
 from app.core.settings import get_literature_source_settings
 from app.core.workflow_settings import get_workflow_settings
+from app.infra.db.repositories.collection_bibliography import (
+    SqlAlchemyCollectionBibliographyRepository,
+)
 from app.infra.db.repositories.collection_builds import SqlAlchemyCollectionBuildAdapter
 from app.infra.db.repositories.literature_admission import (
     SqlAlchemyLiteratureAdmissionAdapter,
@@ -187,14 +190,12 @@ def get_candidate_review_prepare_service(
 
 def get_candidate_review_admission_service(
     session: Annotated[CandidateReviewSession, Depends(get_candidate_review_session)],
-    fulltext: Annotated[CandidateFulltextService, Depends(get_candidate_fulltext_service)],
+    db_session: Annotated[AsyncSession, Depends(get_db_session)],
     selection: Annotated[CandidateSelectionService, Depends(get_candidate_selection_service)],
-    admission: Annotated[LiteratureAdmissionPort, Depends(get_collection_admission_service)],
 ) -> CandidateAdmissionService:
     return CandidateAdmissionService(
         session,
-        fulltext,
-        admission,
+        SqlAlchemyCollectionBibliographyRepository(db_session),
         selection,
     )
 

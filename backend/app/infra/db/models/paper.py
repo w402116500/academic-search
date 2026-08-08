@@ -12,7 +12,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.infra.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
-    from app.infra.db.models.collection import CollectionPaper
+    from app.infra.db.models.collection import CollectionBibliographyEntry, CollectionPaper
 
 
 # 文献来源规整层与引用格式化层共用这些下划线形式的内部值。数据库使用检查约束
@@ -127,3 +127,6 @@ class Paper(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     collection_papers: Mapped[list[CollectionPaper]] = relationship(back_populates="paper")
+    bibliography_entries: Mapped[list[CollectionBibliographyEntry]] = relationship(
+        back_populates="paper"
+    )

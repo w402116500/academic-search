@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from app.core.fulltext_settings import get_fulltext_acquisition_settings
 from app.core.settings import get_literature_source_settings
 from app.core.workflow_settings import get_workflow_settings
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
@@ -17,6 +18,7 @@ from app.infra.redis.connection import (
 from app.infra.redis.job_queues import ArqCandidateRelevanceJobQueue
 from app.infra.redis.queues import RELEVANCE_QUEUE_NAME
 from app.infra.redis.search_session import RedisSearchSessionStore
+from app.modules.documents.acquisition import OpenAccessPdfAvailabilityProbe
 from app.modules.search.citation_enrichment import CitationMetadataEnricher
 from app.modules.search.providers.doi_resolver import DoiMetadataResolver
 from app.modules.search.relevance_execution import CandidateRelevanceRunExecutor
@@ -50,6 +52,9 @@ async def run_candidate_relevance(
                 citation_enrichment_limit=settings.search_citation_enrichment_limit,
                 citation_enricher=CitationMetadataEnricher(
                     DoiMetadataResolver(settings.doi_resolver)
+                ),
+                pdf_availability_probe=OpenAccessPdfAvailabilityProbe(
+                    get_fulltext_acquisition_settings()
                 ),
                 attempt_no=attempt_no,
                 relevance_queue=ArqCandidateRelevanceJobQueue(),
