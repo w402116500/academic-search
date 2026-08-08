@@ -21,6 +21,7 @@ from app.infra.db.models.workflow import ResearchPlan, SearchRun
 from app.infra.db.repositories.collection_bibliography import (
     SqlAlchemyCollectionBibliographyRepository,
 )
+from app.infra.db.repositories.search_candidates import SqlAlchemySearchCandidateRepository
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
 from app.infra.db.session import async_session_factory
 from app.infra.redis.connection import redis_client_from_environment
@@ -28,7 +29,6 @@ from app.infra.redis.search_session import RedisSearchSessionStore
 from app.infra.storage.documents import Boto3StagingObjectStorage
 from app.modules.documents.acquisition import AuthorizedPdfUploader
 from app.modules.documents.contracts import FulltextAcquisitionStatus
-from app.modules.documents.keys import build_candidate_fulltext_key
 from app.modules.documents.service import CandidateFulltextService
 from app.modules.literature.contracts import (
     CitationAuthor,
@@ -48,10 +48,7 @@ from app.modules.search.fulltext_candidate import SearchCandidateFulltextLookup
 from app.modules.search.review_admission import CandidateAdmissionService
 from app.modules.search.review_selection import CandidateSelectionService
 from app.modules.search.review_session import CandidateReviewSession
-from app.modules.search.session import (
-    build_candidate_selection_key,
-    build_search_session_key,
-)
+from app.modules.search.session import build_search_session_key
 from app.modules.search.state import SearchRunStage, SearchRunStatus
 from sqlalchemy import select
 
@@ -116,8 +113,6 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
     candidate_id = uuid4()
     doi = f"10.5555/live-upload-{uuid4().hex}"
     session_key = build_search_session_key(run_id)
-    fulltext_key = build_candidate_fulltext_key(session_key, candidate_id)
-    selection_key = build_candidate_selection_key(session_key)
     redis = redis_client_from_environment()
     acquisition_settings = get_fulltext_acquisition_settings()
     storage = Boto3StagingObjectStorage(acquisition_settings)
@@ -184,10 +179,13 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
 
         async with async_session_factory() as session:
             runs = SqlAlchemySearchRunRepository(session)
+            candidates = SqlAlchemySearchCandidateRepository(session)
+            await candidates.upsert_candidates(search_run_id=run_id, candidates=(candidate,))
             submission = await CandidateFulltextService(
                 runs,
                 store,
-                candidate_lookup=SearchCandidateFulltextLookup(runs, store),
+                candidate_lookup=SearchCandidateFulltextLookup(runs, candidates),
+                state_store=candidates,
                 uploader=AuthorizedPdfUploader(acquisition_settings, storage),
             ).upload(
                 owner_user_id=owner_user_id,
@@ -212,7 +210,8 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
 
         async with async_session_factory() as session:
             runs = SqlAlchemySearchRunRepository(session)
-            review_session = CandidateReviewSession(runs, store)
+            candidates = SqlAlchemySearchCandidateRepository(session)
+            review_session = CandidateReviewSession(runs, store, candidates)
             selection = CandidateSelectionService(review_session)
             await selection.update_selection(
                 owner_user_id=owner_user_id,
@@ -243,12 +242,12 @@ async def test_live_authorized_pdf_upload_is_staged_and_admitted_for_its_candida
             assert entry.pdf_status == "requires_upload"
             assert entry.content_status == "requires_upload"
 
-        assert await store.read_snapshot(selection_key) == {"candidate_ids": []}
+            assert await candidates.selected_ids(search_run_id=run_id) == set()
         print("live authorized candidate upload acceptance passed")
     finally:
         if staging_object_key is not None:
             await storage.delete_object(object_key=staging_object_key)
-        await redis.delete(session_key, fulltext_key, selection_key)
+        await redis.delete(session_key)
         async with async_session_factory() as cleanup_session:
             user = await cleanup_session.get(User, owner_user_id)
             if user is not None:

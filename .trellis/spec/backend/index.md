@@ -40,6 +40,7 @@ References: `docs/08-development-environment.md`,
 | [Error Handling](./error-handling.md) | Domain errors and HTTP error mapping |
 | [Logging Guidelines](./logging-guidelines.md) | Confirmed Python logging practices |
 | [Quality Guidelines](./quality-guidelines.md) | Static checks, tests, and CI gates |
-| [Candidate Relevance Execution](./candidate-relevance-execution.md) | Batch assessment, retry-subset, and Redis snapshot contracts |
+| [Candidate Review Persistence](./candidate-review-persistence.md) | PostgreSQL-owned candidate review facts and Redis responsibility boundary |
+| [Candidate Relevance Execution](./candidate-relevance-execution.md) | Batch assessment, retry-subset, and persistent candidate contracts |
 | [Research Run Lifecycle](./research-run-lifecycle.md) | ResearchRun status transitions, cancellation, Worker restart recovery, and SSE terminal events |
 | [RAG Answer Citation And Verification](./rag-answer-citation-verification.md) | EvidenceSnapshot, EvidenceRef, verifier, composer, and user citation contracts |

@@ -19,13 +19,13 @@ from app.infra.db.models.workflow import ResearchPlan, SearchRun
 from app.infra.db.repositories.collection_bibliography import (
     SqlAlchemyCollectionBibliographyRepository,
 )
+from app.infra.db.repositories.search_candidates import SqlAlchemySearchCandidateRepository
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
 from app.infra.db.session import async_session_factory
 from app.infra.redis.connection import redis_client_from_environment
 from app.infra.redis.search_session import RedisSearchSessionStore
 from app.infra.storage.documents import Boto3StagingObjectStorage
 from app.modules.documents.contracts import FulltextAcquisitionStatus
-from app.modules.documents.keys import build_candidate_fulltext_key
 from app.modules.documents.service import CandidateFulltextService
 from app.modules.literature.contracts import (
     CitationAuthor,
@@ -49,10 +49,7 @@ from app.modules.search.review_admission import CandidateAdmissionService
 from app.modules.search.review_preparation import CandidatePreparationService
 from app.modules.search.review_selection import CandidateSelectionService
 from app.modules.search.review_session import CandidateReviewSession
-from app.modules.search.session import (
-    build_candidate_selection_key,
-    build_search_session_key,
-)
+from app.modules.search.session import build_search_session_key
 from app.modules.search.state import SearchRunStage, SearchRunStatus
 from app.workers.fulltext import acquire_candidate_fulltext
 from sqlalchemy import select
@@ -134,8 +131,6 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
     run_id = uuid4()
     candidate_id = uuid4()
     session_key = build_search_session_key(run_id)
-    fulltext_key = build_candidate_fulltext_key(session_key, candidate_id)
-    selection_key = build_candidate_selection_key(session_key)
     redis = redis_client_from_environment()
     storage = Boto3StagingObjectStorage(get_fulltext_acquisition_settings())
     staging_object_key: str | None = None
@@ -202,7 +197,9 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
         queue = FakeFulltextQueue()
         async with async_session_factory() as session:
             runs = SqlAlchemySearchRunRepository(session)
-            review_session = CandidateReviewSession(runs, store)
+            candidates = SqlAlchemySearchCandidateRepository(session)
+            await candidates.upsert_candidates(search_run_id=run_id, candidates=(candidate,))
+            review_session = CandidateReviewSession(runs, store, candidates)
             selection = CandidateSelectionService(review_session)
             preparation = CandidatePreparationService(
                 review_session,
@@ -210,7 +207,8 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
                     runs,
                     store,
                     queue,
-                    candidate_lookup=SearchCandidateFulltextLookup(runs, store),
+                    candidate_lookup=SearchCandidateFulltextLookup(runs, candidates),
+                    state_store=candidates,
                 ),
             )
             await selection.update_selection(
@@ -236,14 +234,21 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
             candidate_id=str(candidate_id),
             attempt_no=1,
         )
-        fulltext_state = await store.read_snapshot(fulltext_key)
+        async with async_session_factory() as session:
+            candidates = SqlAlchemySearchCandidateRepository(session)
+            fulltext_state = await candidates.get_fulltext_state(
+                search_run_id=run_id,
+                candidate_id=candidate_id,
+            )
         assert fulltext_state is not None
-        assert fulltext_state["result"]["status"] == FulltextAcquisitionStatus.AVAILABLE.value
-        staging_object_key = fulltext_state["result"]["document"]["staging_object_key"]
+        assert fulltext_state.result.status is FulltextAcquisitionStatus.AVAILABLE
+        assert fulltext_state.result.document is not None
+        staging_object_key = fulltext_state.result.document.staging_object_key
 
         async with async_session_factory() as session:
             runs = SqlAlchemySearchRunRepository(session)
-            review_session = CandidateReviewSession(runs, store)
+            candidates = SqlAlchemySearchCandidateRepository(session)
+            review_session = CandidateReviewSession(runs, store, candidates)
             selection = CandidateSelectionService(review_session)
             admission = CandidateAdmissionService(
                 review_session,
@@ -269,11 +274,11 @@ async def test_live_candidate_review_prepares_downloads_and_admits_an_open_pdf()
             assert entry.pdf_status == "available"
             assert entry.content_status == "pending_auto_download"
 
-        assert await store.read_snapshot(selection_key) == {"candidate_ids": []}
+            assert await candidates.selected_ids(search_run_id=run_id) == set()
     finally:
         if staging_object_key is not None:
             await storage.delete_object(object_key=staging_object_key)
-        await redis.delete(session_key, fulltext_key, selection_key)
+        await redis.delete(session_key)
         async with async_session_factory() as cleanup_session:
             user = await cleanup_session.get(User, owner_user_id)
             if user is not None:

@@ -7,11 +7,15 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
+    PrimaryKeyConstraint,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -185,7 +189,7 @@ class SearchRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(128), nullable=True, unique=True, comment="检索 arq 任务标识"
     )
     redis_session_key: Mapped[str | None] = mapped_column(
-        String(256), nullable=True, unique=True, comment="候选和进度短期存储使用的 Redis 会话键"
+        String(256), nullable=True, unique=True, comment="进度事件、锁和可丢缓存使用的 Redis 会话键"
     )
     status: Mapped[str] = mapped_column(
         String(32),
@@ -238,3 +242,271 @@ class SearchRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     collection: Mapped[ResearchCollection] = relationship(back_populates="search_runs")
     research_plan: Mapped[ResearchPlan] = relationship(back_populates="search_runs")
+    candidates: Mapped[list[SearchRunCandidate]] = relationship(
+        back_populates="search_run",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class SearchRunCandidate(TimestampMixin, Base):
+    """一次检索运行下的可恢复候选审核事实。"""
+
+    __tablename__ = "search_run_candidates"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "search_run_id",
+            "candidate_id",
+            name="search_run_candidate_identity",
+        ),
+        CheckConstraint("position >= 0", name="position_non_negative"),
+        CheckConstraint(
+            "language IN ('zh', 'en', 'other', 'unknown')",
+            name="language",
+        ),
+        CheckConstraint(
+            "relevance_state IN ('pending', 'completed', 'excluded', 'failed', 'skipped')",
+            name="relevance_state",
+        ),
+        CheckConstraint("jsonb_typeof(authors) = 'array'", name="authors"),
+        CheckConstraint(
+            "jsonb_typeof(citation_counts_by_source) = 'object'", name="citation_counts"
+        ),
+        CheckConstraint("jsonb_typeof(links) = 'object'", name="links"),
+        CheckConstraint("jsonb_typeof(source_refs) = 'array'", name="source_refs"),
+        Index(
+            "ix_search_run_candidates_run_position",
+            "search_run_id",
+            "position",
+        ),
+        Index(
+            "ix_search_run_candidates_run_selected_at",
+            "search_run_id",
+            "selected_at",
+        ),
+        Index(
+            "ix_search_run_candidates_run_relevance_state",
+            "search_run_id",
+            "relevance_state",
+        ),
+        {"comment": "Search 边界内可恢复的候选审核事实，不等同于长期论文事实"},
+    )
+
+    search_run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("search_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="所属检索运行标识",
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+        comment="检索运行内稳定候选标识",
+    )
+    position: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="候选在本次检索归并结果中的稳定顺序",
+    )
+    doi: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, index=True, comment="候选 DOI"
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False, comment="候选标题")
+    title_key: Mapped[str] = mapped_column(Text, nullable=False, comment="候选去重标题键")
+    language: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="unknown",
+        server_default=text("'unknown'"),
+        index=True,
+        comment="候选主语言：zh、en、other 或 unknown",
+    )
+    authors: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        comment="候选作者展示投影",
+    )
+    abstract: Mapped[str | None] = mapped_column(Text, nullable=True, comment="候选摘要")
+    published_year: Mapped[int | None] = mapped_column(
+        SmallInteger,
+        nullable=True,
+        index=True,
+        comment="候选发表年份",
+    )
+    published_date: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="候选发表日期结构化投影",
+    )
+    venue: Mapped[str | None] = mapped_column(
+        String(500), nullable=True, comment="期刊、会议或平台"
+    )
+    document_type: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="来源文献类型"
+    )
+    volume: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="卷号")
+    issue: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="期号")
+    pages: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="页码")
+    article_number: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="文章编号"
+    )
+    publisher: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="出版方")
+    citation_counts_by_source: Mapped[dict[str, int]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+        comment="各来源可展示引用计数",
+    )
+    links: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+        comment="候选页面、开放获取和全文链接投影",
+    )
+    is_open_access: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        comment="来源声明或合并后判断的开放获取状态",
+    )
+    source_refs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        comment="最小来源引用，不保存完整 provider 原始响应",
+    )
+    triage: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="基础初筛结果",
+    )
+    relevance_state: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+        index=True,
+        comment="相关性处理状态",
+    )
+    relevance_assessment: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="已通过证据校验的相关性评估",
+    )
+    relevance_error: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="相关性终态失败摘要",
+    )
+    citation: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="候选题录补全投影",
+    )
+    pdf_availability: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="公开 PDF 可行动状态",
+    )
+    relevance_retry_attempt_no: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="下一次相关性重试任务应处理该候选的尝试序号",
+    )
+    selected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+        comment="用户加入准备清单的时间；为空表示未选择",
+    )
+
+    search_run: Mapped[SearchRun] = relationship(back_populates="candidates")
+    fulltext_state: Mapped[SearchCandidateFulltextState | None] = relationship(
+        back_populates="candidate_row",
+        cascade="all, delete-orphan",
+        uselist=False,
+        passive_deletes=True,
+    )
+
+
+class SearchCandidateFulltextState(TimestampMixin, Base):
+    """检索候选的可恢复全文准备状态。"""
+
+    __tablename__ = "search_candidate_fulltext_states"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "search_run_id",
+            "candidate_id",
+            name="search_candidate_fulltext_state_identity",
+        ),
+        ForeignKeyConstraint(
+            ["search_run_id", "candidate_id"],
+            ["search_run_candidates.search_run_id", "search_run_candidates.candidate_id"],
+            ondelete="CASCADE",
+            name="search_candidate_fulltext_state_candidate",
+        ),
+        CheckConstraint("attempt_no > 0", name="attempt_positive"),
+        CheckConstraint(
+            "status IN ('queued', 'downloading', 'validating', 'available', "
+            "'requires_upload', 'rejected', 'failed')",
+            name="status",
+        ),
+        CheckConstraint("jsonb_typeof(candidate) = 'object'", name="candidate"),
+        Index(
+            "ix_search_candidate_fulltext_states_run_status",
+            "search_run_id",
+            "status",
+        ),
+        {"comment": "Search 候选进入全文准备阶段后的可恢复状态"},
+    )
+
+    search_run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+        comment="所属检索运行标识",
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+        comment="所属候选标识",
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, comment="全文任务尝试序号")
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, index=True, comment="全文任务状态"
+    )
+    candidate: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        comment="全文边界所需的候选投影",
+    )
+    result_document: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="已校验暂存全文文件投影",
+    )
+    result_error: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="终态失败的安全错误摘要",
+    )
+    arq_job_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="候选全文 arq 任务标识",
+    )
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        comment="本轮全文准备请求时间",
+    )
+    state_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        comment="全文状态业务更新时间",
+    )
+
+    candidate_row: Mapped[SearchRunCandidate] = relationship(back_populates="fulltext_state")

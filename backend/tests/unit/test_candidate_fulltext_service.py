@@ -19,8 +19,8 @@ from app.modules.documents.contracts import (
     FulltextAcquisitionErrorCode,
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
+    FulltextCandidate,
 )
-from app.modules.documents.keys import build_candidate_fulltext_key
 from app.modules.documents.queue import CandidateFulltextQueueError
 from app.modules.documents.service import CandidateFulltextService
 from app.modules.search.contracts import (
@@ -38,6 +38,7 @@ from app.modules.search.fulltext_candidate import (
 from app.modules.search.run_models import SearchRunRecord
 from app.modules.search.run_repository import SearchRunRepository
 from app.modules.search.session import SearchSessionStore
+from tests.unit.fakes_search_candidates import FakeSearchCandidateRepository
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000000801")
 _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000802")
@@ -72,26 +73,23 @@ class FakeSearchRunRepository:
 
 
 class FakeSessionStore:
-    """使用内存字典代替 Redis，保留真实服务的读写边界。"""
+    """只模拟上传锁；候选和全文状态事实由持久仓储 fake 负责。"""
 
-    def __init__(self, snapshots: dict[str, dict[str, Any]]) -> None:
-        self.snapshots = snapshots
-        self.writes: list[tuple[str, dict[str, Any]]] = []
-
-    async def read_snapshot(self, session_key: str) -> dict[str, Any] | None:
-        return self.snapshots.get(session_key)
-
-    async def write_snapshot(self, session_key: str, snapshot: dict[str, Any]) -> None:
-        self.snapshots[session_key] = snapshot
-        self.writes.append((session_key, snapshot))
+    def __init__(self) -> None:
+        self.locks: dict[str, str] = {}
 
     async def try_acquire_lock(self, _key: str, *, token: str, ttl_seconds: int) -> bool:
         assert token
         assert ttl_seconds > 0
+        if _key in self.locks:
+            return False
+        self.locks[_key] = token
         return True
 
     async def release_lock(self, _key: str, *, token: str) -> None:
         assert token
+        if self.locks.get(_key) == token:
+            self.locks.pop(_key)
 
 
 class FakeQueue:
@@ -123,7 +121,7 @@ class FakeUploader:
     async def acquire(
         self,
         *,
-        candidate: UnifiedCandidate,
+        candidate: FulltextCandidate,
         chunks: AsyncIterable[bytes],
         media_type: str | None,
     ) -> FulltextAcquisitionResult:
@@ -149,7 +147,7 @@ class FakeUploader:
 
 
 def _run() -> SearchRunRecord:
-    """构造已完成且拥有 Redis 候选会话的检索运行。"""
+    """构造已完成且拥有持久候选事实的检索运行。"""
     now = datetime.now(UTC)
     return SearchRunRecord(
         id=_RUN_ID,
@@ -192,31 +190,36 @@ def _candidate(*, included: bool = True) -> UnifiedCandidate:
     )
 
 
-def _store(candidate: UnifiedCandidate) -> FakeSessionStore:
-    """初始化真实搜索快照形状，确保服务从服务端候选而非前端数据读取。"""
-    return FakeSessionStore(
-        {
-            _SESSION_KEY: {
-                "candidates": [candidate.model_dump(mode="json")],
-            }
-        }
-    )
-
-
 def _service(
-    store: FakeSessionStore,
+    candidates: FakeSearchCandidateRepository,
     *,
+    store: FakeSessionStore | None = None,
     queue: FakeQueue | None = None,
     uploader: Any | None = None,
 ) -> CandidateFulltextService:
     """Compose the full-text use case with explicit Search-owned candidate lookup."""
     runs = cast(SearchRunRepository, FakeSearchRunRepository(_run()))
+    session_store = store or FakeSessionStore()
     return CandidateFulltextService(
         runs,
-        cast(SearchSessionStore, store),
+        cast(SearchSessionStore, session_store),
         queue,
-        candidate_lookup=SearchCandidateFulltextLookup(runs, cast(SearchSessionStore, store)),
+        candidate_lookup=SearchCandidateFulltextLookup(runs, candidates),
+        state_store=candidates,
         uploader=uploader,
+    )
+
+
+def _candidate_repository(
+    candidate: UnifiedCandidate,
+    *,
+    fulltext_states: tuple[CandidateFulltextState, ...] = (),
+) -> FakeSearchCandidateRepository:
+    """初始化持久候选事实，确保服务从服务端候选而非前端数据读取。"""
+    return FakeSearchCandidateRepository(
+        search_run_id=_RUN_ID,
+        candidates=(candidate,),
+        fulltext_states=fulltext_states,
     )
 
 
@@ -224,9 +227,9 @@ def _service(
 async def test_request_uses_server_candidate_and_repeated_click_is_idempotent() -> None:
     """同一候选第二次请求应返回已有 queued 状态，而不是再次投递下载任务。"""
     candidate = _candidate()
-    store = _store(candidate)
+    candidates = _candidate_repository(candidate)
     queue = FakeQueue()
-    service = _service(store, queue=queue)
+    service = _service(candidates, queue=queue)
 
     first = await service.request(
         owner_user_id=_OWNER_ID,
@@ -250,9 +253,9 @@ async def test_request_uses_server_candidate_and_repeated_click_is_idempotent() 
 @pytest.mark.asyncio
 async def test_request_rejects_a_candidate_excluded_by_server_side_triage() -> None:
     """前端知道 UUID 也不能绕过候选初筛来获取全文。"""
-    store = _store(_candidate(included=False))
+    candidates = _candidate_repository(_candidate(included=False))
     queue = FakeQueue()
-    service = _service(store, queue=queue)
+    service = _service(candidates, queue=queue)
 
     with pytest.raises(CandidateFulltextError) as raised:
         await service.request(
@@ -270,10 +273,8 @@ async def test_request_rejects_a_candidate_excluded_by_server_side_triage() -> N
 async def test_retry_creates_a_new_attempt_only_for_retryable_terminal_failure() -> None:
     """重试保留第一轮失败状态，并以新的 attempt_no 形成新的 arq 任务标识。"""
     candidate = _candidate()
-    store = _store(candidate)
-    state_key = build_candidate_fulltext_key(_SESSION_KEY, _CANDIDATE_ID)
     now = datetime.now(UTC)
-    store.snapshots[state_key] = CandidateFulltextState(
+    failed_state = CandidateFulltextState(
         search_run_id=_RUN_ID,
         candidate=to_fulltext_candidate(candidate),
         attempt_no=1,
@@ -288,9 +289,10 @@ async def test_retry_creates_a_new_attempt_only_for_retryable_terminal_failure()
         ),
         requested_at=now,
         updated_at=now,
-    ).model_dump(mode="json")
+    )
+    candidates = _candidate_repository(candidate, fulltext_states=(failed_state,))
     queue = FakeQueue()
-    service = _service(store, queue=queue)
+    service = _service(candidates, queue=queue)
 
     submission = await service.request(
         owner_user_id=_OWNER_ID,
@@ -310,7 +312,7 @@ async def test_retry_creates_a_new_attempt_only_for_retryable_terminal_failure()
 async def test_queue_failure_is_returned_as_retryable_failed_state() -> None:
     """队列不可用不能留下 queued 假象，前端应得到明确的可重试失败。"""
     candidate = _candidate()
-    service = _service(_store(candidate), queue=FakeQueue(fail=True))
+    service = _service(_candidate_repository(candidate), queue=FakeQueue(fail=True))
 
     submission = await service.request(
         owner_user_id=_OWNER_ID,
@@ -330,7 +332,7 @@ async def test_upload_requires_an_explicit_authorization_statement() -> None:
     """客户端知道候选 UUID 也不能在未确认权限时写入私有暂存区。"""
     candidate = _candidate()
     uploader = FakeUploader()
-    service = _service(_store(candidate), uploader=cast(Any, uploader))
+    service = _service(_candidate_repository(candidate), uploader=cast(Any, uploader))
 
     async def chunks() -> AsyncIterable[bytes]:
         yield b"%PDF-1.7\n"
@@ -354,9 +356,8 @@ async def test_upload_requires_an_explicit_authorization_statement() -> None:
 async def test_upload_uses_the_server_side_candidate_and_writes_available_state() -> None:
     """上传只消费服务端快照中的候选，成功后沿用既有可准入全文状态。"""
     candidate = _candidate()
-    store = _store(candidate)
     uploader = FakeUploader()
-    service = _service(store, uploader=cast(Any, uploader))
+    service = _service(_candidate_repository(candidate), uploader=cast(Any, uploader))
 
     async def chunks() -> AsyncIterable[bytes]:
         yield b"%PDF-1.7\n"

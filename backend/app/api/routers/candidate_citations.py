@@ -72,7 +72,7 @@ async def render_candidate_citation(
         Query(alias="format", description="需要渲染的正式引用格式"),
     ] = CitationFormat.GB_T_7714_2015_NUMERIC,
 ) -> CandidateCitationResponse:
-    """从 Redis 候选快照的 `ready` 格式中立题录渲染一种可复制引用。"""
+    """从持久候选题录投影中的 `ready` 格式中立题录渲染一种可复制引用。"""
     try:
         rendered = await service.render(
             owner_user_id=current_user.id,

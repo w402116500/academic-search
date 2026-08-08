@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -14,7 +14,6 @@ from app.modules.documents.contracts import (
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
 )
-from app.modules.documents.keys import build_candidate_fulltext_key
 from app.modules.literature.api_contracts import (
     CandidateCitationError,
     CandidateCitationErrorCode,
@@ -37,7 +36,7 @@ from app.modules.search.contracts import (
 from app.modules.search.fulltext_candidate import to_fulltext_candidate
 from app.modules.search.run_models import SearchRunRecord
 from app.modules.search.run_repository import SearchRunRepository
-from app.modules.search.session import SearchSessionStore
+from tests.unit.fakes_search_candidates import FakeSearchCandidateRepository
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000000901")
 _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000000902")
@@ -71,18 +70,8 @@ class FakeSearchRunRepository:
         return self._run
 
 
-class FakeSessionStore:
-    """用内存快照替代 Redis，保持候选只能从服务端会话读取。"""
-
-    def __init__(self, snapshots: dict[str, dict[str, Any]]) -> None:
-        self._snapshots = snapshots
-
-    async def read_snapshot(self, session_key: str) -> dict[str, Any] | None:
-        return self._snapshots.get(session_key)
-
-
 def _run() -> SearchRunRecord:
-    """构造拥有短期候选快照的完成检索运行。"""
+    """构造完成检索运行。"""
     now = datetime.now(UTC)
     return SearchRunRecord(
         id=_RUN_ID,
@@ -146,7 +135,7 @@ def _candidate(citation: CitationMetadata | None) -> UnifiedCandidate:
 
 
 def _fulltext_state(citation: CitationMetadata) -> CandidateFulltextState:
-    """模拟全文任务已补齐题录，但不会回写主候选快照的中间状态。"""
+    """模拟全文任务已补齐题录，但尚未回写主候选投影的中间状态。"""
     return CandidateFulltextState(
         search_run_id=_RUN_ID,
         candidate=to_fulltext_candidate(_candidate(citation)),
@@ -166,16 +155,26 @@ def _fulltext_state(citation: CitationMetadata) -> CandidateFulltextState:
     )
 
 
+def _candidate_repository(
+    candidate: UnifiedCandidate,
+    *,
+    fulltext_states: tuple[CandidateFulltextState, ...] = (),
+) -> FakeSearchCandidateRepository:
+    """初始化服务端持久候选事实。"""
+    return FakeSearchCandidateRepository(
+        search_run_id=_RUN_ID,
+        candidates=(candidate,),
+        fulltext_states=fulltext_states,
+    )
+
+
 @pytest.mark.asyncio
 async def test_render_uses_the_server_side_ready_metadata_for_the_requested_style() -> None:
     """前端仅传递格式枚举，引用文本必须由会话内 `ready` 题录生成。"""
     candidate = _candidate(_citation())
     service = CandidateCitationService(
         cast(SearchRunRepository, FakeSearchRunRepository(_run())),
-        cast(
-            SearchSessionStore,
-            FakeSessionStore({_SESSION_KEY: {"candidates": [candidate.model_dump(mode="json")]}}),
-        ),
+        _candidate_repository(candidate),
     )
 
     rendered = await service.render(
@@ -198,10 +197,7 @@ async def test_render_rejects_incomplete_metadata_instead_of_returning_a_fake_ci
     candidate = _candidate(_citation(status=CitationMetadataStatus.PARTIAL))
     service = CandidateCitationService(
         cast(SearchRunRepository, FakeSearchRunRepository(_run())),
-        cast(
-            SearchSessionStore,
-            FakeSessionStore({_SESSION_KEY: {"candidates": [candidate.model_dump(mode="json")]}}),
-        ),
+        _candidate_repository(candidate),
     )
 
     with pytest.raises(CandidateCitationError) as raised:
@@ -223,17 +219,7 @@ async def test_render_uses_ready_metadata_from_the_candidate_fulltext_state() ->
     state = _fulltext_state(_citation())
     service = CandidateCitationService(
         cast(SearchRunRepository, FakeSearchRunRepository(_run())),
-        cast(
-            SearchSessionStore,
-            FakeSessionStore(
-                {
-                    _SESSION_KEY: {"candidates": [candidate.model_dump(mode="json")]},
-                    build_candidate_fulltext_key(_SESSION_KEY, _CANDIDATE_ID): state.model_dump(
-                        mode="json"
-                    ),
-                }
-            ),
-        ),
+        _candidate_repository(candidate, fulltext_states=(state,)),
     )
 
     rendered = await service.render(

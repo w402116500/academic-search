@@ -42,19 +42,25 @@ from app.modules.search.run_repository import SearchRunRepository
 from app.modules.search.run_service import SearchRunService
 from app.modules.search.session import SearchSessionStore
 from app.modules.search.state import SearchRunStage
+from tests.unit.fakes_search_candidates import FakeSearchCandidateRepository
 
 
 class FakeRelevanceStore:
-    """内存快照替身，保留执行器自动恢复所需的原子合并边界。"""
+    """Redis 事件、锁和可丢缓存替身；候选事实由仓储 fake 负责。"""
 
-    def __init__(self, snapshot: dict[str, Any]) -> None:
-        self.snapshot = snapshot
+    def __init__(self, snapshot: dict[str, Any] | None = None) -> None:
+        self.snapshot = snapshot or {}
         self.events: list[dict[str, Any]] = []
         self.released_locks: list[tuple[str, str]] = []
         self.merge_calls = 0
+        self.write_calls = 0
 
     async def read_snapshot(self, _key: str) -> dict[str, Any]:
         return self.snapshot
+
+    async def write_snapshot(self, _key: str, snapshot: dict[str, Any]) -> None:
+        self.write_calls += 1
+        self.snapshot = snapshot
 
     async def merge_snapshot(
         self,
@@ -185,6 +191,12 @@ def _snapshot(*candidates: UnifiedCandidate, attempt_no: int = 1) -> dict[str, A
     }
 
 
+def _candidate_repository(
+    *candidates: UnifiedCandidate,
+) -> FakeSearchCandidateRepository:
+    return FakeSearchCandidateRepository(search_run_id=_run().id, candidates=candidates)
+
+
 def _with_level(candidate: UnifiedCandidate, level: CandidateRelevanceLevel) -> UnifiedCandidate:
     return candidate.model_copy(
         update={
@@ -201,8 +213,8 @@ def _with_level(candidate: UnifiedCandidate, level: CandidateRelevanceLevel) -> 
     )
 
 
-def test_relevance_merge_only_replaces_relevance_fields() -> None:
-    """模型完成时不覆盖同时写入的题录、候选原文或准备清单。"""
+def test_candidate_counts_recomputes_relevance_fields_without_losing_base_counts() -> None:
+    """相关性执行只重算相关性计数，保留来源阶段已有统计。"""
     candidate = _candidate()
     assessed = candidate.model_copy(
         update={
@@ -221,23 +233,21 @@ def test_relevance_merge_only_replaces_relevance_fields() -> None:
             ),
         }
     )
-    snapshot = {
-        "status": "running",
-        "stage": "relevance_assessment",
-        "candidate_counts": {},
-        "candidates": [candidate.model_dump(mode="json")],
-        "candidate_selection": {"selected_candidate_ids": [str(candidate.candidate_id)]},
-    }
+    counts = CandidateRelevanceRunExecutor._candidate_counts(
+        {
+            "candidate_count": 1,
+            "deduplicated_count": 1,
+            "relevance_pending_count": 99,
+        },
+        (assessed,),
+    )
 
-    merged = CandidateRelevanceRunExecutor._merge_relevance(snapshot, (assessed,))
-    result = UnifiedCandidate.model_validate(merged["candidates"][0])
-
-    assert result.citation == candidate.citation
-    assert result.title == candidate.title
-    assert result.source_records == candidate.source_records
-    assert result.relevance_state is CandidateRelevanceState.COMPLETED
-    assert result.relevance_assessment == assessed.relevance_assessment
-    assert merged["candidate_selection"] == snapshot["candidate_selection"]
+    assert counts["candidate_count"] == 1
+    assert counts["deduplicated_count"] == 1
+    assert "relevance_pending_count" not in counts
+    assert counts["relevance_total_count"] == 1
+    assert counts["relevance_analyzed_count"] == 1
+    assert counts["screening_candidate_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -247,8 +257,10 @@ async def test_first_technical_failure_queues_only_unresolved_candidates() -> No
     candidate = _candidate()
     store = FakeRelevanceStore(_snapshot(candidate))
     queue = RecordingRelevanceQueue()
+    candidates = _candidate_repository(candidate)
     executor = CandidateRelevanceRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=candidates,
         search_run_id=run.id,
         session_store=cast(SearchSessionStore, store),
         citation_enrichment_limit=0,
@@ -259,19 +271,23 @@ async def test_first_technical_failure_queues_only_unresolved_candidates() -> No
     workflow = FakeWorkflowService()
     executor._workflow_service = cast(SearchRunService, workflow)
 
-    queued, _retry_snapshot = await executor._retry_technical_failure(
+    queued, retry_scheduled = await executor._retry_technical_failure(
         run=run,
-        session_key=run.redis_session_key or "",
         candidate_ids=(candidate.candidate_id,),
         failure_code="candidate_relevance_model_unavailable",
         resolved_candidates=(),
     )
 
     assert queued is True
+    assert retry_scheduled is True
     assert queue.calls == [(run.id, 2)]
-    assert store.snapshot["relevance_attempt_no"] == 2
-    assert store.snapshot["relevance_retry_candidate_ids"] == [str(candidate.candidate_id)]
+    retry_ids = await candidates.relevance_retry_candidate_ids(
+        search_run_id=run.id,
+        attempt_no=2,
+    )
+    assert retry_ids == frozenset({candidate.candidate_id})
     assert store.snapshot["stage"] == SearchRunStage.RELEVANCE_ASSESSMENT.value
+    assert store.write_calls == 1
     assert workflow.progress_updates[0]["stage"] is SearchRunStage.RELEVANCE_ASSESSMENT
 
 
@@ -279,9 +295,18 @@ async def test_first_technical_failure_queues_only_unresolved_candidates() -> No
 async def test_stale_relevance_attempt_is_ignored_before_model_work() -> None:
     """旧任务序号不能覆盖已经排队的后续相关性尝试。"""
     run = _run()
-    store = FakeRelevanceStore(_snapshot(_candidate(), attempt_no=2))
+    candidate = _candidate()
+    store = FakeRelevanceStore(_snapshot(candidate, attempt_no=2))
+    candidates = _candidate_repository(candidate)
+    await candidates.update_relevance_and_schedule_retry(
+        search_run_id=run.id,
+        resolved_candidates=(),
+        retry_attempt_no=2,
+        retry_candidate_ids=(candidate.candidate_id,),
+    )
     executor = CandidateRelevanceRunExecutor(
         runs=cast(SearchRunRepository, FakeSearchRunRepository(run)),
+        candidates=candidates,
         search_run_id=run.id,
         session_store=cast(SearchSessionStore, store),
         citation_enrichment_limit=0,
@@ -318,9 +343,9 @@ def test_corrupt_retry_subset_falls_back_to_pending_candidates() -> None:
     """损坏的重试快照不能让仍待处理的候选被提前完成。"""
     pending = _candidate()
     other_pending = _candidate()
-    snapshot = _snapshot(pending, other_pending, attempt_no=2)
     executor = CandidateRelevanceRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=_candidate_repository(pending, other_pending),
         search_run_id=_run().id,
         session_store=cast(SearchSessionStore, object()),
         citation_enrichment_limit=0,
@@ -328,32 +353,35 @@ def test_corrupt_retry_subset_falls_back_to_pending_candidates() -> None:
         attempt_no=2,
     )
 
-    snapshot["relevance_retry_candidate_ids"] = []
-    assert executor._candidates_for_attempt(snapshot, (pending, other_pending)) == (
+    assert executor._candidates_for_attempt(None, (pending, other_pending)) == (
         pending,
         other_pending,
     )
 
-    snapshot["relevance_retry_candidate_ids"] = ["00000000-0000-0000-0000-000000009999"]
-    assert executor._candidates_for_attempt(snapshot, (pending, other_pending)) == (
+    foreign_id = UUID("00000000-0000-0000-0000-000000009999")
+    assert executor._candidates_for_attempt(frozenset({foreign_id}), (pending, other_pending)) == (
         pending,
         other_pending,
     )
 
-    snapshot["relevance_retry_candidate_ids"] = [str(pending.candidate_id)]
-    assert executor._candidates_for_attempt(snapshot, (pending, other_pending)) == (
+    assert executor._candidates_for_attempt(
+        frozenset({pending.candidate_id}), (pending, other_pending)
+    ) == (
         pending,
         other_pending,
     )
 
-    snapshot["relevance_retry_candidate_ids"] = [
-        str(pending.candidate_id),
-        "00000000-0000-0000-0000-000000009999",
-    ]
-    assert executor._candidates_for_attempt(snapshot, (pending, other_pending)) == (
+    assert executor._candidates_for_attempt(
+        frozenset({pending.candidate_id, foreign_id}), (pending, other_pending)
+    ) == (
         pending,
         other_pending,
     )
+
+    assert executor._candidates_for_attempt(
+        frozenset({pending.candidate_id, other_pending.candidate_id}),
+        (pending, other_pending),
+    ) == (pending, other_pending)
 
 
 @pytest.mark.asyncio
@@ -367,8 +395,10 @@ async def test_partial_result_merges_valid_peer_before_scheduling_retry(
     unresolved = _candidate()
     store = FakeRelevanceStore(_snapshot(valid_peer, unresolved))
     queue = RecordingRelevanceQueue()
+    candidates = _candidate_repository(valid_peer, unresolved)
     executor = CandidateRelevanceRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=candidates,
         search_run_id=run.id,
         session_store=cast(SearchSessionStore, store),
         citation_enrichment_limit=0,
@@ -396,19 +426,23 @@ async def test_partial_result_merges_valid_peer_before_scheduling_retry(
 
     monkeypatch.setattr(executor, "_assess_collection", assess_collection)
 
-    result = await executor._execute_locked(run, run.redis_session_key or "")
+    result = await executor._execute_locked(run)
     stored = {
         candidate.candidate_id: candidate
-        for candidate in CandidateRelevanceRunExecutor._deserialize_candidates(store.snapshot)
+        for candidate in await candidates.list_candidates(search_run_id=run.id)
     }
+    retry_ids = await candidates.relevance_retry_candidate_ids(
+        search_run_id=run.id,
+        attempt_no=2,
+    )
 
     assert result == {"search_run_id": str(run.id), "status": "retry_queued"}
     assert assessed_ids == [(completed.candidate_id, unresolved.candidate_id)]
     assert stored[completed.candidate_id].relevance_state is CandidateRelevanceState.COMPLETED
     assert stored[unresolved.candidate_id].relevance_state is CandidateRelevanceState.PENDING
-    assert store.snapshot["relevance_retry_candidate_ids"] == [str(unresolved.candidate_id)]
+    assert retry_ids == frozenset({unresolved.candidate_id})
     assert queue.calls == [(run.id, 2)]
-    assert store.merge_calls == 1
+    assert store.write_calls == 1
 
 
 @pytest.mark.asyncio
@@ -421,8 +455,10 @@ async def test_unparseable_batch_schedules_all_current_unresolved_candidates(
     second = _candidate()
     store = FakeRelevanceStore(_snapshot(first, second))
     queue = RecordingRelevanceQueue()
+    candidates = _candidate_repository(first, second)
     executor = CandidateRelevanceRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=candidates,
         search_run_id=run.id,
         session_store=cast(SearchSessionStore, store),
         citation_enrichment_limit=0,
@@ -443,13 +479,14 @@ async def test_unparseable_batch_schedules_all_current_unresolved_candidates(
 
     monkeypatch.setattr(executor, "_assess_collection", assess_collection)
 
-    result = await executor._execute_locked(run, run.redis_session_key or "")
+    result = await executor._execute_locked(run)
+    retry_ids = await candidates.relevance_retry_candidate_ids(
+        search_run_id=run.id,
+        attempt_no=2,
+    )
 
     assert result == {"search_run_id": str(run.id), "status": "retry_queued"}
-    assert store.snapshot["relevance_retry_candidate_ids"] == [
-        str(first.candidate_id),
-        str(second.candidate_id),
-    ]
+    assert retry_ids == frozenset({first.candidate_id, second.candidate_id})
     assert queue.calls == [(run.id, 2)]
 
 
@@ -463,8 +500,10 @@ async def test_unparseable_batch_keeps_empty_abstract_candidate_terminal(
     empty_abstract = _candidate("")
     store = FakeRelevanceStore(_snapshot(assessable, empty_abstract))
     queue = RecordingRelevanceQueue()
+    candidates = _candidate_repository(assessable, empty_abstract)
     executor = CandidateRelevanceRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=candidates,
         search_run_id=run.id,
         session_store=cast(SearchSessionStore, store),
         citation_enrichment_limit=0,
@@ -485,13 +524,17 @@ async def test_unparseable_batch_keeps_empty_abstract_candidate_terminal(
 
     monkeypatch.setattr(executor, "_assess_collection", assess_collection)
 
-    await executor._execute_locked(run, run.redis_session_key or "")
+    await executor._execute_locked(run)
     stored = {
         candidate.candidate_id: candidate
-        for candidate in CandidateRelevanceRunExecutor._deserialize_candidates(store.snapshot)
+        for candidate in await candidates.list_candidates(search_run_id=run.id)
     }
+    retry_ids = await candidates.relevance_retry_candidate_ids(
+        search_run_id=run.id,
+        attempt_no=2,
+    )
 
-    assert store.snapshot["relevance_retry_candidate_ids"] == [str(assessable.candidate_id)]
+    assert retry_ids == frozenset({assessable.candidate_id})
     assert stored[empty_abstract.candidate_id].relevance_state is CandidateRelevanceState.EXCLUDED
     assessment = stored[empty_abstract.candidate_id].relevance_assessment
     assert assessment is not None
@@ -510,10 +553,17 @@ async def test_exhausted_retry_assesses_and_excludes_only_snapshot_subset(
         update={"relevance_state": CandidateRelevanceState.EXCLUDED}
     )
     store = FakeRelevanceStore(_snapshot(completed, unresolved, terminal, attempt_no=2))
-    store.snapshot["relevance_retry_candidate_ids"] = [str(unresolved.candidate_id)]
     queue = RecordingRelevanceQueue()
+    candidates = _candidate_repository(completed, unresolved, terminal)
+    await candidates.update_relevance_and_schedule_retry(
+        search_run_id=run.id,
+        resolved_candidates=(),
+        retry_attempt_no=2,
+        retry_candidate_ids=(unresolved.candidate_id,),
+    )
     executor = CandidateRelevanceRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=candidates,
         search_run_id=run.id,
         session_store=cast(SearchSessionStore, store),
         citation_enrichment_limit=0,
@@ -541,10 +591,10 @@ async def test_exhausted_retry_assesses_and_excludes_only_snapshot_subset(
 
     monkeypatch.setattr(executor, "_assess_collection", assess_collection)
 
-    await executor._execute_locked(run, run.redis_session_key or "")
+    await executor._execute_locked(run)
     stored = {
         candidate.candidate_id: candidate
-        for candidate in CandidateRelevanceRunExecutor._deserialize_candidates(store.snapshot)
+        for candidate in await candidates.list_candidates(search_run_id=run.id)
     }
 
     assert assessed_ids == [(unresolved.candidate_id,)]
@@ -554,7 +604,9 @@ async def test_exhausted_retry_assesses_and_excludes_only_snapshot_subset(
     relevance_error = stored[unresolved.candidate_id].relevance_error
     assert relevance_error is not None
     assert relevance_error.code == "candidate_relevance_output_invalid"
-    assert "relevance_retry_candidate_ids" not in store.snapshot
+    assert (
+        await candidates.relevance_retry_candidate_ids(search_run_id=run.id, attempt_no=2) is None
+    )
     assert queue.calls == []
 
 
@@ -576,6 +628,7 @@ async def test_citation_enrichment_covers_all_screening_candidates() -> None:
     )
     executor = CandidateRelevanceRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=_candidate_repository(core, related, background, excluded),
         search_run_id=_run().id,
         session_store=cast(SearchSessionStore, object()),
         citation_enrichment_limit=1,
@@ -609,6 +662,7 @@ async def test_pdf_availability_probe_covers_only_screening_candidates() -> None
     )
     executor = CandidateRelevanceRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=_candidate_repository(core, background, excluded),
         search_run_id=_run().id,
         session_store=cast(SearchSessionStore, object()),
         citation_enrichment_limit=0,

@@ -12,6 +12,7 @@ from app.modules.research.plan_contracts import ProviderSearchQuery, ResearchSco
 from app.modules.research.plan_models import ResearchPlanRecord
 from app.modules.research.query_plan import read_confirmed_query_plan
 from app.modules.search.api_contracts import CandidateCounts, SearchProgressEvent
+from app.modules.search.candidate_repository import SearchCandidateRepository
 from app.modules.search.contracts import (
     CandidateRelevanceState,
     ProviderError,
@@ -54,6 +55,7 @@ class SearchRunExecutor:
         self,
         *,
         runs: SearchRunRepository,
+        candidates: SearchCandidateRepository,
         search_run: SearchRunRecord,
         session_store: SearchSessionStore,
         relevance_queue: CandidateRelevanceJobQueue,
@@ -63,6 +65,7 @@ class SearchRunExecutor:
         if max_concurrent_providers < 1:
             raise ValueError("文献来源最大并发数必须至少为 1。")
         self._runs = runs
+        self._candidates = candidates
         self._search_run = search_run
         self._session_store = session_store
         self._registry = registry
@@ -204,6 +207,10 @@ class SearchRunExecutor:
                     if candidate.relevance_state is CandidateRelevanceState.PENDING
                     else candidate
                     for candidate in candidates
+                )
+                await self._candidates.upsert_candidates(
+                    search_run_id=self._search_run.id,
+                    candidates=unavailable_candidates,
                 )
                 candidate_counts.update(self._relevance_counts(unavailable_candidates))
                 final_status = (
@@ -347,6 +354,10 @@ class SearchRunExecutor:
             for candidate in candidates
         )
         candidate_counts.update(self._relevance_counts(prepared_candidates))
+        await self._candidates.upsert_candidates(
+            search_run_id=self._search_run.id,
+            candidates=prepared_candidates,
+        )
         await self._workflow_service.update_progress(
             search_run_id=self._search_run.id,
             stage=SearchRunStage.RELEVANCE_ASSESSMENT,

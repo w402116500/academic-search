@@ -1,4 +1,4 @@
-"""基于搜索候选快照的异步全文任务服务。"""
+"""基于持久搜索候选投影的异步全文任务服务。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from app.modules.documents.contracts import (
     FulltextCandidate,
 )
 from app.modules.documents.keys import (
-    build_candidate_fulltext_key,
     build_candidate_fulltext_upload_lock_key,
 )
 from app.modules.documents.ports import (
@@ -29,6 +28,7 @@ from app.modules.documents.ports import (
     CandidateFulltextRun,
     CandidateFulltextRunPort,
     CandidateFulltextSessionStore,
+    CandidateFulltextStatePort,
 )
 from app.modules.documents.queue import (
     CandidateFulltextJobQueue,
@@ -54,12 +54,14 @@ class CandidateFulltextService:
         queue: CandidateFulltextJobQueue | None = None,
         *,
         candidate_lookup: CandidateFulltextLookupPort,
+        state_store: CandidateFulltextStatePort,
         uploader: AuthorizedPdfUploader | None = None,
     ) -> None:
-        """注入请求范围的数据库、Redis 会话和可替换队列适配器。"""
+        """注入请求范围的数据库、Redis 上传锁和可替换队列适配器。"""
         self._runs = runs
         self._candidate_lookup = candidate_lookup
         self._session_store = session_store
+        self._state_store = state_store
         self._queue = queue
         self._uploader = uploader
 
@@ -90,8 +92,7 @@ class CandidateFulltextService:
             run=run,
             candidate_id=candidate_id,
         )
-        state_key = self._state_key(run, candidate_id)
-        current = await self._read_state(state_key)
+        current = await self._read_state(run.id, candidate_id)
 
         if current is not None:
             active_statuses = {
@@ -115,7 +116,7 @@ class CandidateFulltextService:
         else:
             attempt_no = 1
 
-        # 先验证基础设施依赖，再写入 queued 状态，避免留下没有对应 arq Job 的短期记录。
+        # 先验证基础设施依赖，再写入 queued 状态，避免留下没有对应 arq Job 的持久记录。
         if self._queue is None:
             raise RuntimeError("创建全文任务时必须提供任务队列")
 
@@ -131,7 +132,7 @@ class CandidateFulltextService:
             requested_at=now,
             updated_at=now,
         )
-        await self._write_state(state_key, state)
+        await self._write_state(state)
 
         try:
             job_id = await self._queue.enqueue_fulltext(
@@ -154,11 +155,11 @@ class CandidateFulltextService:
                     "updated_at": datetime.now(UTC),
                 }
             )
-            await self._write_state(state_key, failed)
+            await self._write_state(failed)
             return CandidateFulltextSubmission(search_run=run, state=failed)
 
         queued = state.model_copy(update={"arq_job_id": job_id, "updated_at": datetime.now(UTC)})
-        await self._write_state(state_key, queued)
+        await self._write_state(queued)
         return CandidateFulltextSubmission(search_run=run, state=queued)
 
     async def get_state(
@@ -186,11 +187,11 @@ class CandidateFulltextService:
             run=run,
             candidate_id=candidate_id,
         )
-        state = await self._read_state(self._state_key(run, candidate_id))
+        state = await self._read_state(run.id, candidate_id)
         if state is None:
             raise CandidateFulltextError(
                 CandidateFulltextErrorCode.STATE_NOT_FOUND,
-                "该候选尚未请求全文，或全文会话已过期。",
+                "该候选尚未请求全文。",
             )
         return CandidateFulltextSubmission(search_run=run, state=state)
 
@@ -232,7 +233,6 @@ class CandidateFulltextService:
                 "请先明确确认你有权处理并上传这篇候选的 PDF。",
             )
 
-        state_key = self._state_key(run, candidate_id)
         session_key = self._session_key(run)
         lock_key = build_candidate_fulltext_upload_lock_key(session_key, candidate_id)
         lock_token = uuid4().hex
@@ -246,7 +246,7 @@ class CandidateFulltextService:
                 "该候选的 PDF 正在上传或校验，请等待当前结果。",
             )
         try:
-            current = await self._read_state(state_key)
+            current = await self._read_state(run.id, candidate_id)
             if current is not None:
                 if current.result.status is FulltextAcquisitionStatus.AVAILABLE:
                     return CandidateFulltextSubmission(search_run=run, state=current)
@@ -275,7 +275,7 @@ class CandidateFulltextService:
                 requested_at=now,
                 updated_at=now,
             )
-            await self._write_state(state_key, validating)
+            await self._write_state(validating)
             result = await self._uploader.acquire(
                 candidate=candidate,
                 chunks=chunks,
@@ -284,7 +284,7 @@ class CandidateFulltextService:
             completed = validating.model_copy(
                 update={"result": result, "updated_at": datetime.now(UTC)}
             )
-            await self._write_state(state_key, completed)
+            await self._write_state(completed)
             return CandidateFulltextSubmission(search_run=run, state=completed)
         finally:
             await self._session_store.release_lock(lock_key, token=lock_token)
@@ -318,18 +318,8 @@ class CandidateFulltextService:
             )
 
     @staticmethod
-    def _state_key(run: CandidateFulltextRun, candidate_id: UUID) -> str:
-        """全文状态键由服务器持久化的会话键和候选 UUID 共同构成。"""
-        if run.redis_session_key is None:
-            raise CandidateFulltextError(
-                CandidateFulltextErrorCode.SESSION_EXPIRED,
-                "检索候选会话不存在，请重新执行文献检索。",
-            )
-        return build_candidate_fulltext_key(run.redis_session_key, candidate_id)
-
-    @staticmethod
     def _session_key(run: CandidateFulltextRun) -> str:
-        """上传锁也只能使用持久化运行提供的服务器端 Redis 会话键。"""
+        """上传锁使用服务器端 Redis 会话键；锁不是全文状态来源。"""
         if run.redis_session_key is None:
             raise CandidateFulltextError(
                 CandidateFulltextErrorCode.SESSION_EXPIRED,
@@ -337,11 +327,17 @@ class CandidateFulltextService:
             )
         return run.redis_session_key
 
-    async def _read_state(self, state_key: str) -> CandidateFulltextState | None:
-        """读取并校验 Redis 中的短期全文状态。"""
-        raw_state = await self._session_store.read_snapshot(state_key)
-        return CandidateFulltextState.model_validate(raw_state) if raw_state is not None else None
+    async def _read_state(
+        self,
+        search_run_id: UUID,
+        candidate_id: UUID,
+    ) -> CandidateFulltextState | None:
+        """从持久状态表读取候选全文任务。"""
+        return await self._state_store.get_fulltext_state(
+            search_run_id=search_run_id,
+            candidate_id=candidate_id,
+        )
 
-    async def _write_state(self, state_key: str, state: CandidateFulltextState) -> None:
-        """保存全文任务状态，并与搜索候选会话使用相同 TTL。"""
-        await self._session_store.write_snapshot(state_key, state.model_dump(mode="json"))
+    async def _write_state(self, state: CandidateFulltextState) -> None:
+        """保存全文任务状态，供刷新、重启和准入恢复。"""
+        await self._state_store.write_fulltext_state(state)

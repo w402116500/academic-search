@@ -24,6 +24,7 @@ ignore_imports =
     app.api.deps.services -> app.infra.db.repositories.users
     app.api.deps.services -> app.infra.db.repositories.workspaces
     app.api.deps.services -> app.infra.db.repositories.research_plans
+    app.api.deps.services -> app.infra.db.repositories.search_candidates
     app.api.deps.services -> app.infra.db.repositories.search_runs
     app.api.deps.services -> app.infra.db.repositories.literature_admission
     app.api.deps.services -> app.infra.db.repositories.collection_bibliography

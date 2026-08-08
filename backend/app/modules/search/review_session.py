@@ -1,4 +1,4 @@
-"""候选审核共享的运行归属、Redis 快照与准备清单边界。"""
+"""候选审核共享的运行归属、持久候选与短期锁边界。"""
 
 from __future__ import annotations
 
@@ -6,16 +6,13 @@ from enum import StrEnum
 from uuid import UUID
 
 from app.modules.documents.contracts import CandidateFulltextState
-from app.modules.documents.keys import build_candidate_fulltext_key
+from app.modules.search.candidate_repository import SearchCandidateRepository
 from app.modules.search.contracts import UnifiedCandidate
 from app.modules.search.relevance import is_screening_candidate
 from app.modules.search.run_models import SearchRunRecord
 from app.modules.search.run_repository import SearchRunRepository
 from app.modules.search.run_service import SearchRunService
-from app.modules.search.session import (
-    SearchSessionStore,
-    build_candidate_selection_key,
-)
+from app.modules.search.session import SearchSessionStore
 from app.modules.search.state import SearchRunStatus
 
 
@@ -40,11 +37,17 @@ class CandidateReviewError(RuntimeError):
 
 
 class CandidateReviewSession:
-    """维护一个 search run 的短期审核事实，不执行具体页面或批量命令。"""
+    """维护一个 search run 的审核事实边界，不执行具体页面或批量命令。"""
 
-    def __init__(self, runs: SearchRunRepository, store: SearchSessionStore) -> None:
+    def __init__(
+        self,
+        runs: SearchRunRepository,
+        store: SearchSessionStore,
+        candidates: SearchCandidateRepository,
+    ) -> None:
         self.runs = runs
         self.store = store
+        self.candidates = candidates
         self._run_service = SearchRunService(runs)
 
     async def owned_run(
@@ -80,21 +83,19 @@ class CandidateReviewSession:
         self,
         run: SearchRunRecord,
     ) -> tuple[dict[str, object], tuple[UnifiedCandidate, ...]]:
-        session_key = self.session_key(run)
-        snapshot = await self.store.read_snapshot(session_key)
-        if snapshot is None:
-            await self._run_service.expire_run(run.id)
+        candidates = await self.candidates.list_candidates(search_run_id=run.id)
+        if not candidates:
             raise CandidateReviewError(
-                CandidateReviewErrorCode.SESSION_EXPIRED,
-                "检索候选已过期，请重新执行文献检索。",
+                CandidateReviewErrorCode.CANDIDATE_NOT_FOUND,
+                "当前检索运行尚无可审核候选。",
             )
-        raw_candidates = snapshot.get("candidates")
-        if not isinstance(raw_candidates, list):
-            raise CandidateReviewError(
-                CandidateReviewErrorCode.SESSION_EXPIRED,
-                "检索候选快照格式无效，请重新执行文献检索。",
-            )
-        return snapshot, tuple(UnifiedCandidate.model_validate(item) for item in raw_candidates)
+        snapshot: dict[str, object] = {
+            "status": run.status,
+            "stage": run.stage,
+            "provider_summary": run.provider_summary,
+            "candidate_counts": run.candidate_counts,
+        }
+        return snapshot, candidates
 
     @staticmethod
     def visible_candidates(
@@ -115,59 +116,58 @@ class CandidateReviewSession:
         return synchronized
 
     async def selected_ids(self, run: SearchRunRecord) -> set[UUID]:
-        snapshot = await self.store.read_snapshot(
-            build_candidate_selection_key(self.session_key(run))
-        )
-        if snapshot is None:
-            return set()
-        raw_ids = snapshot.get("candidate_ids")
-        if not isinstance(raw_ids, list) or not all(isinstance(value, str) for value in raw_ids):
-            raise CandidateReviewError(
-                CandidateReviewErrorCode.SESSION_EXPIRED,
-                "候选准备清单格式无效，请重新执行文献检索。",
-            )
-        try:
-            return {UUID(value) for value in raw_ids}
-        except ValueError as exc:
-            raise CandidateReviewError(
-                CandidateReviewErrorCode.SESSION_EXPIRED,
-                "候选准备清单格式无效，请重新执行文献检索。",
-            ) from exc
+        return await self.candidates.selected_ids(search_run_id=run.id)
 
     async def write_selected_ids(
         self,
         run: SearchRunRecord,
         candidate_ids: set[UUID],
     ) -> None:
-        session_key = self.session_key(run)
-        await self.store.write_snapshot(
-            build_candidate_selection_key(session_key),
-            {
-                "candidate_ids": [
-                    str(candidate_id) for candidate_id in sorted(candidate_ids, key=str)
-                ]
-            },
+        current_ids = await self.selected_ids(run)
+        removed_ids = current_ids - candidate_ids
+        added_ids = candidate_ids - current_ids
+        if removed_ids:
+            await self.candidates.set_selected(
+                search_run_id=run.id,
+                candidate_ids=tuple(removed_ids),
+                selected=False,
+            )
+        if added_ids:
+            await self.candidates.set_selected(
+                search_run_id=run.id,
+                candidate_ids=tuple(added_ids),
+                selected=True,
+            )
+        if not candidate_ids and not removed_ids:
+            await self.candidates.clear_selection(search_run_id=run.id)
+        if run.redis_session_key is not None:
+            await self.store.refresh_ttl(run.redis_session_key)
+
+    async def set_selected(
+        self,
+        run: SearchRunRecord,
+        candidate_ids: tuple[UUID, ...],
+        *,
+        selected: bool,
+    ) -> int:
+        selected_count = await self.candidates.set_selected(
+            search_run_id=run.id,
+            candidate_ids=candidate_ids,
+            selected=selected,
         )
-        await self.store.refresh_ttl(session_key)
+        if run.redis_session_key is not None:
+            await self.store.refresh_ttl(run.redis_session_key)
+        return selected_count
 
     async def fulltext_states(
         self,
         run: SearchRunRecord,
         candidates: tuple[UnifiedCandidate, ...],
     ) -> dict[UUID, CandidateFulltextState]:
-        session_key = self.session_key(run)
-        state_keys = [
-            build_candidate_fulltext_key(session_key, candidate.candidate_id)
-            for candidate in candidates
-        ]
-        raw_states = await self.store.read_many_snapshots(state_keys)
-        states: dict[UUID, CandidateFulltextState] = {}
-        for candidate in candidates:
-            state_key = build_candidate_fulltext_key(session_key, candidate.candidate_id)
-            raw_state = raw_states.get(state_key)
-            if raw_state is not None:
-                states[candidate.candidate_id] = CandidateFulltextState.model_validate(raw_state)
-        return states
+        return await self.candidates.list_fulltext_states(
+            search_run_id=run.id,
+            candidate_ids=tuple(candidate.candidate_id for candidate in candidates),
+        )
 
     @staticmethod
     def session_key(run: SearchRunRecord) -> str:
@@ -185,8 +185,8 @@ class CandidateReviewSession:
     ) -> None:
         if any(candidate_id not in candidates for candidate_id in selected_ids):
             raise CandidateReviewError(
-                CandidateReviewErrorCode.SESSION_EXPIRED,
-                "候选准备清单与当前检索结果不一致，请重新执行文献检索。",
+                CandidateReviewErrorCode.CANDIDATE_NOT_FOUND,
+                "候选准备清单与当前检索结果不一致。",
             )
 
     @staticmethod

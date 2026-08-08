@@ -8,6 +8,7 @@ from uuid import UUID
 from app.core.fulltext_settings import get_fulltext_acquisition_settings
 from app.core.settings import get_literature_source_settings
 from app.core.workflow_settings import get_workflow_settings
+from app.infra.db.repositories.search_candidates import SqlAlchemySearchCandidateRepository
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
 from app.infra.db.session import async_session_factory
 from app.infra.llm.candidate_relevance import build_candidate_relevance_evaluator
@@ -42,8 +43,11 @@ async def run_candidate_relevance(
         try:
             settings = get_literature_source_settings()
             workflow_settings = get_workflow_settings()
+            runs = SqlAlchemySearchRunRepository(session)
+            candidates = SqlAlchemySearchCandidateRepository(session)
             executor = CandidateRelevanceRunExecutor(
-                runs=SqlAlchemySearchRunRepository(session),
+                runs=runs,
+                candidates=candidates,
                 search_run_id=run_id,
                 session_store=RedisSearchSessionStore(
                     redis,

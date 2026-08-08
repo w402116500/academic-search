@@ -19,6 +19,8 @@ EXPECTED_TABLES = {
     "messages",
     "research_runs",
     "research_evidences",
+    "search_run_candidates",
+    "search_candidate_fulltext_states",
 }
 
 
@@ -115,11 +117,13 @@ def test_all_documented_tables_and_columns_have_chinese_comments() -> None:
         assert all(column.comment for column in table.columns)
 
 
-def test_workflow_models_preserve_long_term_state_but_not_search_candidates() -> None:
-    """计划和检索状态需要恢复，未准入候选仍只属于 Redis 短期会话。"""
+def test_workflow_models_preserve_search_state_without_promoting_candidates() -> None:
+    """计划、检索状态和候选审核事实需要恢复，未准入候选仍属于 Search 边界。"""
     collections = Base.metadata.tables["research_collections"]
     plans = Base.metadata.tables["research_plans"]
     search_runs = Base.metadata.tables["search_runs"]
+    candidates = Base.metadata.tables["search_run_candidates"]
+    fulltext_states = Base.metadata.tables["search_candidate_fulltext_states"]
     active_run_index = next(
         index for index in search_runs.indexes if index.name == "uq_search_runs_active_plan"
     )
@@ -131,7 +135,13 @@ def test_workflow_models_preserve_long_term_state_but_not_search_candidates() ->
     assert {"redis_session_key", "provider_summary", "candidate_counts"} <= set(
         search_runs.c.keys()
     )
-    assert "search_candidates" not in Base.metadata.tables
+    assert {"search_run_id", "candidate_id", "relevance_state", "selected_at"} <= set(
+        candidates.c.keys()
+    )
+    assert {"search_run_id", "candidate_id", "status", "result_document"} <= set(
+        fulltext_states.c.keys()
+    )
+    assert "paper_id" not in candidates.c
     assert active_run_index.unique
     assert "status IN ('queued', 'running')" in str(
         active_run_index.dialect_options["postgresql"]["where"]

@@ -12,6 +12,7 @@ from app.core.settings import LiteratureSourceSettings, get_literature_source_se
 from app.infra.db.models.collection import ResearchCollection
 from app.infra.db.models.user import User
 from app.infra.db.models.workflow import ResearchPlan, SearchRun
+from app.infra.db.repositories.search_candidates import SqlAlchemySearchCandidateRepository
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
 from app.infra.db.session import async_session_factory
 from app.infra.redis.connection import redis_client_from_environment
@@ -103,10 +104,12 @@ async def test_live_search_run_persists_progress_and_candidates() -> None:
             await session.commit()
 
             runs = SqlAlchemySearchRunRepository(session)
+            candidates = SqlAlchemySearchCandidateRepository(session)
             claimed_run = await SearchRunService(runs).claim_run(run_id)
             assert claimed_run is not None
             executor = SearchRunExecutor(
                 runs=runs,
+                candidates=candidates,
                 search_run=claimed_run,
                 session_store=RedisSearchSessionStore(
                     redis,
@@ -134,6 +137,9 @@ async def test_live_search_run_persists_progress_and_candidates() -> None:
             assert snapshot["status"] == claimed_run.status
             assert snapshot["stage"] == "completed"
             assert isinstance(snapshot["candidates"], list)
+            assert len(await candidates.list_candidates(search_run_id=run_id)) == len(
+                snapshot["candidates"]
+            )
             assert claimed_run.candidate_counts["raw_candidate_count"] >= 0
 
             print(

@@ -251,7 +251,7 @@ async def update_candidate_selection(
     current_user: Annotated[UserAccount, Depends(get_current_user)],
     service: Annotated[CandidateSelectionService, Depends(get_candidate_selection_service)],
 ) -> CandidateSelectionResponse:
-    """选择只保存候选 UUID；正文、DOI 与题录都继续从 Redis 会话读取。"""
+    """选择只保存候选 UUID；正文、DOI 与题录都继续从持久候选事实读取。"""
     try:
         return await service.update_selection(
             owner_user_id=current_user.id,

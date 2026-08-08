@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 from uuid import UUID
 
-from app.modules.documents.contracts import FulltextCandidate
+from app.modules.documents.contracts import CandidateFulltextState, FulltextCandidate
 
 
 class CandidateFulltextRun(Protocol):
@@ -47,11 +47,7 @@ class CandidateFulltextLookupPort(Protocol):
 
 
 class CandidateFulltextSessionStore(Protocol):
-    """Persist full-text state and its upload lease in the shared Redis session."""
-
-    async def read_snapshot(self, session_key: str) -> dict[str, Any] | None: ...
-
-    async def write_snapshot(self, session_key: str, snapshot: dict[str, Any]) -> None: ...
+    """Short-lived Redis lease used to protect concurrent candidate uploads."""
 
     async def try_acquire_lock(
         self,
@@ -62,3 +58,16 @@ class CandidateFulltextSessionStore(Protocol):
     ) -> bool: ...
 
     async def release_lock(self, key: str, *, token: str) -> None: ...
+
+
+class CandidateFulltextStatePort(Protocol):
+    """Durable full-text state storage owned outside the Documents module."""
+
+    async def get_fulltext_state(
+        self,
+        *,
+        search_run_id: UUID,
+        candidate_id: UUID,
+    ) -> CandidateFulltextState | None: ...
+
+    async def write_fulltext_state(self, state: CandidateFulltextState) -> None: ...

@@ -64,6 +64,32 @@ for internal metrics and audit. It is distinct from an assessment that is
 unsupported by the candidate evidence.
 _Avoid_: Unsupported assessment, user-review candidate
 
+**Recoverable Candidate Review**:
+The user decision stage after a search run has produced reviewable candidates.
+The candidate list, current focus, preparation selection, verification status,
+and admission readiness must remain recoverable across page refreshes and normal
+review delays until the user starts a replacement search run or finishes the
+collection-preparation flow.
+_Avoid_: Ephemeral search session, progress animation, temporary result page
+
+**Candidate Review Fact**:
+A user-visible or decision-bearing fact inside Recoverable Candidate Review:
+candidate metadata needed for display and filtering, relevance assessment and
+evidence, bibliography readiness, PDF availability, preparation selection,
+fulltext verification status, and collection-admission readiness.
+It is the merged candidate view that the user can act on, not a complete audit
+of every upstream provider record that contributed to the merge.
+_Avoid_: Provider raw response, provider merge audit, stream event, transient
+lock, pagination cache
+
+**Candidate Review Owner**:
+The Search context owns Candidate Review Facts until an explicit admission
+action projects eligible candidates into the research collection. Bibliography,
+document, and collection facts created after admission belong to their own
+contexts, but they do not replace Search as the owner of the review result.
+_Avoid_: Treating admitted documents as the source for the original candidate
+review list
+
 ## RAG Answer Citation
 
 **Evidence Snapshot**:

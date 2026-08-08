@@ -29,6 +29,7 @@ from app.modules.search.run_models import SearchRunRecord
 from app.modules.search.run_repository import SearchRunRepository
 from app.modules.search.run_service import SearchRunService
 from app.modules.search.session import SearchSessionStore
+from tests.unit.fakes_search_candidates import FakeSearchCandidateRepository
 
 
 class FakeStore:
@@ -186,6 +187,7 @@ async def test_execute_providers_isolates_one_source_failure() -> None:
     crossref = FakeProvider(SourceName.CROSSREF, _failure(SourceName.CROSSREF))
     executor = SearchRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=FakeSearchCandidateRepository(search_run_id=_run().id),
         search_run=_run(),
         session_store=cast(SearchSessionStore, FakeStore()),
         relevance_queue=UnexpectedRelevanceQueue(),
@@ -219,8 +221,10 @@ def test_session_store_keys_are_scoped_to_the_run() -> None:
 async def test_search_executor_publishes_full_collection_as_pending_before_queueing() -> None:
     """Provider Worker 只准备完整候选集合，不在其中发起模型调用。"""
     store = FakeStore()
+    candidates_repo = FakeSearchCandidateRepository(search_run_id=_run().id)
     executor = SearchRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=candidates_repo,
         search_run=_run(),
         session_store=cast(SearchSessionStore, store),
         relevance_queue=UnexpectedRelevanceQueue(),
@@ -245,6 +249,9 @@ async def test_search_executor_publishes_full_collection_as_pending_before_queue
     assert latest_counts["relevance_total_count"] == 50
     assert latest_counts["relevance_analyzed_count"] == 0
     assert latest_counts["relevance_excluded_count"] == 0
+    assert candidates_repo.upsert_calls == [
+        (_run().id, tuple(candidate.candidate_id for candidate in prepared))
+    ]
 
 
 @pytest.mark.asyncio
@@ -252,6 +259,7 @@ async def test_search_executor_marks_abstractless_candidates_without_model_failu
     """没有摘要的候选由确定性规则完成，不等待或依赖模型配置。"""
     executor = SearchRunExecutor(
         runs=cast(SearchRunRepository, object()),
+        candidates=FakeSearchCandidateRepository(search_run_id=_run().id),
         search_run=_run(),
         session_store=cast(SearchSessionStore, FakeStore()),
         relevance_queue=UnexpectedRelevanceQueue(),

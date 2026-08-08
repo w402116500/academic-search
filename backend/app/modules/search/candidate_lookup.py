@@ -1,4 +1,4 @@
-"""从受所有权保护的 Redis 搜索会话中读取候选文献。"""
+"""从受所有权保护的持久候选审核投影中读取候选文献。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+from app.modules.search.candidate_repository import SearchCandidateRepository
 from app.modules.search.contracts import UnifiedCandidate
 from app.modules.search.run_models import SearchRunRecord
 from app.modules.search.run_repository import SearchRunRepository
 from app.modules.search.run_service import SearchRunService
-from app.modules.search.session import SearchSessionStore
 
 
 class SearchCandidateLookupErrorCode(StrEnum):
@@ -38,11 +38,11 @@ class SearchCandidateLookup:
 
 
 class SearchCandidateLookupService:
-    """统一执行检索运行所有权、Redis 快照和候选初筛的读取边界。"""
+    """统一执行检索运行所有权、持久候选和候选初筛的读取边界。"""
 
-    def __init__(self, runs: SearchRunRepository, session_store: SearchSessionStore) -> None:
+    def __init__(self, runs: SearchRunRepository, candidates: SearchCandidateRepository) -> None:
         self._run_service = SearchRunService(runs)
-        self._session_store = session_store
+        self._candidates = candidates
 
     async def get(
         self,
@@ -69,39 +69,18 @@ class SearchCandidateLookupService:
         *,
         require_included: bool,
     ) -> UnifiedCandidate:
-        """从 Redis 快照精确读取候选，拒绝客户端伪造的标题、DOI 与 URL。"""
-        if run.redis_session_key is None:
-            raise SearchCandidateLookupError(
-                SearchCandidateLookupErrorCode.SESSION_EXPIRED,
-                "检索候选会话不存在，请重新执行文献检索。",
-            )
-
-        snapshot = await self._session_store.read_snapshot(run.redis_session_key)
-        if snapshot is None:
-            await self._run_service.expire_run(run.id)
-            raise SearchCandidateLookupError(
-                SearchCandidateLookupErrorCode.SESSION_EXPIRED,
-                "检索候选已过期，请重新执行文献检索。",
-            )
-
-        raw_candidates = snapshot.get("candidates")
-        if not isinstance(raw_candidates, list):
-            raise SearchCandidateLookupError(
-                SearchCandidateLookupErrorCode.SESSION_EXPIRED,
-                "检索候选快照格式无效，请重新执行文献检索。",
-            )
-
-        for raw_candidate in raw_candidates:
-            candidate = UnifiedCandidate.model_validate(raw_candidate)
-            if candidate.candidate_id != candidate_id:
-                continue
+        """从持久候选投影精确读取，拒绝客户端伪造的标题、DOI 与 URL。"""
+        candidate = await self._candidates.get_candidate(
+            search_run_id=run.id,
+            candidate_id=candidate_id,
+        )
+        if candidate is not None:
             if require_included and (candidate.triage is None or not candidate.triage.included):
                 raise SearchCandidateLookupError(
                     SearchCandidateLookupErrorCode.CANDIDATE_NOT_ELIGIBLE,
                     "该候选未通过基础筛选，不能执行当前操作。",
                 )
             return candidate
-
         raise SearchCandidateLookupError(
             SearchCandidateLookupErrorCode.CANDIDATE_NOT_FOUND,
             "当前检索运行中不存在该候选文献。",

@@ -2,10 +2,12 @@
 
 ## Storage Boundaries
 
-PostgreSQL owns durable business facts. Redis owns short-lived search sessions,
-queues, leases, and events; MinIO owns document objects; Milvus holds
-rebuildable vector indexes. Do not move Redis candidate data into persistent
-paper records before the documented server-side admission boundary.
+PostgreSQL owns durable business facts, including search-run candidate review
+projections and candidate fulltext readiness states. Redis owns arq queues,
+short-lived progress events, locks/leases, health checks, and disposable caches;
+MinIO owns document objects; Milvus holds rebuildable vector indexes. Do not
+move search candidates into persistent paper records before the documented
+server-side admission boundary.
 
 References: `AGENT.md`, `backend/app/infra/redis/search_session.py`,
 `docs/08-development-environment.md`.

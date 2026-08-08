@@ -12,7 +12,6 @@ from app.modules.documents.contracts import (
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
 )
-from app.modules.documents.keys import build_candidate_fulltext_key
 from app.modules.documents.service import CandidateFulltextService
 from app.modules.literature.contracts import (
     CitationAuthor as LiteratureCitationAuthor,
@@ -65,6 +64,7 @@ from app.modules.search.review_session import (
 from app.modules.search.run_models import SearchRunRecord
 from app.modules.search.run_repository import SearchRunRepository
 from app.modules.search.session import SearchSessionStore
+from tests.unit.fakes_search_candidates import FakeSearchCandidateRepository
 
 _OWNER_ID = UUID("00000000-0000-0000-0000-000000001201")
 _COLLECTION_ID = UUID("00000000-0000-0000-0000-000000001202")
@@ -100,7 +100,7 @@ class FakeSearchRunRepository:
 
 
 class FakeSessionStore:
-    """保留 Redis 快照、锁和 TTL 语义的内存替身。"""
+    """保留 Redis 锁和 TTL 语义的内存替身；候选事实由仓储 fake 负责。"""
 
     def __init__(self, snapshots: dict[str, dict[str, Any]]) -> None:
         self.snapshots = snapshots
@@ -240,7 +240,7 @@ def _candidate(
 
 
 def _store(*candidates: UnifiedCandidate) -> FakeSessionStore:
-    """创建包含稳定候选主快照的会话替身。"""
+    """创建测试数据入口；服务会将候选投影转入持久仓储 fake。"""
     return FakeSessionStore(
         {
             _SESSION_KEY: {
@@ -252,11 +252,33 @@ def _store(*candidates: UnifiedCandidate) -> FakeSessionStore:
     )
 
 
+def _candidate_repository_from_store(store: FakeSessionStore) -> FakeSearchCandidateRepository:
+    """把旧测试数据入口转换为持久候选仓储 fake。"""
+    snapshot = store.snapshots.get(_SESSION_KEY, {})
+    raw_candidates = snapshot.get("candidates", ())
+    candidates = (
+        tuple(UnifiedCandidate.model_validate(candidate) for candidate in raw_candidates)
+        if isinstance(raw_candidates, list)
+        else ()
+    )
+    fulltext_states: list[CandidateFulltextState] = []
+    for key, value in store.snapshots.items():
+        if key == _SESSION_KEY or not {"candidate", "result"} <= set(value):
+            continue
+        fulltext_states.append(CandidateFulltextState.model_validate(value))
+    return FakeSearchCandidateRepository(
+        search_run_id=_RUN_ID,
+        candidates=candidates,
+        fulltext_states=tuple(fulltext_states),
+    )
+
+
 def _review_session(store: FakeSessionStore) -> CandidateReviewSession:
     """以相同运行仓储和会话替身装配审核用例。"""
     return CandidateReviewSession(
         cast(SearchRunRepository, FakeSearchRunRepository(_run())),
         cast(SearchSessionStore, store),
+        _candidate_repository_from_store(store),
     )
 
 
@@ -298,7 +320,7 @@ async def test_page_keeps_selection_across_cursor_pages_and_uses_fulltext_state(
     )
     store = _store(first, second)
     now = datetime.now(UTC)
-    state_key = build_candidate_fulltext_key(_SESSION_KEY, _FIRST_ID)
+    state_key = f"test-fulltext-state:{_FIRST_ID}"
     store.snapshots[state_key] = CandidateFulltextState(
         search_run_id=_RUN_ID,
         candidate=to_fulltext_candidate(first),
@@ -711,7 +733,8 @@ async def test_prepare_selected_reuses_single_candidate_fulltext_service() -> No
     queue = FakeQueue()
     runs = cast(SearchRunRepository, FakeSearchRunRepository(_run()))
     session_store = cast(SearchSessionStore, store)
-    session = CandidateReviewSession(runs, session_store)
+    candidates = _candidate_repository_from_store(store)
+    session = CandidateReviewSession(runs, session_store, candidates)
     selection = CandidateSelectionService(session)
     service = CandidatePreparationService(
         session,
@@ -719,7 +742,8 @@ async def test_prepare_selected_reuses_single_candidate_fulltext_service() -> No
             runs,
             session_store,
             queue,
-            candidate_lookup=SearchCandidateFulltextLookup(runs, session_store),
+            candidate_lookup=SearchCandidateFulltextLookup(runs, candidates),
+            state_store=candidates,
         ),
     )
     await selection.update_selection(

@@ -14,9 +14,9 @@ from app.modules.search.candidate_lookup import (
     SearchCandidateLookupErrorCode,
     SearchCandidateLookupService,
 )
+from app.modules.search.candidate_repository import SearchCandidateRepository
 from app.modules.search.contracts import UnifiedCandidate
 from app.modules.search.run_repository import SearchRunRepository
-from app.modules.search.session import SearchSessionStore
 
 
 def to_fulltext_candidate(candidate: UnifiedCandidate) -> FulltextCandidate:
@@ -38,8 +38,8 @@ def to_fulltext_candidate(candidate: UnifiedCandidate) -> FulltextCandidate:
 class SearchCandidateFulltextLookup:
     """Resolve and project an eligible candidate without exposing Search DTOs."""
 
-    def __init__(self, runs: SearchRunRepository, store: SearchSessionStore) -> None:
-        self._lookup = SearchCandidateLookupService(runs, store)
+    def __init__(self, runs: SearchRunRepository, candidates: SearchCandidateRepository) -> None:
+        self._lookup = SearchCandidateLookupService(runs, candidates)
 
     async def get(
         self,

@@ -6,7 +6,7 @@ from app.main import app
 
 
 def test_candidate_review_endpoints_keep_selection_and_batch_inputs_server_owned() -> None:
-    """批量核验和入集合只读取 Redis 准备清单，前端不能提交题录或全文字段。"""
+    """批量核验和入集合只读取服务端持久准备清单，前端不能提交题录或全文字段。"""
     base_path = "/api/v1/collections/{collection_id}/search-runs/{search_run_id}"
     paths = app.openapi()["paths"]
 

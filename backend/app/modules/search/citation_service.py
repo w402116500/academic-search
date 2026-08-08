@@ -1,12 +1,10 @@
-"""将当前搜索会话中的候选题录渲染为正式引用。"""
+"""将当前持久候选审核投影中的题录渲染为正式引用。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from uuid import UUID
 
-from app.modules.documents.contracts import CandidateFulltextState
-from app.modules.documents.keys import build_candidate_fulltext_key
 from app.modules.literature.api_contracts import (
     CandidateCitationError,
     CandidateCitationErrorCode,
@@ -22,10 +20,10 @@ from app.modules.search.candidate_lookup import (
     SearchCandidateLookupErrorCode,
     SearchCandidateLookupService,
 )
+from app.modules.search.candidate_repository import SearchCandidateRepository
 from app.modules.search.contracts import UnifiedCandidate
 from app.modules.search.run_models import SearchRunRecord
 from app.modules.search.run_repository import SearchRunRepository
-from app.modules.search.session import SearchSessionStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,11 +36,11 @@ class CandidateCitationRender:
 
 
 class CandidateCitationService:
-    """只允许从当前用户拥有的候选会话生成格式化引用。"""
+    """只允许从当前用户拥有的候选审核事实生成格式化引用。"""
 
-    def __init__(self, runs: SearchRunRepository, session_store: SearchSessionStore) -> None:
-        self._session_store = session_store
-        self._lookup = SearchCandidateLookupService(runs, session_store)
+    def __init__(self, runs: SearchRunRepository, candidates: SearchCandidateRepository) -> None:
+        self._candidates = candidates
+        self._lookup = SearchCandidateLookupService(runs, candidates)
 
     async def render(
         self,
@@ -101,22 +99,19 @@ class CandidateCitationService:
         search_run: SearchRunRecord,
         candidate: UnifiedCandidate,
     ) -> UnifiedCandidate:
-        """全文 Worker 已补全题录时，优先使用同一候选的受控短期状态。"""
+        """全文 Worker 已补全题录时，优先使用同一候选的持久状态。"""
         if (
             candidate.citation is not None
             and candidate.citation.status is CitationMetadataStatus.READY
         ):
             return candidate
-        if search_run.redis_session_key is None:
-            return candidate
-
-        raw_state = await self._session_store.read_snapshot(
-            build_candidate_fulltext_key(search_run.redis_session_key, candidate.candidate_id)
+        state = await self._candidates.get_fulltext_state(
+            search_run_id=search_run.id,
+            candidate_id=candidate.candidate_id,
         )
-        if raw_state is None:
+        if state is None:
             return candidate
 
-        state = CandidateFulltextState.model_validate(raw_state)
         if (
             state.search_run_id != search_run.id
             or state.candidate.candidate_id != candidate.candidate_id

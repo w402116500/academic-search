@@ -36,53 +36,79 @@ class SqlAlchemyCollectionBibliographyRepository:
         if draft.citation_text is not None and draft.citation_status.value != "ready":
             raise ValueError("citation_text is only valid for ready bibliography metadata")
 
+        if self._session.in_transaction():
+            try:
+                result = await self._upsert_from_candidate(
+                    owner_user_id=owner_user_id,
+                    collection_id=collection_id,
+                    draft=draft,
+                )
+            except Exception:
+                await self._session.rollback()
+                raise
+            await self._session.commit()
+            return result
+
         async with self._session.begin():
-            await self._require_active_collection(
+            return await self._upsert_from_candidate(
                 owner_user_id=owner_user_id,
                 collection_id=collection_id,
+                draft=draft,
             )
-            existing = await self._existing_entry(
-                collection_id=collection_id,
-                source_search_run_id=draft.source_search_run_id,
-                source_candidate_id=draft.source_candidate_id,
-            )
-            if existing is not None:
-                return await self._result(
-                    entry=existing,
-                    status=CollectionBibliographyUpsertStatus.ALREADY_PRESENT,
-                )
 
-            entry = CollectionBibliographyEntry(
-                id=uuid4(),
-                collection_id=collection_id,
-                source_search_run_id=draft.source_search_run_id,
-                source_candidate_id=draft.source_candidate_id,
-                paper_id=draft.paper_id,
-                candidate_title=draft.title,
-                candidate_authors=[dict(author) for author in draft.authors],
-                candidate_abstract=draft.abstract,
-                candidate_publication_year=draft.publication_year,
-                candidate_venue=draft.venue,
-                candidate_doi=draft.doi,
-                candidate_source_url=draft.source_url,
-                source_record=dict(draft.source_record),
-                citation_status=draft.citation_status.value,
-                citation_text=draft.citation_text,
-                citation_snapshot=dict(draft.citation_snapshot),
-                pdf_status=draft.pdf_status.value,
-                pdf_source_url=draft.pdf_source_url,
-                pdf_snapshot=dict(draft.pdf_snapshot),
-                content_status=draft.content_status.value,
+    async def _upsert_from_candidate(
+        self,
+        *,
+        owner_user_id: UUID,
+        collection_id: UUID,
+        draft: CollectionBibliographyEntryDraft,
+    ) -> CollectionBibliographyEntryResult:
+        await self._require_active_collection(
+            owner_user_id=owner_user_id,
+            collection_id=collection_id,
+        )
+        existing = await self._existing_entry(
+            collection_id=collection_id,
+            source_search_run_id=draft.source_search_run_id,
+            source_candidate_id=draft.source_candidate_id,
+        )
+        if existing is not None:
+            return await self._result(
+                entry=existing,
+                status=CollectionBibliographyUpsertStatus.ALREADY_PRESENT,
             )
-            self._session.add(entry)
-            await self._session.flush()
-            return CollectionBibliographyEntryResult(
-                status=CollectionBibliographyUpsertStatus.ADDED,
-                entry_id=entry.id,
-                collection_id=entry.collection_id,
-                paper_id=entry.paper_id,
-                content_status=BibliographyContentStatus(entry.content_status),
-            )
+
+        entry = CollectionBibliographyEntry(
+            id=uuid4(),
+            collection_id=collection_id,
+            source_search_run_id=draft.source_search_run_id,
+            source_candidate_id=draft.source_candidate_id,
+            paper_id=draft.paper_id,
+            candidate_title=draft.title,
+            candidate_authors=[dict(author) for author in draft.authors],
+            candidate_abstract=draft.abstract,
+            candidate_publication_year=draft.publication_year,
+            candidate_venue=draft.venue,
+            candidate_doi=draft.doi,
+            candidate_source_url=draft.source_url,
+            source_record=dict(draft.source_record),
+            citation_status=draft.citation_status.value,
+            citation_text=draft.citation_text,
+            citation_snapshot=dict(draft.citation_snapshot),
+            pdf_status=draft.pdf_status.value,
+            pdf_source_url=draft.pdf_source_url,
+            pdf_snapshot=dict(draft.pdf_snapshot),
+            content_status=draft.content_status.value,
+        )
+        self._session.add(entry)
+        await self._session.flush()
+        return CollectionBibliographyEntryResult(
+            status=CollectionBibliographyUpsertStatus.ADDED,
+            entry_id=entry.id,
+            collection_id=entry.collection_id,
+            paper_id=entry.paper_id,
+            content_status=BibliographyContentStatus(entry.content_status),
+        )
 
     async def _require_active_collection(
         self, *, owner_user_id: UUID, collection_id: UUID

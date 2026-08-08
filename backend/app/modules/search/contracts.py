@@ -231,7 +231,7 @@ class UnifiedCandidate(BaseModel):
     doi: str | None = None
     title: str = Field(min_length=1, max_length=5000)
     title_key: str = Field(min_length=1, max_length=5000)
-    # 统一候选始终提供可展示的语言状态，兼容历史 Redis 快照中缺少该字段的记录。
+    # 统一候选始终提供可展示的语言状态，兼容部分来源缺少该字段的记录。
     language: CandidateLanguage = CandidateLanguage.UNKNOWN
     authors: tuple[CandidateAuthor, ...] = ()
     abstract: str | None = None

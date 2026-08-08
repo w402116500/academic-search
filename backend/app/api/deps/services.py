@@ -23,6 +23,7 @@ from app.infra.db.repositories.research_conversations import (
     SqlAlchemyResearchConversationAdapter,
 )
 from app.infra.db.repositories.research_plans import SqlAlchemyResearchPlanRepository
+from app.infra.db.repositories.search_candidates import SqlAlchemySearchCandidateRepository
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
 from app.infra.db.repositories.users import SqlAlchemyUserRepository
 from app.infra.db.repositories.workspace_deletion import SqlAlchemyWorkspaceDeletionRepository
@@ -52,6 +53,7 @@ from app.modules.research.plan_service import ResearchPlanService
 from app.modules.research.settings import get_research_settings
 from app.modules.research.workspace_deletion import ResearchWorkspaceDeletionService
 from app.modules.research.workspace_service import ResearchWorkspaceService
+from app.modules.search.candidate_repository import SearchCandidateRepository
 from app.modules.search.citation_service import CandidateCitationService
 from app.modules.search.fulltext_candidate import SearchCandidateFulltextLookup
 from app.modules.search.review_admission import CandidateAdmissionService
@@ -128,6 +130,12 @@ def get_search_run_repository(
     return SqlAlchemySearchRunRepository(session)
 
 
+def get_search_candidate_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SearchCandidateRepository:
+    return SqlAlchemySearchCandidateRepository(session)
+
+
 def get_search_run_service(
     runs: Annotated[SearchRunRepository, Depends(get_search_run_repository)],
 ) -> SearchRunService:
@@ -150,8 +158,9 @@ def get_collection_admission_service(
 def get_candidate_review_session(
     runs: Annotated[SearchRunRepository, Depends(get_search_run_repository)],
     store: Annotated[SearchSessionStore, Depends(get_search_session_store)],
+    candidates: Annotated[SearchCandidateRepository, Depends(get_search_candidate_repository)],
 ) -> CandidateReviewSession:
-    return CandidateReviewSession(runs, store)
+    return CandidateReviewSession(runs, store, candidates)
 
 
 def get_candidate_review_query_service(
@@ -169,12 +178,14 @@ def get_candidate_selection_service(
 def get_candidate_fulltext_service(
     runs: Annotated[SearchRunRepository, Depends(get_search_run_repository)],
     store: Annotated[SearchSessionStore, Depends(get_search_session_store)],
+    candidates: Annotated[SearchCandidateRepository, Depends(get_search_candidate_repository)],
 ) -> CandidateFulltextService:
     return CandidateFulltextService(
         SearchRunService(runs),
         store,
         ArqCandidateFulltextJobQueue(),
-        candidate_lookup=SearchCandidateFulltextLookup(runs, store),
+        candidate_lookup=SearchCandidateFulltextLookup(runs, candidates),
+        state_store=candidates,
     )
 
 
@@ -203,6 +214,7 @@ def get_candidate_review_admission_service(
 def get_candidate_upload_service(
     runs: Annotated[SearchRunRepository, Depends(get_search_run_repository)],
     store: Annotated[SearchSessionStore, Depends(get_search_session_store)],
+    candidates: Annotated[SearchCandidateRepository, Depends(get_search_candidate_repository)],
 ) -> CandidateFulltextService:
     settings = get_fulltext_acquisition_settings()
     storage = Boto3StagingObjectStorage(settings)
@@ -210,16 +222,17 @@ def get_candidate_upload_service(
         SearchRunService(runs),
         store,
         ArqCandidateFulltextJobQueue(),
-        candidate_lookup=SearchCandidateFulltextLookup(runs, store),
+        candidate_lookup=SearchCandidateFulltextLookup(runs, candidates),
+        state_store=candidates,
         uploader=AuthorizedPdfUploader(settings, storage),
     )
 
 
 def get_candidate_citation_service(
     runs: Annotated[SearchRunRepository, Depends(get_search_run_repository)],
-    store: Annotated[SearchSessionStore, Depends(get_search_session_store)],
+    candidates: Annotated[SearchCandidateRepository, Depends(get_search_candidate_repository)],
 ) -> CandidateCitationService:
-    return CandidateCitationService(runs, store)
+    return CandidateCitationService(runs, candidates)
 
 
 def get_collection_build_service(

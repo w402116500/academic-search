@@ -563,7 +563,7 @@ export interface paths {
     head?: never;
     /**
      * 更新本次候选准备清单
-     * @description 选择只保存候选 UUID；正文、DOI 与题录都继续从 Redis 会话读取。
+     * @description 选择只保存候选 UUID；正文、DOI 与题录都继续从持久候选事实读取。
      */
     patch: operations["update_candidate_selection_api_v1_collections__collection_id__search_runs__search_run_id__candidate_selection_patch"];
     trace?: never;
@@ -657,7 +657,7 @@ export interface paths {
     };
     /**
      * 生成候选的正式引用
-     * @description 从 Redis 候选快照的 `ready` 格式中立题录渲染一种可复制引用。
+     * @description 从持久候选题录投影中的 `ready` 格式中立题录渲染一种可复制引用。
      */
     get: operations["render_candidate_citation_api_v1_collections__collection_id__search_runs__search_run_id__candidates__candidate_id__citation_get"];
     put?: never;

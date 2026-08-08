@@ -176,7 +176,7 @@ class CollectionBibliographyEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PostgreSQLUUID(as_uuid=True),
         nullable=True,
         index=True,
-        comment="来源 Redis 候选标识；不作为全局论文事实",
+        comment="来源检索候选标识；不作为全局论文事实",
     )
     paper_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True),

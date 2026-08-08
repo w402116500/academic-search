@@ -180,13 +180,19 @@ class CandidateAdmissionService:
     @staticmethod
     def _source_record_snapshot(candidate: UnifiedCandidate) -> dict[str, Any]:
         return {
-            "source_records": [
-                source_record.model_dump(mode="json") for source_record in candidate.source_records
+            "source_refs": [
+                {
+                    key: value
+                    for key, value in {
+                        "source": source_record.source.value,
+                        "source_record_id": source_record.source_record_id,
+                        "source_record_url": source_record.source_record_url,
+                        "citation_count": source_record.citation_count,
+                    }.items()
+                    if value is not None
+                }
+                for source_record in candidate.source_records
             ],
-            "field_provenance": {
-                field: source.value for field, source in candidate.field_provenance.items()
-            },
-            "conflicts": {field: list(values) for field, values in candidate.conflicts.items()},
         }
 
     def _citation_projection(

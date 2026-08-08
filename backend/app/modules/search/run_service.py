@@ -243,7 +243,7 @@ class SearchRunService:
         return (await self._runs.save(updated)).run
 
     async def expire_run(self, search_run_id: UUID) -> SearchRunRecord | None:
-        """当 Redis 候选会话不存在时，将终态运行标为过期并保留数据库审计。"""
+        """当检索运行确实不可恢复时，将终态运行标为过期并保留数据库审计。"""
         context = await self._runs.get_run_context_for_update(search_run_id)
         if context is None:
             return None

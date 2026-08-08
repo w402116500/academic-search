@@ -131,7 +131,7 @@ class FulltextAcquisitionResult(BaseModel):
 
 
 class CandidateFulltextState(BaseModel):
-    """一个搜索候选的短期全文任务状态，整体只保存于 Redis。"""
+    """一个搜索候选的可恢复全文任务状态，由 Search 候选边界持久保存。"""
 
     search_run_id: UUID
     candidate: FulltextCandidate

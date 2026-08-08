@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from app.core.settings import get_literature_source_settings
+from app.infra.db.repositories.search_candidates import SqlAlchemySearchCandidateRepository
 from app.infra.db.repositories.search_runs import SqlAlchemySearchRunRepository
 from app.infra.db.session import async_session_factory
 from app.infra.redis.connection import redis_client_from_environment
@@ -26,6 +27,7 @@ async def run_search(_ctx: dict[str, Any], search_run_id: str) -> dict[str, str]
 
     async with async_session_factory() as session:
         runs = SqlAlchemySearchRunRepository(session)
+        candidates = SqlAlchemySearchCandidateRepository(session)
         workflow_service = SearchRunService(runs)
         search_run = await workflow_service.claim_run(run_id)
         if search_run is None:
@@ -36,6 +38,7 @@ async def run_search(_ctx: dict[str, Any], search_run_id: str) -> dict[str, str]
             settings = get_literature_source_settings()
             executor = SearchRunExecutor(
                 runs=runs,
+                candidates=candidates,
                 search_run=search_run,
                 session_store=RedisSearchSessionStore(
                     redis,

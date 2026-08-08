@@ -25,11 +25,6 @@ def _validated_session_key(session_key: str, purpose: str) -> str:
     return session_key
 
 
-def build_candidate_selection_key(session_key: str) -> str:
-    """Return the stable short-lived selection key for a search session."""
-    return f"{_validated_session_key(session_key, '候选准备清单')}:candidate-selection"
-
-
 def build_candidate_selection_lock_key(session_key: str) -> str:
     """Return the stable selection-update lock key for a search session."""
     return f"{_validated_session_key(session_key, '候选准备清单锁')}:candidate-selection-lock"

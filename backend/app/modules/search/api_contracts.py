@@ -96,7 +96,7 @@ class SearchRunResponse(BaseModel):
 
 
 class SearchCandidatesResponse(BaseModel):
-    """检索候选快照响应；候选来源于 Redis 短期会话。"""
+    """检索候选响应；候选来源于 PostgreSQL 持久审核投影。"""
 
     run_id: UUID
     status: SearchRunStatus

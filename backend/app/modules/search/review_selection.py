@@ -16,7 +16,7 @@ _SELECTION_LOCK_TTL_SECONDS = 15
 
 
 class CandidateSelectionService:
-    """在 Redis 中原子维护一个搜索运行的准备清单。"""
+    """在持久候选投影中维护一个搜索运行的准备清单。"""
 
     def __init__(self, session: CandidateReviewSession) -> None:
         self._session = session

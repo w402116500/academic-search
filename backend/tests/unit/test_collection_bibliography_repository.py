@@ -34,14 +34,27 @@ _DOCUMENT_ID = UUID("00000000-0000-0000-0000-000000000806")
 class FakeSession:
     """Return configured scalar values and record ORM additions."""
 
-    def __init__(self, *, scalar_values: list[object | None]) -> None:
+    def __init__(
+        self,
+        *,
+        scalar_values: list[object | None],
+        in_transaction: bool = False,
+    ) -> None:
         self._scalar_values = iter(scalar_values)
+        self._in_transaction = in_transaction
         self.added: list[object] = []
+        self.begin_count = 0
+        self.commit_count = 0
+        self.rollback_count = 0
         self.flush_count = 0
 
     @asynccontextmanager
     async def begin(self) -> AsyncIterator[FakeSession]:
+        self.begin_count += 1
         yield self
+
+    def in_transaction(self) -> bool:
+        return self._in_transaction
 
     async def scalar(self, _statement: object) -> object | None:
         try:
@@ -54,6 +67,14 @@ class FakeSession:
 
     async def flush(self) -> None:
         self.flush_count += 1
+
+    async def commit(self) -> None:
+        self.commit_count += 1
+        self._in_transaction = False
+
+    async def rollback(self) -> None:
+        self.rollback_count += 1
+        self._in_transaction = False
 
 
 def _collection() -> ResearchCollection:
@@ -108,6 +129,26 @@ async def test_upsert_from_candidate_persists_entry_without_creating_paper() -> 
     assert entry.citation_status == "unavailable"
     assert entry.content_status == "requires_upload"
     assert not any(isinstance(item, Paper) for item in session.added)
+    assert session.begin_count == 1
+    assert session.commit_count == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_from_candidate_reuses_autobegun_request_transaction() -> None:
+    """候选准入前的读取会自动开启事务，仓储应复用并提交它。"""
+    session = FakeSession(scalar_values=[_collection(), None], in_transaction=True)
+    repository = SqlAlchemyCollectionBibliographyRepository(cast(AsyncSession, session))
+
+    result = await repository.upsert_from_candidate(
+        owner_user_id=_OWNER_ID,
+        collection_id=_COLLECTION_ID,
+        draft=_draft(),
+    )
+
+    assert result.status is CollectionBibliographyUpsertStatus.ADDED
+    assert session.begin_count == 0
+    assert session.commit_count == 1
+    assert session.rollback_count == 0
 
 
 @pytest.mark.asyncio

@@ -1,8 +1,7 @@
-"""检索候选在 Redis 中的短期会话键约定。
+"""检索运行在 Redis 中的短期事件、锁和可丢缓存键约定。
 
-PostgreSQL 的 ``search_runs`` 只保存可恢复的运行状态、计数、错误与该会话键。
-标题、摘要、来源原始字段和候选详情属于可再生的短期数据，必须在 Redis TTL
-到期后失效，而不能绕过 DOI 和全文准入规则写入长期 ``papers`` 表。
+PostgreSQL 的 ``search_runs`` 和 ``search_run_candidates`` 保存可恢复业务事实。
+Redis 只承载 SSE 进度事件、锁/租约和可重建缓存；TTL 到期不能影响候选审核事实。
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ _STREAM_ID_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)-(?:0|[1-9][0-9]*)$|^\$$")
 
 
 class RedisSearchSessionStore:
-    """保存检索运行的短期候选快照和可恢复进度事件。"""
+    """保存检索运行的短期进度事件、锁租约和可丢缓存。"""
 
     def __init__(self, redis: Redis, *, ttl_seconds: int) -> None:
         """接收调用方创建的 Redis 客户端，避免模块内部维护全局连接。"""
@@ -27,7 +26,7 @@ class RedisSearchSessionStore:
         self._ttl_seconds = ttl_seconds
 
     async def write_snapshot(self, session_key: str, snapshot: dict[str, Any]) -> None:
-        """以 JSON 快照覆盖当前候选状态，并刷新 TTL。"""
+        """以 JSON 覆盖当前可丢缓存，并刷新 TTL。"""
         await self._redis.set(
             session_key,
             json.dumps(snapshot, ensure_ascii=False),
@@ -41,13 +40,13 @@ class RedisSearchSessionStore:
         *,
         max_attempts: int = 8,
     ) -> dict[str, Any]:
-        """以 WATCH/MULTI 合并最新快照，避免异步任务覆盖候选的其他字段更新。"""
+        """以 WATCH/MULTI 合并最新短期缓存，避免异步任务覆盖其他字段更新。"""
         for _attempt in range(max_attempts):
             async with self._redis.pipeline(transaction=True) as pipe:
                 await pipe.watch(session_key)
                 raw_value = await pipe.get(session_key)
                 if raw_value is None:
-                    raise KeyError("检索候选会话已过期")
+                    raise KeyError("检索短期缓存已过期")
                 if not isinstance(raw_value, str):
                     raise TypeError("Redis 检索会话快照必须是字符串")
                 snapshot = json.loads(raw_value)
@@ -65,10 +64,10 @@ class RedisSearchSessionStore:
                 except WatchError:
                     continue
                 return merged
-        raise RuntimeError("检索候选快照在合并期间持续变化，请稍后重试")
+        raise RuntimeError("检索短期缓存快照在合并期间持续变化，请稍后重试")
 
     async def read_snapshot(self, session_key: str) -> dict[str, Any] | None:
-        """读取候选快照；Redis 中不存在时返回 None 供 API 区分过期状态。"""
+        """读取可丢缓存；Redis 中不存在时返回 None。"""
         raw_value = await self._redis.get(session_key)
         if raw_value is None:
             return None
@@ -80,7 +79,7 @@ class RedisSearchSessionStore:
         return value
 
     async def read_many_snapshots(self, session_keys: list[str]) -> dict[str, dict[str, Any]]:
-        """一次读取多个同会话短期状态，供候选分页避免逐条 Redis 往返。"""
+        """一次读取多个同会话短期缓存。"""
         if not session_keys:
             return {}
 
@@ -98,11 +97,11 @@ class RedisSearchSessionStore:
         return snapshots
 
     async def refresh_ttl(self, session_key: str) -> None:
-        """刷新既有会话键的 TTL，不写回主快照以免覆盖并发的候选更新。"""
+        """刷新既有会话键的 TTL，不写回缓存以免覆盖并发事件。"""
         await self._redis.expire(session_key, self._ttl_seconds)
 
     async def append_event(self, session_key: str, event: dict[str, Any]) -> str:
-        """写入一条进度事件，并让事件流与候选快照同步过期。"""
+        """写入一条进度事件，并让事件流随短期会话同步过期。"""
         stream_key = f"{session_key}:events"
         event_id = await self._redis.xadd(
             stream_key,

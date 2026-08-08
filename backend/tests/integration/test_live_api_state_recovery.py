@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from app.api.routers import search_runs as search_run_router
+from app.api.deps import services as service_deps
 from app.core.fulltext_settings import get_fulltext_acquisition_settings
 from app.core.security import AuthenticationSettings, create_access_token
 from app.core.settings import get_literature_source_settings
@@ -24,6 +24,7 @@ from app.infra.db.models.document import Document
 from app.infra.db.models.paper import Paper
 from app.infra.db.models.user import User
 from app.infra.db.models.workflow import ResearchPlan, SearchRun
+from app.infra.db.repositories.search_candidates import SqlAlchemySearchCandidateRepository
 from app.infra.db.session import async_session_factory
 from app.infra.redis.connection import redis_client_from_environment
 from app.infra.redis.search_session import RedisSearchSessionStore
@@ -35,7 +36,6 @@ from app.modules.documents.contracts import (
     FulltextAcquisitionResult,
     FulltextAcquisitionStatus,
 )
-from app.modules.documents.keys import build_candidate_fulltext_key
 from app.modules.literature.citation_formatter import CitationFormat
 from app.modules.literature.contracts import (
     CitationAuthor,
@@ -47,6 +47,10 @@ from app.modules.research.state import ResearchPlanStatus, WorkspaceWorkflowStag
 from app.modules.search.contracts import (
     CandidateAuthor,
     CandidateLinks,
+    CandidateRelevanceAssessment,
+    CandidateRelevanceEvidence,
+    CandidateRelevanceLevel,
+    CandidateRelevanceState,
     RawCandidate,
     SourceName,
     TriageDecision,
@@ -72,7 +76,7 @@ def _live_test_is_enabled() -> bool:
 
 
 def _candidate(candidate_id: UUID, *, doi: str) -> UnifiedCandidate:
-    """构造一条由服务端 Redis 快照提供的、可展示候选。"""
+    """构造一条由服务端持久候选投影提供的、可展示候选。"""
     source_record = RawCandidate(
         source=SourceName.OPENALEX,
         source_record_id=f"live-api-{candidate_id}",
@@ -98,9 +102,24 @@ def _candidate(candidate_id: UUID, *, doi: str) -> UnifiedCandidate:
         title=source_record.title,
         title_key="api state recovery candidate",
         authors=source_record.authors,
+        abstract="API state recovery candidate persists outside Redis.",
         links=CandidateLinks(landing_url=f"https://doi.org/{doi}"),
         source_records=(source_record,),
         triage=TriageDecision(included=True),
+        relevance_state=CandidateRelevanceState.COMPLETED,
+        relevance_assessment=CandidateRelevanceAssessment(
+            level=CandidateRelevanceLevel.CORE,
+            study_focus="验证候选审核事实可以从持久化投影恢复。",
+            reason="标题直接描述 API 状态恢复候选。",
+            helpful_aspect="覆盖刷新后继续审核的关键路径。",
+            recommendation="优先保留用于验收。",
+            evidence=(
+                CandidateRelevanceEvidence(
+                    source_field="title",
+                    quote="API state recovery candidate",
+                ),
+            ),
+        ),
     )
 
 
@@ -136,7 +155,6 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
     event_key = build_search_event_stream_key(run_id)
     event_session_key = build_search_session_key(event_run_id)
     event_stream_key = build_search_event_stream_key(event_run_id)
-    fulltext_state_key = build_candidate_fulltext_key(session_key, candidate_id)
     redis = redis_client_from_environment()
     settings = get_literature_source_settings()
     fulltext_settings = get_fulltext_acquisition_settings()
@@ -146,6 +164,7 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
     paper_id: UUID | None = None
 
     try:
+        candidate = _candidate(candidate_id, doi=candidate_doi)
         async with async_session_factory() as session:
             session.add_all(
                 (
@@ -194,7 +213,13 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                             "openalex": {"status": "completed"},
                             "semantic_scholar": {
                                 "status": "failed",
-                                "error": {"code": "remote_error", "retryable": True},
+                                "errors": [
+                                    {
+                                        "code": "remote_error",
+                                        "message": "Semantic Scholar 暂不可用。",
+                                        "retryable": True,
+                                    }
+                                ],
                             },
                         },
                         candidate_counts={"raw_candidate_count": 1, "included_candidate_count": 1},
@@ -203,6 +228,10 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                 )
             )
             await session.commit()
+            await SqlAlchemySearchCandidateRepository(session).upsert_candidates(
+                search_run_id=run_id,
+                candidates=(candidate,),
+            )
 
         store = RedisSearchSessionStore(redis, ttl_seconds=settings.search_session_ttl_seconds)
         await store.write_snapshot(
@@ -212,7 +241,7 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                 "status": SearchRunStatus.PARTIAL_FAILED.value,
                 "stage": SearchRunStage.COMPLETED.value,
                 "candidate_counts": {"raw_candidate_count": 1, "included_candidate_count": 1},
-                "candidates": [_candidate(candidate_id, doi=candidate_doi).model_dump(mode="json")],
+                "candidates": [candidate.model_dump(mode="json")],
             },
         )
         await store.append_event(
@@ -311,7 +340,7 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
 
             fulltext_queue = FakeCandidateFulltextQueue()
             monkeypatch.setattr(
-                search_run_router,
+                service_deps,
                 "ArqCandidateFulltextJobQueue",
                 lambda: fulltext_queue,
             )
@@ -338,30 +367,30 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                 sha256=checksum,
             )
             now = datetime.now(UTC)
-            await store.write_snapshot(
-                fulltext_state_key,
-                CandidateFulltextState(
-                    search_run_id=run_id,
-                    candidate=to_fulltext_candidate(_candidate(candidate_id, doi=candidate_doi)),
-                    attempt_no=1,
-                    result=FulltextAcquisitionResult(
-                        candidate_id=candidate_id,
-                        status=FulltextAcquisitionStatus.AVAILABLE,
-                        document=AcquiredFulltext(
+            async with async_session_factory() as session:
+                await SqlAlchemySearchCandidateRepository(session).write_fulltext_state(
+                    CandidateFulltextState(
+                        search_run_id=run_id,
+                        candidate=to_fulltext_candidate(candidate),
+                        attempt_no=1,
+                        result=FulltextAcquisitionResult(
                             candidate_id=candidate_id,
-                            doi=candidate_doi,
-                            source_url="https://downloads.example.test/live-api-review.pdf",
-                            staging_object_key=staging_object_key,
-                            original_filename="live-api-review.pdf",
-                            byte_size=len(_MINIMAL_PDF),
-                            sha256=checksum,
-                            acquired_at=now,
+                            status=FulltextAcquisitionStatus.AVAILABLE,
+                            document=AcquiredFulltext(
+                                candidate_id=candidate_id,
+                                doi=candidate_doi,
+                                source_url="https://downloads.example.test/live-api-review.pdf",
+                                staging_object_key=staging_object_key,
+                                original_filename="live-api-review.pdf",
+                                byte_size=len(_MINIMAL_PDF),
+                                sha256=checksum,
+                                acquired_at=now,
+                            ),
                         ),
+                        requested_at=now,
+                        updated_at=now,
                     ),
-                    requested_at=now,
-                    updated_at=now,
-                ).model_dump(mode="json"),
-            )
+                )
             admission_response = await client.post(
                 (
                     f"/api/v1/collections/{collection_id}/search-runs/{run_id}/"
@@ -378,15 +407,19 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                 headers=owner_headers,
             )
             assert documents_response.status_code == 200
-            assert documents_response.json()["summary"]["ingestion_status_counts"]["pending"] == 1
+            documents_payload = documents_response.json()
+            assert documents_payload["summary"]["bibliography_entry_count"] == 1
+            assert documents_payload["summary"]["active_document_count"] == 0
+            assert documents_payload["documents"] == []
+            assert documents_payload["bibliography_entries"][0]["source_candidate_id"] == str(
+                candidate_id
+            )
 
             async with async_session_factory() as session:
                 document = await session.scalar(
                     select(Document).where(Document.collection_id == collection_id)
                 )
-                assert document is not None
-                document_object_key = document.object_key
-                paper_id = document.paper_id
+                assert document is None
 
             selection_after_admission = await client.get(
                 f"/api/v1/collections/{collection_id}/search-runs/{run_id}/candidates",
@@ -503,7 +536,7 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
 
             retry_queue = FakeSearchRunQueue()
             monkeypatch.setattr(
-                search_run_router,
+                service_deps,
                 "ArqSearchRunJobQueue",
                 lambda: retry_queue,
             )
@@ -525,17 +558,19 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
             assert refreshed_retry.json()["status"] == "queued"
 
             await redis.delete(session_key)
-            expired_response = await client.get(
+            recovered_response = await client.get(
                 f"/api/v1/collections/{collection_id}/search-runs/{run_id}/candidates",
                 headers=owner_headers,
             )
-            assert expired_response.status_code == 410
-            assert expired_response.json()["detail"]["code"] == "candidate_review_session_expired"
+            assert recovered_response.status_code == 200
+            assert recovered_response.json()["items"][0]["candidate"]["candidate_id"] == str(
+                candidate_id
+            )
 
         async with async_session_factory() as session:
             run = await session.get(SearchRun, run_id)
             assert run is not None
-            assert run.status == SearchRunStatus.EXPIRED.value
+            assert run.status == SearchRunStatus.PARTIAL_FAILED.value
 
         print(
             json.dumps(
@@ -546,7 +581,7 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
                     "isolation": "foreign_requests_return_404",
                     "reconnect": "last_event_id_replays_progress_event",
                     "retry": "partial_failure_creates_queued_attempt_two",
-                    "expiration": "candidates_return_410_and_run_becomes_expired",
+                    "redis_loss": "candidates_recover_from_postgresql",
                 },
                 ensure_ascii=True,
             )
@@ -561,7 +596,6 @@ async def test_live_api_recovers_search_state_and_hides_foreign_resources(
             event_key,
             event_session_key,
             event_stream_key,
-            fulltext_state_key,
         )
         async with async_session_factory() as cleanup_session:
             for user_id in (owner_user_id, other_user_id):
