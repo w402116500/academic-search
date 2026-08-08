@@ -149,3 +149,39 @@ Verified backend and frontend quality gates, corrected specification drift, and 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 7: 候选审核持久化与工作区删除修复
+
+**Date**: 2026-08-09
+**Task**: 候选审核持久化与工作区删除修复
+**Branch**: `main`
+
+### Summary
+
+持久化候选审核事实，收窄 Redis 职责，并修复受保护接口删除工作区时的 SQLAlchemy autobegin 事务边界问题。
+
+### Main Changes
+
+- 候选审核、全文就绪和引用校验事实从 Redis 临时状态迁移到 PostgreSQL 持久化模型。
+- 工作区删除仓储复用已 autobegin 的请求会话事务，避免 protected route 认证读之后嵌套 session.begin()。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4767e97` | (see git log) |
+| `2d0b347` | (see git log) |
+
+### Testing
+
+- [OK] 后端全量 pytest：278 passed, 16 skipped。
+- [OK] Ruff、format、Pyright、Import Linter、source-size、alembic check、git diff --check 均已通过。
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- 父级规划任务 08-07 保持 planning [2/2 done]，按用户要求暂不归档。

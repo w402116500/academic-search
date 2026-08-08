@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 6
-- **Last Active**: 2026-08-08
+- **Total Sessions**: 7
+- **Last Active**: 2026-08-09
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~151 | Active |
+| `journal-1.md` | ~187 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 7 | 2026-08-09 | 候选审核持久化与工作区删除修复 | `4767e97`, `2d0b347` | `main` |
 | 6 | 2026-08-08 | 拆分候选审核、研究集合与 RAG 范围 | `1e99dea` | `main` |
 | 5 | 2026-08-08 | 完成研究工作区交互改进 | `ee43277`, `9691be5`, `20cba9d`, `a979751` | `main` |
 | 4 | 2026-08-07 | RAG 默认快速问答模式收尾 | `436d665` | `main` |
