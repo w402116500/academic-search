@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import {
   ArrowLeft,
-  FileStack,
   LoaderCircle,
   MessageSquareText,
   PanelLeftClose,
@@ -14,7 +13,6 @@ import { RouterLink } from "vue-router";
 import type { Conversation } from "@/api/types";
 
 defineProps<{
-  workspaceId: string;
   workspaceName: string;
   readyCount: number;
   conversations: Conversation[];
@@ -61,15 +59,6 @@ function conversationTime(value: string): string {
       >
         <Plus :size="16" /><span>新建研究对话</span>
       </button>
-      <RouterLink
-        class="research-chat-collection-link"
-        :to="{ name: 'workspace-collection', params: { workspaceId } }"
-        aria-label="打开研究集合"
-        title="打开研究集合"
-      >
-        <FileStack :size="16" />
-        <span><strong>研究集合</strong><small>查看全文、索引与范围</small></span>
-      </RouterLink>
     </div>
     <nav class="research-chat-session-list" aria-label="会话记录">
       <span class="research-chat-session-label">当前工作区</span>

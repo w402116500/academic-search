@@ -19,6 +19,7 @@ import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { useResearchQueries } from "@/api/hooks/research";
 import type { ResearchQuestionMode } from "@/api/types";
+import ResearchScopeDrawer from "@/features/research/ResearchScopeDrawer.vue";
 import {
   isResearchRunTerminal,
   useResearchProgress,
@@ -50,6 +51,8 @@ const sidebarCollapsed = ref(false);
 // 窄屏下侧栏以抽屉呈现，避免会话历史因布局压缩而不可访问。
 const mobileSidebarOpen = ref(false);
 const deleteConfirmId = ref<string | null>(null);
+const researchScopeOpen = ref(false);
+const selectedScopeDocumentId = ref<string | null>(null);
 const researchQueries = useResearchQueries(workspaceId, selectedConversationId);
 const {
   workspaceQuery,
@@ -271,7 +274,6 @@ watch(
     />
     <ConversationSidebar
       v-model:collapsed="sidebarCollapsed"
-      :workspace-id="workspaceId"
       :workspace-name="workspaceQuery.data.value?.name ?? '正在读取工作区…'"
       :ready-count="readyCount"
       :conversations="conversations"
@@ -308,6 +310,15 @@ watch(
             @click="mobileSidebarOpen = !mobileSidebarOpen"
           >
             <MessageSquareText :size="17" />
+          </button>
+          <button
+            class="icon-button research-chat-header-scope"
+            type="button"
+            aria-label="打开研究范围"
+            title="打开研究范围"
+            @click="researchScopeOpen = true"
+          >
+            <FileStack :size="17" />
           </button>
           <RouterLink
             class="secondary-button research-chat-header-collection"
@@ -598,6 +609,14 @@ watch(
         </div>
       </footer>
     </main>
+
+    <ResearchScopeDrawer
+      v-model:open="researchScopeOpen"
+      :documents="documentsQuery.data.value?.documents ?? []"
+      :loading="documentsQuery.isPending.value"
+      :error="documentsQuery.isError.value"
+      :selected-document-id="selectedScopeDocumentId"
+    />
 
     <Teleport to="body">
       <section

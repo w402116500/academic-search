@@ -6,6 +6,8 @@ import router from "@/router";
 import { pinia } from "@/stores/pinia";
 import "@/styles.css";
 import "@/features/research/research-chat.css";
+import "@/features/research/research-answer.css";
+import "@/features/research/research-scope-drawer.css";
 import "@/assets/styles/reset.css";
 import "@/assets/styles/components.css";
 import "@/features/research/research-entry.css";
