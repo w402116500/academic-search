@@ -25,7 +25,7 @@ async function openWorkspace(page: Page, onDelete: (route: Route) => Promise<voi
   await page.addInitScript(() =>
     localStorage.setItem("academic-search.access-token", "browser-test-token"),
   );
-  await page.route("http://127.0.0.1:8000/api/v1/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path.endsWith("/auth/me")) return route.fulfill({ json: user });
@@ -55,8 +55,6 @@ async function openWorkspace(page: Page, onDelete: (route: Route) => Promise<voi
 }
 
 async function openDeletionDialog(page: Page): Promise<void> {
-  const entry = page.locator(".side-workspace-entry").filter({ hasText: workspace.name });
-  await entry.hover();
   await page.getByRole("button", { name: `删除工作区 ${workspace.name}` }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
 }
@@ -107,7 +105,7 @@ test("删除中的工作区在研究入口只能继续删除", async ({ page }) 
   await page.addInitScript(() =>
     localStorage.setItem("academic-search.access-token", "browser-test-token"),
   );
-  await page.route("http://127.0.0.1:8000/api/v1/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path.endsWith("/auth/me")) return route.fulfill({ json: user });
@@ -136,7 +134,7 @@ test("侧栏中的删除中工作区不可导航，只能继续删除", async ({
   await page.addInitScript(() =>
     localStorage.setItem("academic-search.access-token", "browser-test-token"),
   );
-  await page.route("http://127.0.0.1:8000/api/v1/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path.endsWith("/auth/me")) return route.fulfill({ json: user });

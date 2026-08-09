@@ -400,6 +400,7 @@
   position: absolute;
   top: 50%;
   right: 7px;
+  z-index: 1;
   display: grid;
   width: 28px;
   height: 28px;
@@ -411,7 +412,6 @@
   color: var(--muted);
   cursor: pointer;
   opacity: 0;
-  pointer-events: none;
   transition:
     background-color 0.18s ease,
     color 0.18s ease,
@@ -420,7 +420,6 @@
 .side-workspace-entry:hover .side-workspace-delete,
 .side-workspace-entry:focus-within .side-workspace-delete {
   opacity: 1;
-  pointer-events: auto;
 }
 .side-workspace-delete:hover {
   background: #fff0f2;
@@ -430,7 +429,6 @@
   outline: 2px solid var(--blue);
   outline-offset: 2px;
   opacity: 1;
-  pointer-events: auto;
 }
 .rail-collapsed .side-workspace-entry .side-workspace-item {
   padding: 0;

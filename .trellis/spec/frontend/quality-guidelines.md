@@ -39,6 +39,11 @@ attribute checks.
 References: `frontend/playwright.config.ts`,
 `frontend/tests/e2e/auth-flow.spec.ts`.
 
+When an E2E spec mocks API traffic, intercept `**/api/v1/**` or a URL derived
+from the same frontend API base instead of hard-coding port `8000`. Local
+acceptance often runs the real API on `8001`, and a fixed-port mock can silently
+fall through to the live backend.
+
 ## Verification Scope
 
 Choose tests according to the changed behavior. Do not add live backend,
