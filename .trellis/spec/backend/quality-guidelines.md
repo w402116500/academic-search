@@ -11,7 +11,7 @@ uv run ruff format --check .
 uv run pyright
 uv run lint-imports --config ../.importlinter
 uv run python ../scripts/check_source_size.py
-uv run pytest
+uv run pytest -m "not live"
 ```
 
 References: `.github/workflows/quality.yml`, `backend/pyproject.toml`,
@@ -19,11 +19,13 @@ References: `.github/workflows/quality.yml`, `backend/pyproject.toml`,
 
 ## Test Selection
 
-`pytest` discovers tests under `backend/tests`; asynchronous tests use the
+`pytest` discovers tests under `backend/tests`; CI runs `pytest -m "not live"`
+for the ordinary offline gate. Asynchronous tests use the
 project's session-scoped event loop. The autouse fixture removes local
 literature-provider environment values from non-`live` tests. Marked live
-tests are opt-in and may reach real services, so they are not part of the
-ordinary local verification loop.
+tests are opt-in, must guard themselves with a `RUN_LIVE_*` environment flag,
+and may reach real services, so they are not part of the ordinary local
+verification loop.
 
 References: `backend/pyproject.toml`, `backend/tests/conftest.py`,
 `backend/tests/integration/test_live_search_run.py`, `AGENT.md`.

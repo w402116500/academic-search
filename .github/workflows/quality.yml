@@ -17,6 +17,9 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 20.19.6
@@ -55,7 +58,7 @@ jobs:
       - run: uv run python ../scripts/check_source_size.py
       - run: |
           if find tests -name '*.py' -print -quit | grep -q .; then
-            uv run pytest
+            uv run pytest -m "not live"
           else
             echo "No Python tests have been added yet."
           fi
@@ -65,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose --env-file infra/compose/.env.example -f infra/compose/compose.dev.yml config --quiet
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .

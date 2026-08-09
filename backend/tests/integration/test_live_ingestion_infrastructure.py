@@ -19,6 +19,19 @@ from app.infra.storage.documents import Boto3StagingObjectStorage
 from app.modules.rag.ingestion.contracts import EmbeddedVectorChunk, VectorChunk
 from pymilvus import MilvusClient
 
+_LIVE_TEST_ENVIRONMENT_FLAG = "RUN_LIVE_INGESTION_INFRASTRUCTURE_TESTS"
+
+
+def _live_tests_enabled() -> bool:
+    return os.getenv(_LIVE_TEST_ENVIRONMENT_FLAG) == "1"
+
+
+@pytest.fixture(autouse=True)
+def require_live_ingestion_infrastructure() -> None:
+    """本文件触碰 MinIO 和 Milvus，必须显式打开真实基础设施验收开关。"""
+    if not _live_tests_enabled():
+        pytest.skip(f"仅在 {_LIVE_TEST_ENVIRONMENT_FLAG}=1 时运行真实入库基础设施测试")
+
 
 @pytest.mark.live
 @pytest.mark.asyncio

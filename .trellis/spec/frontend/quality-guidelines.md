@@ -6,6 +6,10 @@ CI installs the locked pnpm dependencies, checks generated OpenAPI artifacts,
 then runs format, lint, type, unit-test, and Playwright gates. Browser tests
 install Chromium in CI.
 
+When CI enables `actions/setup-node` pnpm caching, install pnpm first with
+`pnpm/action-setup` using `frontend/package.json`; otherwise setup-node may
+try to locate pnpm before Corepack has exposed it.
+
 References: `.github/workflows/quality.yml`, `frontend/package.json`.
 
 Use the matching local scripts:

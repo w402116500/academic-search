@@ -69,7 +69,7 @@ animations. A missing Redis candidate session is returned as HTTP 410 and the ru
 Run the offline regression and static checks from `backend/`:
 
 ```powershell
-uv run pytest tests -q
+uv run pytest tests -m "not live" -q
 uv run ruff check app tests
 uv run ruff format --check app tests
 uv run pyright
