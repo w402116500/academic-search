@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 7
+- **Total Sessions**: 8
 - **Last Active**: 2026-08-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~187 | Active |
+| `journal-1.md` | ~208 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 8 | 2026-08-09 | 真实验收并修复侧栏删除命中 | `cd0335f` | `main` |
 | 7 | 2026-08-09 | 候选审核持久化与工作区删除修复 | `4767e97`, `2d0b347` | `main` |
 | 6 | 2026-08-08 | 拆分候选审核、研究集合与 RAG 范围 | `1e99dea` | `main` |
 | 5 | 2026-08-08 | 完成研究工作区交互改进 | `ee43277`, `9691be5`, `20cba9d`, `a979751` | `main` |

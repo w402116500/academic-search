@@ -185,3 +185,24 @@ Verified backend and frontend quality gates, corrected specification drift, and 
 ### Next Steps
 
 - 父级规划任务 08-07 保持 planning [2/2 done]，按用户要求暂不归档。
+
+
+## Session 8: 真实验收并修复侧栏删除命中
+
+**Date**: 2026-08-09
+**Task**: 真实验收并修复侧栏删除命中
+**Branch**: `main`
+
+### Summary
+
+完成研究范围详情与工作区永久删除的真实验收；修复侧栏工作区删除按钮被链接拦截的点击命中问题，补充端口无关 E2E mock 约定，并通过前端 api、format、lint、typecheck、unit、Playwright 与真实 API/DB 验收。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `cd0335f` | (see git log) |
+
+### Status
+
+[OK] **Completed**
